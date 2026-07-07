@@ -14,6 +14,7 @@
 <!-- Firebase (SDK compat, para uso directo con <script> sin módulos/build) -->
 <script src="https://www.gstatic.com/firebasejs/10.13.2/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.13.2/firebase-firestore-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.13.2/firebase-storage-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.13.2/firebase-analytics-compat.js"></script>
 
 <style>
@@ -28,17 +29,29 @@
   .chip-scroll { -ms-overflow-style: none; scrollbar-width: none; }
 
   @keyframes slideUp { from { transform: translateY(100%); } to { transform: translateY(0); } }
+  @keyframes slideDown { from { transform: translateY(0); } to { transform: translateY(100%); } }
   @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+  @keyframes fadeOut { from { opacity: 1; } to { opacity: 0; } }
   @keyframes popIn { from { opacity:0; transform: scale(.95) translateY(8px);} to { opacity:1; transform: scale(1) translateY(0);} }
+  @keyframes popOut { from { opacity:1; transform: scale(1) translateY(0);} to { opacity:0; transform: scale(.95) translateY(8px);} }
   @keyframes toastIn { from { opacity:0; transform: translate(-50%, 12px);} to { opacity:1; transform: translate(-50%, 0);} }
+  @keyframes cardIn { from { opacity:0; transform: translateY(10px) scale(.97);} to { opacity:1; transform: translateY(0) scale(1);} }
+  @keyframes imgPop { from { opacity:0; transform: scale(.92);} to { opacity:1; transform: scale(1);} }
+  @keyframes spinSlow { from { transform: rotate(0deg);} to { transform: rotate(360deg);} }
 
   .anim-slide-up { animation: slideUp .28s cubic-bezier(.32,.72,0,1); }
+  .anim-slide-down { animation: slideDown .22s cubic-bezier(.32,.72,0,1) forwards; }
   .anim-fade-in { animation: fadeIn .18s ease-out; }
-  .anim-pop-in { animation: popIn .18s ease-out; }
+  .anim-fade-out { animation: fadeOut .18s ease-in forwards; }
+  .anim-pop-in { animation: popIn .18s cubic-bezier(.22,1,.36,1); }
+  .anim-pop-out { animation: popOut .16s ease-in forwards; }
   .anim-toast { animation: toastIn .25s ease-out; }
+  .anim-card-in { animation: cardIn .32s cubic-bezier(.22,1,.36,1) both; }
+  .anim-img-pop { animation: imgPop .25s cubic-bezier(.22,1,.36,1); }
 
-  .card-tap { transition: transform .1s ease; }
+  .card-tap { transition: transform .15s ease, box-shadow .15s ease; }
   .card-tap:active { transform: scale(0.97); }
+  .card-tap:hover { box-shadow: 0 6px 20px -6px rgba(15,23,42,.15); }
 
   input[type="date"]::-webkit-calendar-picker-indicator { opacity: 0.6; }
 </style>
@@ -62,7 +75,7 @@
 
   <!-- Selector de bloques -->
   <div class="px-4 pb-3">
-    <button id="blockSelectorBtn" onclick="toggleBlockSelector()" class="bg-white text-slate-700 rounded-full w-11 h-11 flex items-center justify-center shadow-sm border border-slate-200 hover:bg-slate-50 transition">
+    <button id="blockSelectorBtn" onclick="toggleBlockSelector()" class="bg-white text-slate-700 rounded-full w-11 h-11 flex items-center justify-center shadow-sm border border-slate-200 hover:bg-slate-50 active:scale-90 transition">
       <i data-lucide="layers" class="w-5 h-5"></i>
     </button>
     <div id="blockSelector" class="mt-3 hidden rounded-3xl bg-white border border-slate-200 p-3 shadow-sm">
@@ -133,6 +146,10 @@
 
     <!-- Body (scrollable) -->
     <div class="flex-1 overflow-y-auto px-4 py-4 space-y-5">
+      <div>
+        <div id="productImageBox" class="card-tap relative w-full h-48 rounded-2xl overflow-hidden bg-white border border-slate-200 flex items-center justify-center cursor-pointer group" onclick="triggerProductImageUpload()"></div>
+        <input id="productImageInput" type="file" accept="image/*" capture="environment" class="hidden" onchange="handleProductImageSelected(event)">
+      </div>
       <div class="bg-white rounded-2xl p-4 border border-slate-200 space-y-3">
         <div>
           <label class="text-xs font-semibold text-slate-500">Nombre del suministro</label>
@@ -310,6 +327,7 @@ const firebaseApp = firebase.initializeApp(firebaseConfig);
 try { firebase.analytics(); } catch (e) { console.warn('Analytics no disponible:', e); }
 
 const db = firebase.firestore();
+const storage = firebase.storage();
 const productosCol = db.collection('productos');
 const bloquesCol = db.collection('bloques');
 
@@ -14452,6 +14470,30 @@ document.addEventListener('click', (e) => {
   playSound('click');
 });
 
+/* =====================================================================
+   ANIMACIÓN GENÉRICA DE CIERRE DE MODALES
+   Reutilizable por cualquier modal con la estructura:
+   <div id="modalId"><div class="overlay">...</div><div class="panel">...</div></div>
+   Anima el overlay (fade-out) y el panel (slide-down o pop-out según
+   cuál animación de entrada tenga) antes de ocultar el modal.
+===================================================================== */
+function animateModalClose(modalId, duration = 220) {
+  const modal = document.getElementById(modalId);
+  if (!modal) return;
+  const overlay = modal.querySelector(':scope > div:first-child');
+  const panel = modal.querySelector(':scope > div:last-child');
+  const usesPop = panel && panel.classList.contains('anim-pop-in');
+
+  if (overlay) overlay.classList.add('anim-fade-out');
+  if (panel) panel.classList.add(usesPop ? 'anim-pop-out' : 'anim-slide-down');
+
+  setTimeout(() => {
+    modal.classList.add('hidden');
+    if (overlay) overlay.classList.remove('anim-fade-out');
+    if (panel) panel.classList.remove('anim-slide-down', 'anim-pop-out');
+  }, duration);
+}
+
 
 /* =====================================================================
    RENDER: FILTROS
@@ -14486,8 +14528,19 @@ function renderBlockSelectorButtons() {
 function toggleBlockSelector() {
   const selector = document.getElementById('blockSelector');
   if (!selector) return;
-  selector.classList.toggle('hidden');
-  if (!selector.classList.contains('hidden')) renderBlockSelectorButtons();
+  const isHidden = selector.classList.contains('hidden');
+  if (isHidden) {
+    selector.classList.remove('hidden', 'anim-pop-out');
+    selector.classList.add('anim-pop-in');
+    renderBlockSelectorButtons();
+  } else {
+    selector.classList.remove('anim-pop-in');
+    selector.classList.add('anim-pop-out');
+    setTimeout(() => {
+      selector.classList.add('hidden');
+      selector.classList.remove('anim-pop-out');
+    }, 160);
+  }
 }
 
 function selectBlock(id) {
@@ -14610,16 +14663,16 @@ function renderBlockPanel() {
          <p class="font-semibold mb-1">Este bloque está vacío</p>
          <p class="text-xs">Agrega insumos y asígnalos a un nivel.</p>
        </div>`
-    : filteredItems.map(item => {
+    : filteredItems.map((item, idx) => {
       const product = state.products.find(p => p.codigo === item.productCode) || { nombre: 'Producto no encontrado' };
-      return `<div class="flex items-center justify-between gap-3 rounded-2xl border border-slate-200 bg-white p-3 shadow-sm">
+      return `<div class="anim-card-in card-tap flex items-center justify-between gap-3 rounded-2xl border border-slate-200 bg-white p-3 shadow-sm" style="animation-delay:${Math.min(idx * 30, 300)}ms">
         <div>
           <p class="text-xs text-slate-500">${item.productCode}</p>
           <p class="font-semibold text-slate-900">${product.nombre}</p>
         </div>
         <div class="flex items-center gap-2">
           <span class="text-[11px] font-bold uppercase tracking-[0.18em] text-slate-500">Nivel ${item.nivel}</span>
-          <button type="button" onclick="removeSupplyFromBlock('${item.id}')" class="text-slate-400 hover:text-red-600">
+          <button type="button" onclick="removeSupplyFromBlock('${item.id}')" class="text-slate-400 hover:text-red-600 active:scale-90 transition">
             <i data-lucide="trash-2" class="w-4 h-4"></i>
           </button>
         </div>
@@ -14627,19 +14680,19 @@ function renderBlockPanel() {
     }).join('');
 
   wrapper.innerHTML = `
-  <div class="mb-4 rounded-3xl bg-white border border-slate-200 shadow-sm overflow-hidden">
+  <div class="anim-card-in mb-4 rounded-3xl bg-white border border-slate-200 shadow-sm overflow-hidden">
     <div class="flex items-center justify-between gap-3 px-4 py-4 border-b border-slate-200">
       <div>
         <p class="text-xs uppercase tracking-[0.24em] text-slate-400">Bloque seleccionado</p>
         <h2 class="text-2xl font-semibold text-slate-900">Bloque ${block.id}</h2>
       </div>
-      <button type="button" onclick="closeBlockPanel()" class="rounded-2xl border border-slate-200 px-3 py-2 text-slate-500 hover:bg-slate-50">
+      <button type="button" onclick="closeBlockPanel()" class="rounded-2xl border border-slate-200 px-3 py-2 text-slate-500 hover:bg-slate-50 active:scale-90 transition">
         <i data-lucide="x" class="w-4 h-4"></i>
       </button>
     </div>
     <div class="px-4 py-4">
       <div class="mb-4">
-        <button type="button" onclick="addSupplyToBlock()" class="inline-flex items-center gap-2 rounded-full border border-slate-200 bg-white px-4 py-3 text-sm font-semibold text-slate-800 shadow-sm hover:bg-slate-50 transition">
+        <button type="button" onclick="addSupplyToBlock()" class="inline-flex items-center gap-2 rounded-full border border-slate-200 bg-white px-4 py-3 text-sm font-semibold text-slate-800 shadow-sm hover:bg-slate-50 active:scale-95 transition">
           <span class="inline-flex items-center justify-center w-8 h-8 rounded-full bg-teal-600 text-white text-lg font-bold">+</span>
           <span>Asignar medicamentos</span>
         </button>
@@ -14648,10 +14701,10 @@ function renderBlockPanel() {
         ${levels.map(level => {
           const active = sanitizedFilter === level;
           const label = level === 'todos' ? 'Todos' : `Nivel ${level}`;
-          return `<button type="button" onclick="setBlockLevelFilter('${level}')" class="rounded-full px-3 py-2 text-xs font-semibold transition ${active ? 'bg-teal-600 text-white' : 'bg-slate-100 text-slate-700 hover:bg-slate-200'}">${label}</button>`;
+          return `<button type="button" onclick="setBlockLevelFilter('${level}')" class="rounded-full px-3 py-2 text-xs font-semibold transition active:scale-90 ${active ? 'bg-teal-600 text-white' : 'bg-slate-100 text-slate-700 hover:bg-slate-200'}">${label}</button>`;
         }).join('')}
       </div>
-      <button type="button" onclick="addSupplyToBlock()" class="inline-flex items-center gap-2 rounded-2xl bg-teal-600 px-4 py-2 text-sm font-semibold text-white hover:bg-teal-700 transition">
+      <button type="button" onclick="addSupplyToBlock()" class="inline-flex items-center gap-2 rounded-2xl bg-teal-600 px-4 py-2 text-sm font-semibold text-white hover:bg-teal-700 active:scale-95 transition">
         <i data-lucide="plus" class="w-4 h-4"></i>Agregar Insumo
       </button>
     </div>
@@ -14763,7 +14816,7 @@ function badgeHTML(label, colorClasses, icon) {
   </span>`;
 }
 
-function renderProductCard(p) {
+function renderProductCard(p, index = 0) {
   const flags = getProductFlags(p);
   let badges = '';
   if (flags.hasVencido) badges += badgeHTML('Vencido', 'bg-red-50 text-red-600', 'alert-triangle');
@@ -14778,14 +14831,21 @@ function renderProductCard(p) {
   if (flags.wideMismatch) badges += badgeHTML('Fisico distinto', 'bg-emerald-50 text-emerald-700', 'alert-circle');
   badges += badgeHTML(`${p.lotes.length} lote${p.lotes.length !== 1 ? 's' : ''}`, 'bg-slate-100 text-slate-500');
   const physicalTotal = p.lotes.reduce((s, l) => s + Number(l.cantidadF || 0), 0);
+  const delay = Math.min(index, 14) * 25;
+  const thumb = p.imagenUrl
+    ? `<img src="${p.imagenUrl}" alt="${p.nombre}" loading="lazy" class="w-12 h-12 rounded-xl object-cover border border-slate-200 shrink-0" onerror="this.replaceWith(Object.assign(document.createElement('div'), { className: 'w-12 h-12 rounded-xl bg-slate-100 border border-slate-200 flex items-center justify-center shrink-0', innerHTML: '<i data-lucide=\\'package\\' class=\\'w-5 h-5 text-slate-300\\'></i>' })); lucide.createIcons();">`
+    : `<div class="w-12 h-12 rounded-xl bg-slate-100 border border-slate-200 flex items-center justify-center shrink-0"><i data-lucide="package" class="w-5 h-5 text-slate-300"></i></div>`;
 
   return `
-  <div class="card-tap bg-white rounded-2xl shadow-sm border border-slate-200 p-4 cursor-pointer" onclick="openProductDetail('${p.codigo}')">
+  <div class="anim-card-in card-tap bg-white rounded-2xl shadow-sm border border-slate-200 p-4 cursor-pointer" style="animation-delay:${delay}ms" onclick="openProductDetail('${p.codigo}')">
     <div class="flex justify-between items-start gap-3">
-      <div class="min-w-0">
-        <p class="text-[11px] font-bold text-teal-700 tracking-wide">${p.codigo}</p>
-        <h3 class="font-semibold text-slate-800 text-[15px] leading-tight truncate">${p.nombre}</h3>
-        <p class="text-xs text-slate-500 mt-0.5 truncate">${p.descripcion || 'Sin descripción'}</p>
+      <div class="flex items-start gap-3 min-w-0">
+        ${thumb}
+        <div class="min-w-0">
+          <p class="text-[11px] font-bold text-teal-700 tracking-wide">${p.codigo}</p>
+          <h3 class="font-semibold text-slate-800 text-[15px] leading-tight truncate">${p.nombre}</h3>
+          <p class="text-xs text-slate-500 mt-0.5 truncate">${p.descripcion || 'Sin descripción'}</p>
+        </div>
       </div>
       <div class="text-right shrink-0">
         <p class="text-lg font-bold text-slate-800">${flags.total}</p>
@@ -14815,7 +14875,7 @@ function renderProductList() {
     empty.classList.remove('flex');
     container.innerHTML = list
       .sort((a, b) => a.nombre.localeCompare(b.nombre))
-      .map(renderProductCard)
+      .map((p, i) => renderProductCard(p, i))
       .join('');
   }
   lucide.createIcons();
@@ -14850,11 +14910,126 @@ function openProductDetail(codigo) {
   document.getElementById('editNombre').value = p.nombre;
   document.getElementById('editDescripcion').value = p.descripcion || '';
 
+  renderProductImage(p);
   renderLotesEditor(p);
 
   document.getElementById('detailModal').classList.remove('hidden');
   playSound('open');
   lucide.createIcons();
+}
+
+/* =====================================================================
+   IMAGEN DEL PRODUCTO (Firebase Storage)
+===================================================================== */
+function renderProductImage(p, loading = false) {
+  const box = document.getElementById('productImageBox');
+  if (!box) return;
+
+  if (loading) {
+    box.innerHTML = `
+      <div class="flex flex-col items-center gap-2 text-slate-400">
+        <i data-lucide="loader-2" class="w-7 h-7 animate-spin"></i>
+        <span class="text-xs font-medium">Subiendo foto...</span>
+      </div>`;
+    lucide.createIcons();
+    return;
+  }
+
+  if (p.imagenURL) {
+    box.innerHTML = `
+      <img src="${p.imagenURL}" alt="${p.nombre}" class="anim-img-pop w-full h-full object-cover">
+      <button type="button" onclick="removeProductImage(event)" class="absolute top-2 right-2 bg-black/50 hover:bg-black/70 text-white rounded-full w-8 h-8 flex items-center justify-center active:scale-90 transition">
+        <i data-lucide="x" class="w-4 h-4"></i>
+      </button>
+      <div class="absolute bottom-2 right-2 bg-black/50 text-white text-[10px] font-semibold px-2 py-1 rounded-full flex items-center gap-1 pointer-events-none">
+        <i data-lucide="camera" class="w-3 h-3"></i> Cambiar foto
+      </div>`;
+  } else {
+    box.innerHTML = `
+      <div class="anim-fade-in flex flex-col items-center gap-2 text-slate-400">
+        <i data-lucide="image-plus" class="w-8 h-8"></i>
+        <span class="text-xs font-semibold">Toca para agregar una foto</span>
+      </div>`;
+  }
+  lucide.createIcons();
+}
+
+function triggerProductImageUpload() {
+  document.getElementById('productImageInput').click();
+}
+
+// Redimensiona y comprime la imagen en el navegador antes de subirla,
+// para ahorrar espacio de almacenamiento y datos móviles.
+function compressImageFile(file, maxDim = 900, quality = 0.75) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error('No se pudo leer el archivo'));
+    reader.onload = (e) => {
+      const img = new Image();
+      img.onerror = () => reject(new Error('No se pudo leer la imagen'));
+      img.onload = () => {
+        let { width, height } = img;
+        if (width > height && width > maxDim) { height = Math.round(height * (maxDim / width)); width = maxDim; }
+        else if (height > maxDim) { width = Math.round(width * (maxDim / height)); height = maxDim; }
+        const canvas = document.createElement('canvas');
+        canvas.width = width;
+        canvas.height = height;
+        canvas.getContext('2d').drawImage(img, 0, 0, width, height);
+        canvas.toBlob(blob => {
+          if (blob) resolve(blob);
+          else reject(new Error('No se pudo procesar la imagen'));
+        }, 'image/jpeg', quality);
+      };
+      img.src = e.target.result;
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
+async function handleProductImageSelected(event) {
+  const file = event.target.files[0];
+  event.target.value = '';
+  if (!file) return;
+
+  const p = state.products.find(x => x.codigo === state.currentCode);
+  if (!p) return;
+
+  renderProductImage(p, true);
+
+  try {
+    const blob = await compressImageFile(file);
+    const ref = storage.ref().child(`productos/${safeDocId(p.codigo)}.jpg`);
+    await ref.put(blob, { contentType: 'image/jpeg' });
+    const url = await ref.getDownloadURL();
+    p.imagenURL = url;
+    await persist(p.codigo);
+    renderProductImage(p);
+    playSound('positive');
+    showToast('Foto guardada');
+  } catch (e) {
+    console.error('Error al subir la imagen:', e);
+    showToast('No se pudo subir la foto. Revisa tu conexión.');
+    renderProductImage(p);
+  }
+}
+
+async function removeProductImage(event) {
+  event.stopPropagation();
+  const p = state.products.find(x => x.codigo === state.currentCode);
+  if (!p || !p.imagenURL) return;
+  if (!confirm('¿Eliminar la foto de este producto?')) return;
+
+  try {
+    await storage.ref().child(`productos/${safeDocId(p.codigo)}.jpg`).delete();
+  } catch (e) {
+    console.warn('No se pudo borrar el archivo en Storage (puede que ya no exista):', e);
+  }
+
+  delete p.imagenURL;
+  await persist(p.codigo);
+  renderProductImage(p);
+  playSound('negative');
+  showToast('Foto eliminada');
 }
 
 function renderLotesEditor(p) {
@@ -14917,7 +15092,7 @@ function renderLotesEditor(p) {
 }
 
 function closeDetailModal() {
-  document.getElementById('detailModal').classList.add('hidden');
+  animateModalClose('detailModal');
   state.currentCode = null;
 }
 
@@ -14999,7 +15174,7 @@ function openAddLoteModal() {
 }
 
 function closeAddLoteModal() {
-  document.getElementById('addLoteModal').classList.add('hidden');
+  animateModalClose('addLoteModal');
 }
 
 function closeAddLoteModalWithSound() {
@@ -15054,7 +15229,7 @@ function openAddProductModal() {
 }
 
 function closeAddProductModal() {
-  document.getElementById('addProductModal').classList.add('hidden');
+  animateModalClose('addProductModal');
 }
 
 function closeAddProductModalWithSound() {
