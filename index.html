@@ -56,6 +56,16 @@
     </button>
   </div>
 
+  <!-- Selector de bloques -->
+  <div class="px-4 pb-3">
+    <button id="blockSelectorBtn" onclick="toggleBlockSelector()" class="bg-white text-slate-700 rounded-full w-11 h-11 flex items-center justify-center shadow-sm border border-slate-200 hover:bg-slate-50 transition">
+      <i data-lucide="layers" class="w-5 h-5"></i>
+    </button>
+    <div id="blockSelector" class="mt-3 hidden rounded-3xl bg-white border border-slate-200 p-3 shadow-sm">
+      <div id="blockSelectorButtons" class="grid grid-cols-6 gap-2"></div>
+    </div>
+  </div>
+
   <!-- Buscador -->
   <div class="px-4 pb-3">
     <div class="relative">
@@ -75,6 +85,7 @@
     <button data-filter="bajo" onclick="setFilter('bajo')" class="filter-chip whitespace-nowrap text-xs font-semibold px-3 py-1.5 rounded-full transition"></button>
     <button data-filter="proximo" onclick="setFilter('proximo')" class="filter-chip whitespace-nowrap text-xs font-semibold px-3 py-1.5 rounded-full transition"></button>
     <button data-filter="vencido" onclick="setFilter('vencido')" class="filter-chip whitespace-nowrap text-xs font-semibold px-3 py-1.5 rounded-full transition"></button>
+    <button data-filter="fisico" onclick="setFilter('fisico')" class="filter-chip whitespace-nowrap text-xs font-semibold px-3 py-1.5 rounded-full transition"></button>
   </div>
 </header>
 
@@ -82,6 +93,7 @@
      CONTENIDO PRINCIPAL
 ============================================================ -->
 <main class="px-4 py-4 max-w-3xl mx-auto">
+  <div id="blockPanelWrapper"></div>
   <div id="resultsCount" class="text-xs text-slate-500 mb-2 font-medium"></div>
   <div id="productList" class="grid grid-cols-1 sm:grid-cols-2 gap-3"></div>
   <div id="emptyState" class="hidden flex-col items-center justify-center text-center py-16">
@@ -102,11 +114,11 @@
      MODAL: DETALLE / EDICIÓN DE PRODUCTO
 ============================================================ -->
 <div id="detailModal" class="hidden fixed inset-0 z-40">
-  <div class="absolute inset-0 bg-black/40 anim-fade-in" onclick="closeDetailModal()"></div>
+  <div class="absolute inset-0 bg-black/40 anim-fade-in" onclick="closeDetailModalWithSound()"></div>
   <div class="absolute inset-x-0 bottom-0 top-8 bg-slate-50 rounded-t-3xl anim-slide-up flex flex-col overflow-hidden">
     <!-- Header -->
     <div class="flex items-center justify-between px-4 py-3.5 border-b border-slate-200 bg-white shrink-0">
-      <button onclick="closeDetailModal()" class="p-1.5 -ml-1.5 text-slate-500 active:scale-90 transition">
+      <button onclick="closeDetailModalWithSound()" class="p-1.5 -ml-1.5 text-slate-500 active:scale-90 transition">
         <i data-lucide="chevron-down" class="w-6 h-6"></i>
       </button>
       <span id="detailCodeBadge" class="text-xs font-bold text-teal-700 bg-teal-50 px-2.5 py-1 rounded-full"></span>
@@ -152,11 +164,11 @@
      MODAL: AGREGAR PRODUCTO NUEVO
 ============================================================ -->
 <div id="addProductModal" class="hidden fixed inset-0 z-50 flex items-end sm:items-center justify-center">
-  <div class="absolute inset-0 bg-black/40 anim-fade-in" onclick="closeAddProductModal()"></div>
+  <div class="absolute inset-0 bg-black/40 anim-fade-in" onclick="closeAddProductModalWithSound()"></div>
   <div class="relative w-full sm:max-w-md bg-white rounded-t-3xl sm:rounded-3xl anim-slide-up sm:anim-pop-in max-h-[90vh] overflow-y-auto">
     <div class="px-4 pt-4 pb-2 flex items-center justify-between sticky top-0 bg-white">
       <h2 class="font-bold text-slate-800">Nuevo Suministro</h2>
-      <button onclick="closeAddProductModal()" class="p-1 text-slate-400 active:scale-90 transition"><i data-lucide="x" class="w-5 h-5"></i></button>
+      <button onclick="closeAddProductModalWithSound()" class="p-1 text-slate-400 active:scale-90 transition"><i data-lucide="x" class="w-5 h-5"></i></button>
     </div>
     <div class="px-4 pb-4 space-y-3">
       <div>
@@ -181,14 +193,26 @@
           <input id="newLoteNumero" type="text" placeholder="Ej. AK1" class="mt-1 w-full text-sm rounded-xl border border-slate-200 px-3 py-2.5 outline-none focus:ring-2 focus:ring-teal-400">
         </div>
         <div>
+          <label class="text-xs font-semibold text-slate-500">Lote físico</label>
+          <input id="newLoteFisico" type="text" placeholder="Ej. Bodega A" class="mt-1 w-full text-sm rounded-xl border border-slate-200 px-3 py-2.5 outline-none focus:ring-2 focus:ring-teal-400">
+        </div>
+        <div>
+          <label class="text-xs font-semibold text-slate-500">Cantidad F</label>
+          <input id="newLoteCantidadF" type="number" min="0" placeholder="0" class="mt-1 w-full text-sm rounded-xl border border-slate-200 px-3 py-2.5 outline-none focus:ring-2 focus:ring-teal-400">
+        </div>
+        <div>
           <label class="text-xs font-semibold text-slate-500">Cantidad *</label>
           <input id="newLoteCantidad" type="number" min="0" placeholder="0" class="mt-1 w-full text-sm rounded-xl border border-slate-200 px-3 py-2.5 outline-none focus:ring-2 focus:ring-teal-400">
+        </div>
+        <div>
+          <label class="text-xs font-semibold text-slate-500">Fecha física</label>
+          <input id="newLoteFechaFisica" type="date" class="mt-1 w-full text-sm rounded-xl border border-slate-200 px-3 py-2.5 outline-none focus:ring-2 focus:ring-teal-400">
         </div>
         <div>
           <label class="text-xs font-semibold text-slate-500">Vencimiento *</label>
           <input id="newLoteVencimiento" type="date" class="mt-1 w-full text-sm rounded-xl border border-slate-200 px-3 py-2.5 outline-none focus:ring-2 focus:ring-teal-400">
         </div>
-        <div>
+        <div class="col-span-2">
           <label class="text-xs font-semibold text-slate-500">Precio (RD$) *</label>
           <input id="newLotePrecio" type="number" min="0" step="0.01" placeholder="0.00" class="mt-1 w-full text-sm rounded-xl border border-slate-200 px-3 py-2.5 outline-none focus:ring-2 focus:ring-teal-400">
         </div>
@@ -205,11 +229,11 @@
      MODAL: AGREGAR NUEVO LOTE
 ============================================================ -->
 <div id="addLoteModal" class="hidden fixed inset-0 z-50 flex items-end sm:items-center justify-center">
-  <div class="absolute inset-0 bg-black/40 anim-fade-in" onclick="closeAddLoteModal()"></div>
+  <div class="absolute inset-0 bg-black/40 anim-fade-in" onclick="closeAddLoteModalWithSound()"></div>
   <div class="relative w-full sm:max-w-sm bg-white rounded-t-3xl sm:rounded-3xl anim-slide-up sm:anim-pop-in">
     <div class="px-4 pt-4 pb-2 flex items-center justify-between">
       <h2 class="font-bold text-slate-800">Agregar Nuevo Lote</h2>
-      <button onclick="closeAddLoteModal()" class="p-1 text-slate-400 active:scale-90 transition"><i data-lucide="x" class="w-5 h-5"></i></button>
+      <button onclick="closeAddLoteModalWithSound()" class="p-1 text-slate-400 active:scale-90 transition"><i data-lucide="x" class="w-5 h-5"></i></button>
     </div>
     <div class="px-4 pb-4 space-y-3">
       <div class="grid grid-cols-2 gap-3">
@@ -218,8 +242,20 @@
           <input id="loteNumero" type="text" placeholder="Ej. AK2" class="mt-1 w-full text-sm rounded-xl border border-slate-200 px-3 py-2.5 outline-none focus:ring-2 focus:ring-teal-400">
         </div>
         <div>
+          <label class="text-xs font-semibold text-slate-500">Lote físico</label>
+          <input id="loteFisico" type="text" placeholder="Ej. Bodega A" class="mt-1 w-full text-sm rounded-xl border border-slate-200 px-3 py-2.5 outline-none focus:ring-2 focus:ring-teal-400">
+        </div>
+        <div>
+          <label class="text-xs font-semibold text-slate-500">Cantidad F</label>
+          <input id="loteCantidadF" type="number" min="0" placeholder="0" class="mt-1 w-full text-sm rounded-xl border border-slate-200 px-3 py-2.5 outline-none focus:ring-2 focus:ring-teal-400">
+        </div>
+        <div>
           <label class="text-xs font-semibold text-slate-500">Cantidad *</label>
           <input id="loteCantidad" type="number" min="0" placeholder="0" class="mt-1 w-full text-sm rounded-xl border border-slate-200 px-3 py-2.5 outline-none focus:ring-2 focus:ring-teal-400">
+        </div>
+        <div>
+          <label class="text-xs font-semibold text-slate-500">Fecha física</label>
+          <input id="loteFechaFisica" type="date" class="mt-1 w-full text-sm rounded-xl border border-slate-200 px-3 py-2.5 outline-none focus:ring-2 focus:ring-teal-400">
         </div>
         <div>
           <label class="text-xs font-semibold text-slate-500">Vencimiento *</label>
@@ -248,7 +284,7 @@ const STORAGE_KEY = 'hospitalStockData_v1';
 const LOW_STOCK_THRESHOLD = 20;   // Unidades totales por debajo de las cuales se marca "Stock bajo"
 const EXPIRY_WARNING_DAYS = 30;   // Días antes del vencimiento para marcar "Próximo a vencer"
 
-const FILTER_LABELS = { todos: 'Todos', bajo: 'Stock bajo', proximo: 'Por vencer', vencido: 'Vencidos' };
+const FILTER_LABELS = { todos: 'Todos', bajo: 'Stock bajo', proximo: 'Por vencer', vencido: 'Vencidos', fisico: 'Diferencias físicas' };
 
 /* =====================================================================
    📋 ESPACIO PARA SOBRESCRIBIR EL INVENTARIO (opcional)
@@ -14109,12 +14145,45 @@ function buildMockData() {
 /* =====================================================================
    ESTADO
 ===================================================================== */
+const BLOCK_IDS = Array.from({ length: 26 }, (_, i) => String.fromCharCode(65 + i));
+const BLOCKS_STORAGE_KEY = 'hospitalStockBlocks_v1';
+
 let state = {
   products: [],
   filter: 'todos',
   search: '',
-  currentCode: null
+  currentCode: null,
+  selectedBlock: null,
+  blockLevelFilter: 'todos',
+  blockAddMode: null,
+  blockAddProduct: null,
+  blockProductSearch: ''
 };
+
+function initBlocks() {
+  const stored = localStorage.getItem(BLOCKS_STORAGE_KEY);
+  if (stored) {
+    try {
+      const parsed = JSON.parse(stored);
+      if (Array.isArray(parsed) && parsed.length === BLOCK_IDS.length) {
+        state.blocks = parsed;
+        return;
+      }
+    } catch (e) {
+      console.error('Error al leer bloques del localStorage, se reinician.', e);
+    }
+  }
+  state.blocks = BLOCK_IDS.map(id => ({ id, items: [] }));
+  persistBlocks();
+}
+
+function persistBlocks() {
+  localStorage.setItem(BLOCKS_STORAGE_KEY, JSON.stringify(state.blocks));
+}
+
+function getBlock(id) {
+  return state.blocks.find(b => b.id === id);
+}
 
 /* =====================================================================
    PERSISTENCIA (localStorage)
@@ -14124,6 +14193,7 @@ function initData() {
   if (stored) {
     try {
       state.products = JSON.parse(stored);
+      initBlocks();
       return;
     } catch (e) {
       console.error('Error al leer localStorage, se reinicializan los datos.', e);
@@ -14131,6 +14201,7 @@ function initData() {
   }
   state.products = INVENTARIO_PERSONALIZADO.length > 0 ? INVENTARIO_PERSONALIZADO : buildMockData();
   persist();
+  initBlocks();
 }
 
 function persist() {
@@ -14167,6 +14238,11 @@ function getProductFlags(product) {
     total,
     hasVencido: product.lotes.some(l => getLoteStatus(l) === 'vencido'),
     hasProximo: product.lotes.some(l => getLoteStatus(l) === 'proximo'),
+    // counts for badges
+    expiredCount: product.lotes.reduce((c, l) => c + (getLoteStatus(l) === 'vencido' ? 1 : 0), 0),
+    physicalHigherCount: product.lotes.reduce((c, l) => c + (Number(l.cantidadF || 0) > Number(l.cantidad || 0) ? 1 : 0), 0),
+    physicalLowerCount: product.lotes.reduce((c, l) => c + (Number(l.cantidadF || 0) < Number(l.cantidad || 0) ? 1 : 0), 0),
+    wideMismatch: product.lotes.some(l => Number(l.cantidadF || 0) !== Number(l.cantidad || 0)),
     lowStock: total < LOW_STOCK_THRESHOLD
   };
 }
@@ -14180,6 +14256,65 @@ function formatDate(iso) {
 function formatMoney(n) {
   return Number(n || 0).toLocaleString('es-DO', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
+
+/* =====================================================================
+   SONIDOS (WebAudio)
+===================================================================== */
+function initSounds() {
+  try {
+    window._ac = new (window.AudioContext || window.webkitAudioContext)();
+  } catch (e) {
+    window._ac = null;
+  }
+  window._suppressClickSound = false;
+}
+
+function playTone(freq = 440, duration = 0.08, type = 'sine') {
+  if (!window._ac) return;
+  const o = window._ac.createOscillator();
+  const g = window._ac.createGain();
+  o.type = type;
+  o.frequency.value = freq;
+  g.gain.value = 0.0001;
+  o.connect(g);
+  g.connect(window._ac.destination);
+  const now = window._ac.currentTime;
+  g.gain.exponentialRampToValueAtTime(0.2, now + 0.01);
+  g.gain.exponentialRampToValueAtTime(0.0001, now + duration);
+  o.start(now);
+  o.stop(now + duration + 0.02);
+}
+
+function playClick() { playTone(1000, 0.05, 'square'); }
+function playOpen() { playTone(660, 0.12, 'sine'); }
+function playClose() { playTone(220, 0.14, 'sine'); }
+function playPositive() { playTone(880, 0.14, 'sine'); }
+function playNegative() { playTone(220, 0.18, 'sawtooth'); }
+
+function playSound(name) {
+  if (!window._ac) initSounds();
+  // when non-click sounds are played programmatically, suppress the next global click sound
+  if (['open','close','positive','negative','action'].includes(name)) window._suppressClickSound = true;
+  switch(name) {
+    case 'click': return playClick();
+    case 'open': return playOpen();
+    case 'close': return playClose();
+    case 'positive': return playPositive();
+    case 'negative': return playNegative();
+    case 'action': return playTone(520, 0.12, 'triangle');
+    default: return playClick();
+  }
+}
+
+// Attach a global click handler to play click sounds for button interactions,
+// but skip one if suppressed by a programmatic sound call.
+document.addEventListener('click', (e) => {
+  const btn = e.target.closest && e.target.closest('button');
+  if (!btn) return;
+  if (window._suppressClickSound) { window._suppressClickSound = false; return; }
+  playSound('click');
+});
+
 
 /* =====================================================================
    RENDER: FILTROS
@@ -14201,6 +14336,260 @@ function setFilter(key) {
   renderProductList();
 }
 
+function renderBlockSelectorButtons() {
+  const container = document.getElementById('blockSelectorButtons');
+  if (!container) return;
+  container.innerHTML = BLOCK_IDS.map(id => {
+    const active = state.selectedBlock === id;
+    return `<button type="button" onclick="selectBlock('${id}')" class="rounded-full text-xs font-semibold px-3 py-2 border transition ${active ? 'bg-teal-600 text-white border-teal-500' : 'bg-slate-100 text-slate-700 border-slate-200 hover:bg-slate-50'}">Bloque ${id}</button>`;
+  }).join('');
+  lucide.createIcons();
+}
+
+function toggleBlockSelector() {
+  const selector = document.getElementById('blockSelector');
+  if (!selector) return;
+  selector.classList.toggle('hidden');
+  if (!selector.classList.contains('hidden')) renderBlockSelectorButtons();
+}
+
+function selectBlock(id) {
+  if (state.selectedBlock === id) {
+    closeBlockPanel();
+    return;
+  }
+  state.selectedBlock = id;
+  state.blockLevelFilter = 'todos';
+  state.blockAddMode = null;
+  state.blockAddProduct = null;
+  state.blockProductSearch = '';
+  const selector = document.getElementById('blockSelector');
+  if (selector) selector.classList.add('hidden');
+  renderBlockSelectorButtons();
+  renderBlockPanel();
+}
+
+function setBlockLevelFilter(level) {
+  state.blockLevelFilter = level;
+  renderBlockPanel();
+}
+
+function addSupplyToBlock() {
+  if (!state.selectedBlock) return;
+  state.blockAddMode = 'selectProduct';
+  state.blockAddProduct = null;
+  state.blockProductSearch = '';
+  renderBlockPanel();
+}
+
+function updateBlockProductSearch(value) {
+  state.blockProductSearch = value;
+  renderBlockPanel();
+}
+
+function startBlockAddProduct(productCode) {
+  const product = state.products.find(p => p.codigo === productCode);
+  if (!product) return;
+  state.blockAddMode = 'selectLevel';
+  state.blockAddProduct = productCode;
+  renderBlockPanel();
+}
+
+function cancelBlockAdd() {
+  state.blockAddMode = null;
+  state.blockAddProduct = null;
+  state.blockProductSearch = '';
+  renderBlockPanel();
+}
+
+function backToBlockProductSelection() {
+  state.blockAddMode = 'selectProduct';
+  state.blockAddProduct = null;
+  renderBlockPanel();
+}
+
+function confirmBlockLevelAssignment(nivel) {
+  const block = getBlock(state.selectedBlock);
+  const productCode = state.blockAddProduct;
+  if (!block || !productCode) return;
+  const alreadyExists = (block.items || []).some(item => item.productCode === productCode);
+  if (alreadyExists) {
+    showToast('Este insumo ya está asignado en este bloque');
+    return;
+  }
+  block.items.push({ id: generateId('blockitem'), productCode, nivel });
+  state.blockAddMode = null;
+  state.blockAddProduct = null;
+  persistBlocks();
+  playSound('positive');
+  renderBlockPanel();
+}
+
+function removeSupplyFromBlock(itemId) {
+  const block = getBlock(state.selectedBlock);
+  if (!block) return;
+  block.items = block.items.filter(item => item.id !== itemId);
+  persistBlocks();
+  renderBlockPanel();
+}
+
+function closeBlockPanel() {
+  state.selectedBlock = null;
+  state.blockLevelFilter = 'todos';
+  state.blockAddMode = null;
+  state.blockAddProduct = null;
+  renderBlockPanel();
+}
+
+function renderBlockPanel() {
+  const wrapper = document.getElementById('blockPanelWrapper');
+  const resultsCount = document.getElementById('resultsCount');
+  const productList = document.getElementById('productList');
+  const emptyState = document.getElementById('emptyState');
+  if (!wrapper) return;
+  if (!state.selectedBlock) {
+    wrapper.innerHTML = '';
+    if (resultsCount) resultsCount.classList.remove('hidden');
+    if (productList) productList.classList.remove('hidden');
+    if (emptyState && productList && productList.innerHTML.trim().length === 0) {
+      emptyState.classList.remove('hidden');
+      emptyState.classList.add('flex');
+    }
+    return;
+  }
+  if (resultsCount) resultsCount.classList.add('hidden');
+  if (productList) productList.classList.add('hidden');
+  if (emptyState) {
+    emptyState.classList.add('hidden');
+    emptyState.classList.remove('flex');
+  }
+
+  const block = getBlock(state.selectedBlock);
+  const levels = ['todos', '1', '2', '3', '4'];
+  const sanitizedFilter = state.blockLevelFilter;
+  const filteredItems = (block.items || []).filter(item => sanitizedFilter === 'todos' || item.nivel === Number(sanitizedFilter));
+  const listHtml = filteredItems.length === 0
+    ? `<div class="rounded-3xl border border-dashed border-slate-200 bg-slate-50 p-6 text-center text-slate-500">
+         <p class="font-semibold mb-1">Este bloque está vacío</p>
+         <p class="text-xs">Agrega insumos y asígnalos a un nivel.</p>
+       </div>`
+    : filteredItems.map(item => {
+      const product = state.products.find(p => p.codigo === item.productCode) || { nombre: 'Producto no encontrado' };
+      return `<div class="flex items-center justify-between gap-3 rounded-2xl border border-slate-200 bg-white p-3 shadow-sm">
+        <div>
+          <p class="text-xs text-slate-500">${item.productCode}</p>
+          <p class="font-semibold text-slate-900">${product.nombre}</p>
+        </div>
+        <div class="flex items-center gap-2">
+          <span class="text-[11px] font-bold uppercase tracking-[0.18em] text-slate-500">Nivel ${item.nivel}</span>
+          <button type="button" onclick="removeSupplyFromBlock('${item.id}')" class="text-slate-400 hover:text-red-600">
+            <i data-lucide="trash-2" class="w-4 h-4"></i>
+          </button>
+        </div>
+      </div>`;
+    }).join('');
+
+  wrapper.innerHTML = `
+  <div class="mb-4 rounded-3xl bg-white border border-slate-200 shadow-sm overflow-hidden">
+    <div class="flex items-center justify-between gap-3 px-4 py-4 border-b border-slate-200">
+      <div>
+        <p class="text-xs uppercase tracking-[0.24em] text-slate-400">Bloque seleccionado</p>
+        <h2 class="text-2xl font-semibold text-slate-900">Bloque ${block.id}</h2>
+      </div>
+      <button type="button" onclick="closeBlockPanel()" class="rounded-2xl border border-slate-200 px-3 py-2 text-slate-500 hover:bg-slate-50">
+        <i data-lucide="x" class="w-4 h-4"></i>
+      </button>
+    </div>
+    <div class="px-4 py-4">
+      <div class="mb-4">
+        <button type="button" onclick="addSupplyToBlock()" class="inline-flex items-center gap-2 rounded-full border border-slate-200 bg-white px-4 py-3 text-sm font-semibold text-slate-800 shadow-sm hover:bg-slate-50 transition">
+          <span class="inline-flex items-center justify-center w-8 h-8 rounded-full bg-teal-600 text-white text-lg font-bold">+</span>
+          <span>Asignar medicamentos</span>
+        </button>
+      </div>
+      <div class="flex flex-wrap gap-2 mb-4">
+        ${levels.map(level => {
+          const active = sanitizedFilter === level;
+          const label = level === 'todos' ? 'Todos' : `Nivel ${level}`;
+          return `<button type="button" onclick="setBlockLevelFilter('${level}')" class="rounded-full px-3 py-2 text-xs font-semibold transition ${active ? 'bg-teal-600 text-white' : 'bg-slate-100 text-slate-700 hover:bg-slate-200'}">${label}</button>`;
+        }).join('')}
+      </div>
+      <button type="button" onclick="addSupplyToBlock()" class="inline-flex items-center gap-2 rounded-2xl bg-teal-600 px-4 py-2 text-sm font-semibold text-white hover:bg-teal-700 transition">
+        <i data-lucide="plus" class="w-4 h-4"></i>Agregar Insumo
+      </button>
+    </div>
+    ${state.blockAddMode === 'selectProduct' ? renderBlockProductSelection() : ''}
+    ${state.blockAddMode === 'selectLevel' ? renderBlockLevelSelection() : ''}
+    <div class="px-4 pb-4">
+      <div class="grid gap-3">
+        ${listHtml}
+      </div>
+    </div>
+  </div>`;
+  lucide.createIcons();
+}
+
+function renderBlockLevelSelection() {
+  const productCode = state.blockAddProduct;
+  const product = state.products.find(p => p.codigo === productCode) || { nombre: 'Producto no encontrado', codigo: productCode };
+  return `
+    <div class="px-4 pb-4">
+      <div class="rounded-2xl border border-slate-200 bg-slate-50 p-3 mb-3">
+        <p class="text-xs text-slate-500">${product.codigo}</p>
+        <p class="font-semibold text-slate-900">${product.nombre}</p>
+      </div>
+      <div class="mb-3 text-sm font-semibold text-slate-700">¿A qué nivel desea asignarlo?</div>
+      <div class="grid grid-cols-2 gap-2 mb-3">
+        ${[1, 2, 3, 4].map(nivel => `
+          <button type="button" onclick="confirmBlockLevelAssignment(${nivel})" class="rounded-2xl border border-slate-200 bg-white py-3 text-sm font-semibold text-slate-800 shadow-sm hover:bg-teal-50 hover:border-teal-300 transition">
+            Nivel ${nivel}
+          </button>
+        `).join('')}
+      </div>
+      <button type="button" onclick="backToBlockProductSelection()" class="inline-flex items-center gap-1.5 text-xs font-semibold text-slate-500 hover:text-slate-700">
+        <i data-lucide="arrow-left" class="w-3.5 h-3.5"></i> Elegir otro medicamento
+      </button>
+    </div>
+  `;
+}
+
+function renderBlockProductSelection() {
+  const query = (state.blockProductSearch || '').trim().toLowerCase();
+  const availableProducts = state.products
+    .filter(product => {
+      if (!query) return true;
+      return product.nombre.toLowerCase().includes(query) ||
+        (product.descripcion || '').toLowerCase().includes(query) ||
+        product.codigo.toLowerCase().includes(query);
+    })
+    .sort((a, b) => a.nombre.localeCompare(b.nombre));
+
+  const available = availableProducts.length === 0
+    ? `<div class="rounded-2xl border border-slate-200 bg-slate-50 p-4 text-sm text-slate-500 text-center">No se encontraron medicamentos con ese término.</div>`
+    : availableProducts.map(product => `
+      <button type="button" onclick="startBlockAddProduct('${product.codigo}')" class="text-left rounded-2xl border border-slate-200 bg-slate-50 p-3 shadow-sm hover:bg-slate-100 transition">
+        <p class="text-xs text-slate-500">${product.codigo}</p>
+        <p class="font-semibold text-slate-900">${product.nombre}</p>
+        <p class="text-xs text-slate-500 mt-1">${product.descripcion || 'Sin descripción'}</p>
+      </button>
+    `).join('');
+
+  return `
+    <div class="px-4 pb-4">
+      <div class="mb-3 text-sm font-semibold text-slate-700">Seleccione el medicamento</div>
+      <div class="relative mb-3">
+        <input id="blockProductSearchInput" type="text" value="${state.blockProductSearch || ''}" oninput="updateBlockProductSearch(this.value)"
+          placeholder="Buscar medicamento..."
+          class="w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-800 outline-none focus:border-teal-400 focus:ring-2 focus:ring-teal-200" />
+      </div>
+      <div class="grid gap-2">${available}</div>
+      <button type="button" onclick="cancelBlockAdd()" class="mt-3 text-xs font-semibold text-slate-500 hover:text-slate-700">
+        Cancelar
+      </button>
+    </div>
+  `;
+}
+
 /* =====================================================================
    RENDER: LISTA DE PRODUCTOS
 ===================================================================== */
@@ -14213,7 +14602,10 @@ function getFilteredProducts() {
       const matchesText = p.nombre.toLowerCase().includes(q) ||
         (p.descripcion || '').toLowerCase().includes(q) ||
         p.codigo.toLowerCase().includes(q) ||
-        p.lotes.some(l => l.numeroLote.toLowerCase().includes(q));
+        p.lotes.some(l =>
+          l.numeroLote.toLowerCase().includes(q) ||
+          (l.loteFisico || '').toLowerCase().includes(q)
+        );
       if (!matchesText) return false;
     }
 
@@ -14223,6 +14615,7 @@ function getFilteredProducts() {
     if (state.filter === 'bajo') return flags.lowStock;
     if (state.filter === 'proximo') return flags.hasProximo;
     if (state.filter === 'vencido') return flags.hasVencido;
+    if (state.filter === 'fisico') return flags.wideMismatch;
     return true;
   });
 }
@@ -14239,7 +14632,15 @@ function renderProductCard(p) {
   if (flags.hasVencido) badges += badgeHTML('Vencido', 'bg-red-50 text-red-600', 'alert-triangle');
   if (flags.hasProximo) badges += badgeHTML('Por vencer', 'bg-amber-50 text-amber-600', 'clock');
   if (flags.lowStock) badges += badgeHTML('Stock bajo', 'bg-orange-50 text-orange-600', 'trending-down');
+  // expired lots count (pink)
+  if (flags.expiredCount && flags.expiredCount > 0) badges += badgeHTML(`${flags.expiredCount}`, 'bg-pink-50 text-pink-700');
+  // physical higher count (green)
+  if (flags.physicalHigherCount && flags.physicalHigherCount > 0) badges += badgeHTML(`${flags.physicalHigherCount}`, 'bg-emerald-50 text-emerald-700');
+  // physical lower count (red)
+  if (flags.physicalLowerCount && flags.physicalLowerCount > 0) badges += badgeHTML(`${flags.physicalLowerCount}`, 'bg-rose-50 text-rose-700');
+  if (flags.wideMismatch) badges += badgeHTML('Fisico distinto', 'bg-emerald-50 text-emerald-700', 'alert-circle');
   badges += badgeHTML(`${p.lotes.length} lote${p.lotes.length !== 1 ? 's' : ''}`, 'bg-slate-100 text-slate-500');
+  const physicalTotal = p.lotes.reduce((s, l) => s + Number(l.cantidadF || 0), 0);
 
   return `
   <div class="card-tap bg-white rounded-2xl shadow-sm border border-slate-200 p-4 cursor-pointer" onclick="openProductDetail('${p.codigo}')">
@@ -14251,7 +14652,9 @@ function renderProductCard(p) {
       </div>
       <div class="text-right shrink-0">
         <p class="text-lg font-bold text-slate-800">${flags.total}</p>
-        <p class="text-[9px] text-slate-400 uppercase tracking-wide">unidades</p>
+        <p class="text-[9px] text-slate-400 uppercase tracking-wide">Sistema</p>
+        <p class="text-sm font-semibold text-slate-700 mt-1">${physicalTotal}</p>
+        <p class="text-[9px] text-slate-400 uppercase tracking-wide">Físico</p>
       </div>
     </div>
     <div class="flex flex-wrap gap-1.5 mt-3">${badges}</div>
@@ -14313,6 +14716,7 @@ function openProductDetail(codigo) {
   renderLotesEditor(p);
 
   document.getElementById('detailModal').classList.remove('hidden');
+  playSound('open');
   lucide.createIcons();
 }
 
@@ -14326,11 +14730,15 @@ function renderLotesEditor(p) {
       badgeHTML('Vigente', 'bg-emerald-50 text-emerald-600', 'check');
 
     return `
-    <div class="bg-white rounded-2xl border border-slate-200 p-3.5" data-lote-id="${l.id}">
+    <div class="bg-white rounded-2xl border border-slate-200 p-3.5 ${Number(l.cantidadF || 0) > Number(l.cantidad || 0) ? 'bg-emerald-50/80' : Number(l.cantidadF || 0) < Number(l.cantidad || 0) ? 'bg-rose-50/80' : ''}" data-lote-id="${l.id}">
       <div class="flex items-center justify-between mb-2.5">
         <span class="text-xs font-bold text-slate-600">Lote</span>
         <div class="flex items-center gap-2">
           ${statusBadge}
+          <label class="flex items-center gap-1 text-[11px] text-slate-500">
+            <input type="checkbox" class="lote-coincide" onchange="toggleLoteCoincide(this)" ${Number(l.cantidadF || 0) === Number(l.cantidad || 0) ? 'checked' : ''}>
+            <span>Coincide</span>
+          </label>
           <button onclick="deleteLote('${l.id}')" class="text-slate-300 hover:text-red-500 active:scale-90 transition">
             <i data-lucide="trash-2" class="w-4 h-4"></i>
           </button>
@@ -14342,8 +14750,20 @@ function renderLotesEditor(p) {
           <input type="text" class="lote-numero mt-0.5 w-full text-sm rounded-lg border border-slate-200 px-2.5 py-2 outline-none focus:ring-2 focus:ring-teal-400" value="${l.numeroLote}">
         </div>
         <div>
+          <label class="text-[10px] font-semibold text-slate-400 uppercase">Lote físico</label>
+          <input type="text" class="lote-fisico mt-0.5 w-full text-sm rounded-lg border border-slate-200 px-2.5 py-2 outline-none focus:ring-2 focus:ring-teal-400" value="${l.loteFisico || ''}">
+        </div>
+        <div>
+          <label class="text-[10px] font-semibold text-slate-400 uppercase">Cantidad F</label>
+          <input type="number" min="0" class="lote-cantidad-f mt-0.5 w-full text-sm rounded-lg border border-slate-200 px-2.5 py-2 outline-none focus:ring-2 focus:ring-teal-400" value="${l.cantidadF || 0}" ${Number(l.cantidadF || 0) === Number(l.cantidad || 0) ? 'disabled' : ''}>
+        </div>
+        <div>
           <label class="text-[10px] font-semibold text-slate-400 uppercase">Cantidad</label>
-          <input type="number" min="0" class="lote-cantidad mt-0.5 w-full text-sm rounded-lg border border-slate-200 px-2.5 py-2 outline-none focus:ring-2 focus:ring-teal-400" value="${l.cantidad}">
+          <input type="number" min="0" onchange="syncIfCoincide(this)" class="lote-cantidad mt-0.5 w-full text-sm rounded-lg border border-slate-200 px-2.5 py-2 outline-none focus:ring-2 focus:ring-teal-400" value="${l.cantidad}">
+        </div>
+        <div>
+          <label class="text-[10px] font-semibold text-slate-400 uppercase">Fecha física</label>
+          <input type="date" class="lote-fecha-fisica mt-0.5 w-full text-sm rounded-lg border border-slate-200 px-2.5 py-2 outline-none focus:ring-2 focus:ring-teal-400" value="${l.fechaFisica || ''}" ${l.fechaFisica === l.fechaVencimiento ? 'disabled' : ''}>
         </div>
         <div>
           <label class="text-[10px] font-semibold text-slate-400 uppercase">Precio (RD$)</label>
@@ -14351,7 +14771,7 @@ function renderLotesEditor(p) {
         </div>
         <div class="col-span-2">
           <label class="text-[10px] font-semibold text-slate-400 uppercase">Vencimiento</label>
-          <input type="date" class="lote-vencimiento mt-0.5 w-full text-sm rounded-lg border border-slate-200 px-2.5 py-2 outline-none focus:ring-2 focus:ring-teal-400" value="${l.fechaVencimiento}">
+          <input type="date" onchange="syncIfCoincide(this)" class="lote-vencimiento mt-0.5 w-full text-sm rounded-lg border border-slate-200 px-2.5 py-2 outline-none focus:ring-2 focus:ring-teal-400" value="${l.fechaVencimiento}">
         </div>
       </div>
     </div>`;
@@ -14362,6 +14782,11 @@ function renderLotesEditor(p) {
 function closeDetailModal() {
   document.getElementById('detailModal').classList.add('hidden');
   state.currentCode = null;
+}
+
+function closeDetailModalWithSound() {
+  closeDetailModal();
+  playSound('close');
 }
 
 function saveProductChanges() {
@@ -14377,15 +14802,19 @@ function saveProductChanges() {
     const lote = p.lotes.find(l => l.id === id);
     if (!lote) return;
     lote.numeroLote = row.querySelector('.lote-numero').value.trim() || lote.numeroLote;
+    lote.loteFisico = row.querySelector('.lote-fisico').value.trim() || lote.loteFisico || '';
+    lote.cantidadF = Number(row.querySelector('.lote-cantidad-f').value) || 0;
     lote.cantidad = Number(row.querySelector('.lote-cantidad').value) || 0;
+    lote.fechaFisica = row.querySelector('.lote-fecha-fisica').value || lote.fechaFisica || '';
     lote.precio = Number(row.querySelector('.lote-precio').value) || 0;
     lote.fechaVencimiento = row.querySelector('.lote-vencimiento').value || lote.fechaVencimiento;
   });
 
   persist();
   renderProductList();
+  playSound('positive');
   showToast('Cambios guardados correctamente');
-  closeDetailModal();
+  closeDetailModalWithSound();
 }
 
 function deleteLote(loteId) {
@@ -14400,6 +14829,7 @@ function deleteLote(loteId) {
   persist();
   renderLotesEditor(p);
   renderProductList();
+  playSound('negative');
   showToast('Lote eliminado');
 }
 
@@ -14410,8 +14840,9 @@ function requestDeleteProduct() {
   state.products = state.products.filter(x => x.codigo !== state.currentCode);
   persist();
   renderProductList();
+  playSound('negative');
   showToast('Suministro eliminado');
-  closeDetailModal();
+  closeDetailModalWithSound();
 }
 
 /* =====================================================================
@@ -14420,18 +14851,30 @@ function requestDeleteProduct() {
 function openAddLoteModal() {
   document.getElementById('loteNumero').value = '';
   document.getElementById('loteCantidad').value = '';
+  document.getElementById('loteCantidadF').value = '';
+  document.getElementById('loteFisico').value = '';
+  document.getElementById('loteFechaFisica').value = '';
   document.getElementById('loteVencimiento').value = '';
   document.getElementById('lotePrecio').value = '';
   document.getElementById('addLoteModal').classList.remove('hidden');
+  playSound('open');
 }
 
 function closeAddLoteModal() {
   document.getElementById('addLoteModal').classList.add('hidden');
 }
 
+function closeAddLoteModalWithSound() {
+  closeAddLoteModal();
+  playSound('close');
+}
+
 function submitAddLote() {
   const numero = document.getElementById('loteNumero').value.trim();
   const cantidad = document.getElementById('loteCantidad').value;
+  const cantidadF = document.getElementById('loteCantidadF').value;
+  const loteFisico = document.getElementById('loteFisico').value.trim();
+  const fechaFisica = document.getElementById('loteFechaFisica').value;
   const vencimiento = document.getElementById('loteVencimiento').value;
   const precio = document.getElementById('lotePrecio').value;
 
@@ -14446,7 +14889,10 @@ function submitAddLote() {
   p.lotes.push({
     id: generateId('lote'),
     numeroLote: numero,
+    loteFisico,
+    cantidadF: Number(cantidadF) || 0,
     cantidad: Number(cantidad),
+    fechaFisica: fechaFisica || '',
     fechaVencimiento: vencimiento,
     precio: Number(precio)
   });
@@ -14454,7 +14900,8 @@ function submitAddLote() {
   persist();
   renderLotesEditor(p);
   renderProductList();
-  closeAddLoteModal();
+  closeAddLoteModalWithSound();
+  playSound('action');
   showToast(`Lote "${numero}" agregado`);
 }
 
@@ -14462,13 +14909,19 @@ function submitAddLote() {
    AGREGAR PRODUCTO NUEVO
 ===================================================================== */
 function openAddProductModal() {
-  ['newCodigo', 'newNombre', 'newDescripcion', 'newLoteNumero', 'newLoteCantidad', 'newLoteVencimiento', 'newLotePrecio']
+  ['newCodigo', 'newNombre', 'newDescripcion', 'newLoteNumero', 'newLoteCantidad', 'newLoteCantidadF', 'newLoteFisico', 'newLoteFechaFisica', 'newLoteVencimiento', 'newLotePrecio']
     .forEach(id => document.getElementById(id).value = '');
   document.getElementById('addProductModal').classList.remove('hidden');
+  playSound('open');
 }
 
 function closeAddProductModal() {
   document.getElementById('addProductModal').classList.add('hidden');
+}
+
+function closeAddProductModalWithSound() {
+  closeAddProductModal();
+  playSound('close');
 }
 
 function submitAddProduct() {
@@ -14477,6 +14930,9 @@ function submitAddProduct() {
   const descripcion = document.getElementById('newDescripcion').value.trim();
   const loteNumero = document.getElementById('newLoteNumero').value.trim();
   const loteCantidad = document.getElementById('newLoteCantidad').value;
+  const loteCantidadF = document.getElementById('newLoteCantidadF').value;
+  const loteFisico = document.getElementById('newLoteFisico').value.trim();
+  const loteFechaFisica = document.getElementById('newLoteFechaFisica').value;
   const loteVencimiento = document.getElementById('newLoteVencimiento').value;
   const lotePrecio = document.getElementById('newLotePrecio').value;
 
@@ -14497,7 +14953,10 @@ function submitAddProduct() {
     lotes: [{
       id: generateId('lote'),
       numeroLote: loteNumero,
+      loteFisico,
+      cantidadF: Number(loteCantidadF) || 0,
       cantidad: Number(loteCantidad),
+      fechaFisica: loteFechaFisica || '',
       fechaVencimiento: loteVencimiento,
       precio: Number(lotePrecio)
     }]
@@ -14505,13 +14964,46 @@ function submitAddProduct() {
 
   persist();
   renderProductList();
-  closeAddProductModal();
+  closeAddProductModalWithSound();
+  playSound('action');
   showToast(`"${nombre}" agregado correctamente`);
 }
 
 /* =====================================================================
    EXPORTAR A EXCEL
 ===================================================================== */
+function toggleLoteCoincide(checkbox) {
+  const row = checkbox.closest('[data-lote-id]');
+  if (!row) return;
+  const isChecked = checkbox.checked;
+  const cantidadEl = row.querySelector('.lote-cantidad');
+  const cantidadFEl = row.querySelector('.lote-cantidad-f');
+  const vencEl = row.querySelector('.lote-vencimiento');
+  const fechaFisEl = row.querySelector('.lote-fecha-fisica');
+  const cantidad = Number(cantidadEl.value) || 0;
+  const fecha = vencEl.value || '';
+  if (isChecked) {
+    if (cantidadFEl) { cantidadFEl.value = cantidad; cantidadFEl.disabled = true; }
+    if (fechaFisEl) { fechaFisEl.value = fecha; fechaFisEl.disabled = true; }
+  } else {
+    if (cantidadFEl) { cantidadFEl.disabled = false; }
+    if (fechaFisEl) { fechaFisEl.disabled = false; }
+  }
+}
+
+function syncIfCoincide(el) {
+  const row = el.closest('[data-lote-id]');
+  if (!row) return;
+  const coincide = row.querySelector('.lote-coincide');
+  if (!coincide || !coincide.checked) return;
+  const cantidad = Number(row.querySelector('.lote-cantidad').value) || 0;
+  const venc = row.querySelector('.lote-vencimiento').value || '';
+  const cantidadFEl = row.querySelector('.lote-cantidad-f');
+  const fechaFisEl = row.querySelector('.lote-fecha-fisica');
+  if (cantidadFEl) cantidadFEl.value = cantidad;
+  if (fechaFisEl) fechaFisEl.value = venc;
+}
+
 function exportStock() {
   if (state.products.length === 0) {
     showToast('No hay datos para exportar');
@@ -14570,6 +15062,8 @@ document.addEventListener('DOMContentLoaded', () => {
   initData();
   renderFilterChips();
   renderProductList();
+  renderBlockSelectorButtons();
+  renderBlockPanel();
   lucide.createIcons();
 });
 </script>
