@@ -11,6 +11,10 @@
 <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.js"></script>
 <!-- SheetJS (exportación a Excel) -->
 <script src="https://cdn.jsdelivr.net/npm/xlsx/dist/xlsx.full.min.js"></script>
+<!-- Firebase (SDK compat, para uso directo con <script> sin módulos/build) -->
+<script src="https://www.gstatic.com/firebasejs/10.13.2/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.13.2/firebase-firestore-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.13.2/firebase-analytics-compat.js"></script>
 
 <style>
   * { -webkit-tap-highlight-color: transparent; }
@@ -147,6 +151,9 @@
             <i data-lucide="plus" class="w-3.5 h-3.5"></i> Agregar Lote
           </button>
         </div>
+        <p class="text-[11px] text-amber-600 font-semibold mb-2 flex items-center gap-1">
+          <i data-lucide="map-pin" class="w-3 h-3"></i> En ámbar: campos del conteo físico
+        </p>
         <div id="lotesContainer" class="space-y-3"></div>
       </div>
     </div>
@@ -186,6 +193,9 @@
 
       <div class="pt-2 border-t border-slate-100">
         <p class="text-xs font-bold text-slate-500 uppercase mt-2 mb-1">Primer lote</p>
+        <p class="text-[11px] text-amber-600 font-semibold mb-1 flex items-center gap-1">
+          <i data-lucide="map-pin" class="w-3 h-3"></i> En ámbar: campos del conteo físico
+        </p>
       </div>
       <div class="grid grid-cols-2 gap-3">
         <div>
@@ -193,20 +203,20 @@
           <input id="newLoteNumero" type="text" placeholder="Ej. AK1" class="mt-1 w-full text-sm rounded-xl border border-slate-200 px-3 py-2.5 outline-none focus:ring-2 focus:ring-teal-400">
         </div>
         <div>
-          <label class="text-xs font-semibold text-slate-500">Lote físico</label>
-          <input id="newLoteFisico" type="text" placeholder="Ej. Bodega A" class="mt-1 w-full text-sm rounded-xl border border-slate-200 px-3 py-2.5 outline-none focus:ring-2 focus:ring-teal-400">
+          <label class="text-xs font-bold text-amber-600 flex items-center gap-1"><i data-lucide="map-pin" class="w-3.5 h-3.5"></i>Lote físico</label>
+          <input id="newLoteFisico" type="text" placeholder="Ej. Bodega A" class="mt-1 w-full text-sm rounded-xl border border-amber-200 bg-amber-50/70 px-3 py-2.5 outline-none focus:ring-2 focus:ring-amber-400">
         </div>
         <div>
-          <label class="text-xs font-semibold text-slate-500">Cantidad F</label>
-          <input id="newLoteCantidadF" type="number" min="0" placeholder="0" class="mt-1 w-full text-sm rounded-xl border border-slate-200 px-3 py-2.5 outline-none focus:ring-2 focus:ring-teal-400">
+          <label class="text-xs font-bold text-amber-600 flex items-center gap-1"><i data-lucide="map-pin" class="w-3.5 h-3.5"></i>Cantidad F</label>
+          <input id="newLoteCantidadF" type="number" min="0" placeholder="0" class="mt-1 w-full text-sm rounded-xl border border-amber-200 bg-amber-50/70 px-3 py-2.5 outline-none focus:ring-2 focus:ring-amber-400">
         </div>
         <div>
           <label class="text-xs font-semibold text-slate-500">Cantidad *</label>
           <input id="newLoteCantidad" type="number" min="0" placeholder="0" class="mt-1 w-full text-sm rounded-xl border border-slate-200 px-3 py-2.5 outline-none focus:ring-2 focus:ring-teal-400">
         </div>
         <div>
-          <label class="text-xs font-semibold text-slate-500">Fecha física</label>
-          <input id="newLoteFechaFisica" type="date" class="mt-1 w-full text-sm rounded-xl border border-slate-200 px-3 py-2.5 outline-none focus:ring-2 focus:ring-teal-400">
+          <label class="text-xs font-bold text-amber-600 flex items-center gap-1"><i data-lucide="map-pin" class="w-3.5 h-3.5"></i>Fecha física</label>
+          <input id="newLoteFechaFisica" type="date" class="mt-1 w-full text-sm rounded-xl border border-amber-200 bg-amber-50/70 px-3 py-2.5 outline-none focus:ring-2 focus:ring-amber-400">
         </div>
         <div>
           <label class="text-xs font-semibold text-slate-500">Vencimiento *</label>
@@ -235,6 +245,9 @@
       <h2 class="font-bold text-slate-800">Agregar Nuevo Lote</h2>
       <button onclick="closeAddLoteModalWithSound()" class="p-1 text-slate-400 active:scale-90 transition"><i data-lucide="x" class="w-5 h-5"></i></button>
     </div>
+    <p class="px-4 text-[11px] text-amber-600 font-semibold mb-1 flex items-center gap-1">
+      <i data-lucide="map-pin" class="w-3 h-3"></i> En ámbar: campos del conteo físico
+    </p>
     <div class="px-4 pb-4 space-y-3">
       <div class="grid grid-cols-2 gap-3">
         <div class="col-span-2">
@@ -242,20 +255,20 @@
           <input id="loteNumero" type="text" placeholder="Ej. AK2" class="mt-1 w-full text-sm rounded-xl border border-slate-200 px-3 py-2.5 outline-none focus:ring-2 focus:ring-teal-400">
         </div>
         <div>
-          <label class="text-xs font-semibold text-slate-500">Lote físico</label>
-          <input id="loteFisico" type="text" placeholder="Ej. Bodega A" class="mt-1 w-full text-sm rounded-xl border border-slate-200 px-3 py-2.5 outline-none focus:ring-2 focus:ring-teal-400">
+          <label class="text-xs font-bold text-amber-600 flex items-center gap-1"><i data-lucide="map-pin" class="w-3.5 h-3.5"></i>Lote físico</label>
+          <input id="loteFisico" type="text" placeholder="Ej. Bodega A" class="mt-1 w-full text-sm rounded-xl border border-amber-200 bg-amber-50/70 px-3 py-2.5 outline-none focus:ring-2 focus:ring-amber-400">
         </div>
         <div>
-          <label class="text-xs font-semibold text-slate-500">Cantidad F</label>
-          <input id="loteCantidadF" type="number" min="0" placeholder="0" class="mt-1 w-full text-sm rounded-xl border border-slate-200 px-3 py-2.5 outline-none focus:ring-2 focus:ring-teal-400">
+          <label class="text-xs font-bold text-amber-600 flex items-center gap-1"><i data-lucide="map-pin" class="w-3.5 h-3.5"></i>Cantidad F</label>
+          <input id="loteCantidadF" type="number" min="0" placeholder="0" class="mt-1 w-full text-sm rounded-xl border border-amber-200 bg-amber-50/70 px-3 py-2.5 outline-none focus:ring-2 focus:ring-amber-400">
         </div>
         <div>
           <label class="text-xs font-semibold text-slate-500">Cantidad *</label>
           <input id="loteCantidad" type="number" min="0" placeholder="0" class="mt-1 w-full text-sm rounded-xl border border-slate-200 px-3 py-2.5 outline-none focus:ring-2 focus:ring-teal-400">
         </div>
         <div>
-          <label class="text-xs font-semibold text-slate-500">Fecha física</label>
-          <input id="loteFechaFisica" type="date" class="mt-1 w-full text-sm rounded-xl border border-slate-200 px-3 py-2.5 outline-none focus:ring-2 focus:ring-teal-400">
+          <label class="text-xs font-bold text-amber-600 flex items-center gap-1"><i data-lucide="map-pin" class="w-3.5 h-3.5"></i>Fecha física</label>
+          <input id="loteFechaFisica" type="date" class="mt-1 w-full text-sm rounded-xl border border-amber-200 bg-amber-50/70 px-3 py-2.5 outline-none focus:ring-2 focus:ring-amber-400">
         </div>
         <div>
           <label class="text-xs font-semibold text-slate-500">Vencimiento *</label>
@@ -278,9 +291,43 @@
 
 <script>
 /* =====================================================================
+   FIREBASE — Inicialización y conexión a Cloud Firestore
+   Sustituye el almacenamiento local (localStorage) por persistencia
+   en la nube. La app sigue funcionando igual: se lee todo al iniciar
+   y se escribe en cada acción del usuario, tal como antes.
+===================================================================== */
+const firebaseConfig = {
+  apiKey: "AIzaSyALcp6jIRkuRTi7J56BzsNinq8Wdtup600",
+  authDomain: "control-stock-55201.firebaseapp.com",
+  projectId: "control-stock-55201",
+  storageBucket: "control-stock-55201.firebasestorage.app",
+  messagingSenderId: "1097151750892",
+  appId: "1:1097151750892:web:0bd7b0278d74b6d46bfbc9",
+  measurementId: "G-3NMS631VKY"
+};
+
+const firebaseApp = firebase.initializeApp(firebaseConfig);
+try { firebase.analytics(); } catch (e) { console.warn('Analytics no disponible:', e); }
+
+const db = firebase.firestore();
+const productosCol = db.collection('productos');
+const bloquesCol = db.collection('bloques');
+
+// Firestore no acepta valores 'undefined' ni instancias no planas;
+// esta función limpia el objeto antes de guardarlo.
+function sanitizeForFirestore(obj) {
+  return JSON.parse(JSON.stringify(obj));
+}
+
+// Los códigos de producto se usan como ID de documento; se sanean
+// por si contuvieran '/' u otros caracteres no válidos para un docId.
+function safeDocId(id) {
+  return String(id).replace(/\//g, '_').trim();
+}
+
+/* =====================================================================
    CONFIGURACIÓN
 ===================================================================== */
-const STORAGE_KEY = 'hospitalStockData_v1';
 const LOW_STOCK_THRESHOLD = 20;   // Unidades totales por debajo de las cuales se marca "Stock bajo"
 const EXPIRY_WARNING_DAYS = 30;   // Días antes del vencimiento para marcar "Próximo a vencer"
 
@@ -310,7 +357,7 @@ const INVENTARIO_PERSONALIZADO = [
    valorizado al 03/07/2026. Responsable: Yakaira García Peralta.
    593 suministros únicos / 1381 lotes, procesados y agrupados por
    código correlativo según la letra inicial del nombre (A1, A2...).
-   Se carga solo si localStorage está vacío y INVENTARIO_PERSONALIZADO
+   Se carga solo si Firestore está vacío y INVENTARIO_PERSONALIZADO
    también está vacío.
 
    Nota: las fechas de vencimiento del archivo original venían en
@@ -14146,7 +14193,6 @@ function buildMockData() {
    ESTADO
 ===================================================================== */
 const BLOCK_IDS = Array.from({ length: 26 }, (_, i) => String.fromCharCode(65 + i));
-const BLOCKS_STORAGE_KEY = 'hospitalStockBlocks_v1';
 
 let state = {
   products: [],
@@ -14160,25 +14206,37 @@ let state = {
   blockProductSearch: ''
 };
 
-function initBlocks() {
-  const stored = localStorage.getItem(BLOCKS_STORAGE_KEY);
-  if (stored) {
-    try {
-      const parsed = JSON.parse(stored);
-      if (Array.isArray(parsed) && parsed.length === BLOCK_IDS.length) {
-        state.blocks = parsed;
-        return;
-      }
-    } catch (e) {
-      console.error('Error al leer bloques del localStorage, se reinician.', e);
+async function initBlocks() {
+  try {
+    const snapshot = await bloquesCol.get();
+    const byId = {};
+    snapshot.forEach(doc => { byId[doc.id] = doc.data(); });
+
+    state.blocks = BLOCK_IDS.map(id => byId[id] ? { id, items: byId[id].items || [] } : { id, items: [] });
+
+    // Si faltan bloques en Firestore (primera vez que corre la app), los crea.
+    const missing = BLOCK_IDS.filter(id => !byId[id]);
+    if (missing.length > 0) {
+      const batch = db.batch();
+      missing.forEach(id => batch.set(bloquesCol.doc(id), { id, items: [] }));
+      await batch.commit();
     }
+  } catch (e) {
+    console.error('Error al cargar bloques desde Firestore:', e);
+    showToast('No se pudieron cargar los bloques. Verifica tu conexión.');
+    state.blocks = BLOCK_IDS.map(id => ({ id, items: [] }));
   }
-  state.blocks = BLOCK_IDS.map(id => ({ id, items: [] }));
-  persistBlocks();
 }
 
-function persistBlocks() {
-  localStorage.setItem(BLOCKS_STORAGE_KEY, JSON.stringify(state.blocks));
+async function persistBlocks(blockId) {
+  try {
+    const block = getBlock(blockId);
+    if (!block) return;
+    await bloquesCol.doc(blockId).set(sanitizeForFirestore(block));
+  } catch (e) {
+    console.error('Error al guardar el bloque en Firestore:', e);
+    showToast('No se pudo guardar el bloque en la nube.');
+  }
 }
 
 function getBlock(id) {
@@ -14186,27 +14244,106 @@ function getBlock(id) {
 }
 
 /* =====================================================================
-   PERSISTENCIA (localStorage)
+   PERSISTENCIA (Cloud Firestore)
 ===================================================================== */
-function initData() {
-  const stored = localStorage.getItem(STORAGE_KEY);
-  if (stored) {
-    try {
-      state.products = JSON.parse(stored);
-      initBlocks();
-      return;
-    } catch (e) {
-      console.error('Error al leer localStorage, se reinicializan los datos.', e);
+async function initData() {
+  try {
+    const snapshot = await productosCol.get();
+    if (!snapshot.empty) {
+      state.products = snapshot.docs.map(doc => doc.data());
+    } else {
+      // Firestore vacío (primera vez): siembra con el inventario base.
+      state.products = INVENTARIO_PERSONALIZADO.length > 0 ? INVENTARIO_PERSONALIZADO : buildMockData();
+      await seedProductsToFirestore(state.products);
     }
+  } catch (e) {
+    console.error('Error al cargar productos desde Firestore:', e);
+    showToast('No se pudieron cargar los datos de la nube. Verifica tu conexión.');
+    state.products = INVENTARIO_PERSONALIZADO.length > 0 ? INVENTARIO_PERSONALIZADO : buildMockData();
   }
-  state.products = INVENTARIO_PERSONALIZADO.length > 0 ? INVENTARIO_PERSONALIZADO : buildMockData();
-  persist();
-  initBlocks();
+  await initBlocks();
 }
 
-function persist() {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(state.products));
+// Escribe el inventario completo en Firestore (usado solo la primera vez,
+// cuando la colección 'productos' está vacía). Firestore permite hasta
+// 500 operaciones por batch, así que se divide en tandas.
+async function seedProductsToFirestore(products) {
+  const chunkSize = 450;
+  for (let i = 0; i < products.length; i += chunkSize) {
+    const chunk = products.slice(i, i + chunkSize);
+    const batch = db.batch();
+    chunk.forEach(p => batch.set(productosCol.doc(safeDocId(p.codigo)), sanitizeForFirestore(p)));
+    await batch.commit();
+  }
 }
+
+// Guarda (crea o actualiza) un único producto en Firestore.
+async function persist(codigo) {
+  try {
+    const p = state.products.find(x => x.codigo === codigo);
+    if (!p) return;
+    await productosCol.doc(safeDocId(codigo)).set(sanitizeForFirestore(p));
+  } catch (e) {
+    console.error('Error al guardar el producto en Firestore:', e);
+    showToast('No se pudo guardar en la nube. Revisa tu conexión.');
+  }
+}
+
+// Elimina un producto de Firestore (usado al borrar un suministro completo).
+async function deleteProductFromFirestore(codigo) {
+  try {
+    await productosCol.doc(safeDocId(codigo)).delete();
+  } catch (e) {
+    console.error('Error al eliminar el producto en Firestore:', e);
+    showToast('No se pudo eliminar en la nube. Revisa tu conexión.');
+  }
+}
+
+/* =====================================================================
+   UTILIDAD DE MIGRACIÓN ÚNICA (uso manual desde la consola)
+   Si en el navegador donde usabas la versión anterior (con localStorage)
+   tenías datos guardados, ejecuta esto UNA sola vez en la consola de ese
+   navegador para subirlos a Firestore, ANTES de que otro dispositivo
+   siembre la base de datos con el inventario base:
+
+     window.importarRespaldoLocalAFirestore()
+
+   Esto lee 'hospitalStockData_v1' y 'hospitalStockBlocks_v1' de
+   localStorage (si existen en ese navegador) y los sube a Firestore.
+===================================================================== */
+window.importarRespaldoLocalAFirestore = async function () {
+  const rawProductos = localStorage.getItem('hospitalStockData_v1');
+  const rawBloques = localStorage.getItem('hospitalStockBlocks_v1');
+
+  if (!rawProductos && !rawBloques) {
+    console.warn('No se encontró ningún respaldo en localStorage en este navegador.');
+    return;
+  }
+
+  if (rawProductos) {
+    try {
+      const productos = JSON.parse(rawProductos);
+      await seedProductsToFirestore(productos);
+      console.log(`✅ ${productos.length} productos subidos a Firestore.`);
+    } catch (e) {
+      console.error('Error al subir productos del respaldo local:', e);
+    }
+  }
+
+  if (rawBloques) {
+    try {
+      const bloques = JSON.parse(rawBloques);
+      const batch = db.batch();
+      bloques.forEach(b => batch.set(bloquesCol.doc(b.id), b));
+      await batch.commit();
+      console.log(`✅ ${bloques.length} bloques subidos a Firestore.`);
+    } catch (e) {
+      console.error('Error al subir bloques del respaldo local:', e);
+    }
+  }
+
+  console.log('Migración completa. Recarga la página para ver los datos desde Firestore.');
+};
 
 /* =====================================================================
    UTILIDADES DE NEGOCIO
@@ -14420,7 +14557,7 @@ function confirmBlockLevelAssignment(nivel) {
   block.items.push({ id: generateId('blockitem'), productCode, nivel });
   state.blockAddMode = null;
   state.blockAddProduct = null;
-  persistBlocks();
+  persistBlocks(state.selectedBlock);
   playSound('positive');
   renderBlockPanel();
 }
@@ -14429,7 +14566,7 @@ function removeSupplyFromBlock(itemId) {
   const block = getBlock(state.selectedBlock);
   if (!block) return;
   block.items = block.items.filter(item => item.id !== itemId);
-  persistBlocks();
+  persistBlocks(state.selectedBlock);
   renderBlockPanel();
 }
 
@@ -14750,20 +14887,20 @@ function renderLotesEditor(p) {
           <input type="text" class="lote-numero mt-0.5 w-full text-sm rounded-lg border border-slate-200 px-2.5 py-2 outline-none focus:ring-2 focus:ring-teal-400" value="${l.numeroLote}">
         </div>
         <div>
-          <label class="text-[10px] font-semibold text-slate-400 uppercase">Lote físico</label>
-          <input type="text" class="lote-fisico mt-0.5 w-full text-sm rounded-lg border border-slate-200 px-2.5 py-2 outline-none focus:ring-2 focus:ring-teal-400" value="${l.loteFisico || ''}">
+          <label class="text-[10px] font-bold text-amber-600 uppercase flex items-center gap-1"><i data-lucide="map-pin" class="w-3 h-3"></i>Lote físico</label>
+          <input type="text" class="lote-fisico mt-0.5 w-full text-sm rounded-lg border border-amber-200 bg-amber-50/70 px-2.5 py-2 outline-none focus:ring-2 focus:ring-amber-400" value="${l.loteFisico || ''}">
         </div>
         <div>
-          <label class="text-[10px] font-semibold text-slate-400 uppercase">Cantidad F</label>
-          <input type="number" min="0" class="lote-cantidad-f mt-0.5 w-full text-sm rounded-lg border border-slate-200 px-2.5 py-2 outline-none focus:ring-2 focus:ring-teal-400" value="${l.cantidadF || 0}" ${Number(l.cantidadF || 0) === Number(l.cantidad || 0) ? 'disabled' : ''}>
+          <label class="text-[10px] font-bold text-amber-600 uppercase flex items-center gap-1"><i data-lucide="map-pin" class="w-3 h-3"></i>Cantidad F</label>
+          <input type="number" min="0" class="lote-cantidad-f mt-0.5 w-full text-sm rounded-lg border border-amber-200 bg-amber-50/70 px-2.5 py-2 outline-none focus:ring-2 focus:ring-amber-400" value="${l.cantidadF || 0}" ${Number(l.cantidadF || 0) === Number(l.cantidad || 0) ? 'disabled' : ''}>
         </div>
         <div>
           <label class="text-[10px] font-semibold text-slate-400 uppercase">Cantidad</label>
           <input type="number" min="0" onchange="syncIfCoincide(this)" class="lote-cantidad mt-0.5 w-full text-sm rounded-lg border border-slate-200 px-2.5 py-2 outline-none focus:ring-2 focus:ring-teal-400" value="${l.cantidad}">
         </div>
         <div>
-          <label class="text-[10px] font-semibold text-slate-400 uppercase">Fecha física</label>
-          <input type="date" class="lote-fecha-fisica mt-0.5 w-full text-sm rounded-lg border border-slate-200 px-2.5 py-2 outline-none focus:ring-2 focus:ring-teal-400" value="${l.fechaFisica || ''}" ${l.fechaFisica === l.fechaVencimiento ? 'disabled' : ''}>
+          <label class="text-[10px] font-bold text-amber-600 uppercase flex items-center gap-1"><i data-lucide="map-pin" class="w-3 h-3"></i>Fecha física</label>
+          <input type="date" class="lote-fecha-fisica mt-0.5 w-full text-sm rounded-lg border border-amber-200 bg-amber-50/70 px-2.5 py-2 outline-none focus:ring-2 focus:ring-amber-400" value="${l.fechaFisica || ''}" ${l.fechaFisica === l.fechaVencimiento ? 'disabled' : ''}>
         </div>
         <div>
           <label class="text-[10px] font-semibold text-slate-400 uppercase">Precio (RD$)</label>
@@ -14810,7 +14947,7 @@ function saveProductChanges() {
     lote.fechaVencimiento = row.querySelector('.lote-vencimiento').value || lote.fechaVencimiento;
   });
 
-  persist();
+  persist(p.codigo);
   renderProductList();
   playSound('positive');
   showToast('Cambios guardados correctamente');
@@ -14826,7 +14963,7 @@ function deleteLote(loteId) {
   }
   if (!confirm('¿Eliminar este lote? Esta acción no se puede deshacer.')) return;
   p.lotes = p.lotes.filter(l => l.id !== loteId);
-  persist();
+  persist(p.codigo);
   renderLotesEditor(p);
   renderProductList();
   playSound('negative');
@@ -14837,8 +14974,9 @@ function requestDeleteProduct() {
   const p = state.products.find(x => x.codigo === state.currentCode);
   if (!p) return;
   if (!confirm(`¿Eliminar por completo "${p.nombre}" (${p.codigo}) y todos sus lotes?`)) return;
-  state.products = state.products.filter(x => x.codigo !== state.currentCode);
-  persist();
+  const codigoEliminado = p.codigo;
+  state.products = state.products.filter(x => x.codigo !== codigoEliminado);
+  deleteProductFromFirestore(codigoEliminado);
   renderProductList();
   playSound('negative');
   showToast('Suministro eliminado');
@@ -14897,7 +15035,7 @@ function submitAddLote() {
     precio: Number(precio)
   });
 
-  persist();
+  persist(p.codigo);
   renderLotesEditor(p);
   renderProductList();
   closeAddLoteModalWithSound();
@@ -14962,7 +15100,7 @@ function submitAddProduct() {
     }]
   });
 
-  persist();
+  persist(codigo);
   renderProductList();
   closeAddProductModalWithSound();
   playSound('action');
@@ -15058,14 +15196,31 @@ function showToast(message) {
 /* =====================================================================
    INICIALIZACIÓN
 ===================================================================== */
-document.addEventListener('DOMContentLoaded', () => {
-  initData();
+document.addEventListener('DOMContentLoaded', async () => {
   renderFilterChips();
+  showLoadingState();
+  await initData();
   renderProductList();
   renderBlockSelectorButtons();
   renderBlockPanel();
   lucide.createIcons();
 });
+
+function showLoadingState() {
+  const productList = document.getElementById('productList');
+  const emptyState = document.getElementById('emptyState');
+  const resultsCount = document.getElementById('resultsCount');
+  if (emptyState) { emptyState.classList.add('hidden'); emptyState.classList.remove('flex'); }
+  if (resultsCount) resultsCount.textContent = 'Cargando...';
+  if (productList) {
+    productList.classList.remove('hidden');
+    productList.innerHTML = `<div class="col-span-full flex flex-col items-center justify-center py-16 text-slate-400">
+      <i data-lucide="loader-2" class="w-8 h-8 animate-spin mb-3"></i>
+      <p class="text-sm font-medium">Cargando inventario desde la nube...</p>
+    </div>`;
+    lucide.createIcons();
+  }
+}
 </script>
 </body>
 </html>
