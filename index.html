@@ -14233,6 +14233,8 @@ let state = {
   orderMode: null,
   orderProductSearch: '',
   orderSelectedProduct: null,
+  orderSelectedLot: null,
+  orderSelectedQuantity: null,
   orderItems: []
 };
 
@@ -14995,8 +14997,27 @@ function closeOrderPanel() {
 function clearOrder() {
   state.orderItems = [];
   state.orderSelectedProduct = null;
+  state.orderSelectedLot = null;
   renderOrderPanel();
   showToast('Pedido limpiado');
+}
+
+function shareOrderByWhatsApp() {
+  if (!state.orderItems.length) {
+    showToast('Agrega al menos un medicamento al pedido antes de compartir');
+    return;
+  }
+  const lines = ['Pedido de salida de medicamentos:'];
+  state.orderItems.forEach((item, index) => {
+    lines.push(`${index + 1}. Código: ${item.codigo}`);
+    lines.push(`   Nombre: ${item.nombre}`);
+    lines.push(`   Lote: ${item.loteNumero}`);
+    lines.push(`   Fecha: ${formatDate(item.fecha)}`);
+    lines.push(`   Cantidad aprobada: ${item.cantidadAprobada}`);
+  });
+  const text = encodeURIComponent(lines.join('\n'));
+  const url = `https://wa.me/?text=${text}`;
+  window.open(url, '_blank');
 }
 
 function setOrderProductSearch(value) {
@@ -15006,7 +15027,21 @@ function setOrderProductSearch(value) {
 
 function selectOrderProduct(codigo) {
   state.orderSelectedProduct = codigo;
+  state.orderSelectedLot = null;
+  state.orderSelectedQuantity = null;
   renderOrderPanel();
+}
+
+function setOrderSelectedLot(loteId) {
+  state.orderSelectedLot = loteId || null;
+  const product = state.products.find(p => p.codigo === state.orderSelectedProduct);
+  const lote = product ? product.lotes.find(l => l.id === state.orderSelectedLot) : null;
+  state.orderSelectedQuantity = lote ? 1 : null;
+  renderOrderPanel();
+}
+
+function setOrderSelectedQuantity(value) {
+  state.orderSelectedQuantity = value ? Number(value) : null;
 }
 
 function addOrderItem(loteId) {
@@ -15014,14 +15049,29 @@ function addOrderItem(loteId) {
     showToast('Selecciona primero un medicamento');
     return;
   }
+  const selectedLotId = loteId || state.orderSelectedLot;
+  if (!selectedLotId) {
+    showToast('Selecciona un lote antes de agregar');
+    return;
+  }
+  const quantity = Number(state.orderSelectedQuantity || 0);
+  if (!quantity || quantity <= 0) {
+    showToast('Ingresa la cantidad aprobada');
+    return;
+  }
   const product = state.products.find(p => p.codigo === state.orderSelectedProduct);
   if (!product) return;
-  const lote = product.lotes.find(l => l.id === loteId);
+  const lote = product.lotes.find(l => l.id === selectedLotId);
   if (!lote) {
     showToast('No se encontró el lote seleccionado');
     return;
   }
-  if (state.orderItems.some(item => item.productCode === product.codigo && item.loteId === loteId)) {
+  const available = Number(lote.cantidad || 0);
+  if (quantity > available) {
+    showToast('La cantidad aprobada no puede ser mayor al stock disponible');
+    return;
+  }
+  if (state.orderItems.some(item => item.productCode === product.codigo && item.loteId === selectedLotId)) {
     showToast('Este lote ya está en el pedido');
     return;
   }
@@ -15033,7 +15083,7 @@ function addOrderItem(loteId) {
     loteId: lote.id,
     loteNumero: lote.numeroLote,
     fecha: lote.fechaVencimiento || '',
-    cantidadAprobada: Number(lote.cantidad) || 0
+    cantidadAprobada: quantity
   });
   renderOrderPanel();
   showToast(`Lote ${lote.numeroLote} agregado al pedido`);
@@ -15100,6 +15150,69 @@ function getAvailableOrderProductsHTML() {
   `).join('');
 }
 
+function getOrderLotSelectionHTML() {
+  if (!state.orderSelectedProduct) {
+    return `<div class="rounded-2xl border border-slate-200 bg-white p-6 text-center text-sm text-slate-500">Selecciona primero un medicamento para ver sus lotes.</div>`;
+  }
+
+  const product = state.products.find(p => p.codigo === state.orderSelectedProduct);
+  if (!product) {
+    return `<div class="rounded-2xl border border-slate-200 bg-white p-6 text-center text-sm text-slate-500">Producto no encontrado.</div>`;
+  }
+
+  const availableLots = (product.lotes || []).slice().sort((a, b) => new Date(a.fechaVencimiento + 'T00:00:00') - new Date(b.fechaVencimiento + 'T00:00:00'));
+  if (!availableLots.length) {
+    return `<div class="rounded-2xl border border-slate-200 bg-white p-6 text-center text-sm text-slate-500">No hay lotes registrados para este medicamento.</div>`;
+  }
+
+  const options = availableLots.map(lote => `
+    <option value="${lote.id}" ${state.orderSelectedLot === lote.id ? 'selected' : ''}>
+      ${lote.numeroLote} · ${formatDate(lote.fechaVencimiento)} · ${lote.cantidad} und
+    </option>
+  `).join('');
+
+  const selectedLot = availableLots.find(l => l.id === state.orderSelectedLot);
+  const currentQuantity = state.orderSelectedQuantity != null ? state.orderSelectedQuantity : '';
+  const addDisabledClass = !state.orderSelectedLot ? 'opacity-50 cursor-not-allowed' : '';
+
+  return `
+    <div class="space-y-4">
+      <div class="rounded-3xl border border-slate-200 bg-white p-4">
+        <label class="block text-xs font-semibold text-slate-500 mb-2">Seleccione un lote</label>
+        <select id="orderLotSelect" onchange="setOrderSelectedLot(this.value)" class="w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-800 outline-none focus:border-teal-400 focus:ring-2 focus:ring-teal-200">
+          <option value="">Selecciona lote...</option>
+          ${options}
+        </select>
+      </div>
+      ${selectedLot ? `
+      <div class="rounded-3xl border border-slate-200 bg-white p-4">
+        <label class="block text-xs font-semibold text-slate-500 mb-2">Cantidad aprobada</label>
+        <input id="orderQuantityInput" type="number" min="1" max="${selectedLot.cantidad}" value="${currentQuantity}"
+          oninput="setOrderSelectedQuantity(this.value)"
+          placeholder="Ingresa la cantidad a despachar"
+          class="w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-800 outline-none focus:border-teal-400 focus:ring-2 focus:ring-teal-200" />
+        <p class="text-xs text-slate-500 mt-2">Stock disponible: ${selectedLot.cantidad} unidades</p>
+      </div>
+      ` : ''}
+      <button type="button" onclick="addOrderItem()" class="w-full rounded-2xl bg-teal-600 px-4 py-3 text-sm font-semibold text-white hover:bg-teal-700 transition ${addDisabledClass}" ${!state.orderSelectedLot ? 'disabled' : ''}>
+        Agregar lote
+      </button>
+      ${availableLots.length === 1 ? `<p class="text-xs text-slate-500">Solo existe un lote disponible para este medicamento. Usa el botón para agregarlo rápido.</p>` : ''}
+      <div class="rounded-3xl border border-slate-200 bg-slate-50 p-4">
+        <p class="text-xs font-semibold text-slate-500 mb-3">Lotes disponibles</p>
+        <div class="space-y-2">
+          ${availableLots.map(lote => `
+            <div class="rounded-2xl border border-slate-200 bg-white p-3 text-sm">
+              <p class="font-semibold text-slate-900">${lote.numeroLote}</p>
+              <p class="text-slate-500 text-[13px]">Fecha: ${formatDate(lote.fechaVencimiento)} · Cantidad: ${lote.cantidad} und</p>
+            </div>
+          `).join('')}
+        </div>
+      </div>
+    </div>
+  `;
+}
+
 function getOrderLotsHTML() {
   if (!state.orderSelectedProduct) {
     return `<div class="rounded-2xl border border-slate-200 bg-white p-6 text-center text-sm text-slate-500">Selecciona primero un medicamento para ver sus lotes.</div>`;
@@ -15164,6 +15277,9 @@ function renderOrderPanel() {
         <h2 class="text-2xl font-semibold text-slate-900">Pedido</h2>
       </div>
       <div class="flex flex-wrap items-center gap-2">
+        <button type="button" onclick="shareOrderByWhatsApp()" class="rounded-2xl border border-teal-500 bg-teal-50 px-3 py-2 text-xs font-semibold text-teal-700 hover:bg-teal-100 transition flex items-center gap-1">
+          <i data-lucide="send" class="w-4 h-4"></i>Compartir por WhatsApp
+        </button>
         <button type="button" onclick="clearOrder()" class="rounded-2xl border border-slate-200 bg-slate-50 px-3 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-100 transition">Limpiar pedido</button>
         <button type="button" onclick="closeOrderPanel()" class="rounded-2xl border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-100 transition">
           <i data-lucide="x" class="w-4 h-4"></i>
@@ -15189,7 +15305,7 @@ function renderOrderPanel() {
           </tbody>
         </table>
       </div>
-      <div class="grid gap-4 lg:grid-cols-[1.1fr_0.9fr]">
+      <div class="grid gap-4 grid-cols-1 md:grid-cols-2">
         <div class="rounded-3xl border border-slate-200 bg-slate-50 p-4">
           <div class="flex items-center justify-between gap-3 mb-3">
             <div>
@@ -15206,12 +15322,12 @@ function renderOrderPanel() {
         <div class="rounded-3xl border border-slate-200 bg-slate-50 p-4">
           <div class="flex items-center justify-between gap-3 mb-3">
             <div>
-              <p class="text-xs font-semibold text-slate-500 uppercase">Lotes disponibles</p>
+              <p class="text-xs font-semibold text-slate-500 uppercase">Lotes y cantidad</p>
               <h3 class="text-sm font-semibold text-slate-900">${selectedProduct ? `Para ${selectedProduct.nombre}` : 'Elija un medicamento'}</h3>
             </div>
             ${selectedProduct ? `<span class="text-xs text-slate-500">${selectedProduct.lotes.filter(l => Number(l.cantidad || 0) > 0).length} con stock</span>` : ''}
           </div>
-          <div id="orderLotsContainer" class="grid gap-2 max-h-[29rem] overflow-y-auto">${getOrderLotsHTML()}</div>
+          <div id="orderLotsContainer" class="grid gap-3 max-h-[29rem] overflow-y-auto">${getOrderLotSelectionHTML()}</div>
         </div>
       </div>
     </div>
