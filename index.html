@@ -111,6 +111,8 @@
     <button data-filter="sinStock" onclick="setFilter('sinStock')" class="filter-chip whitespace-nowrap text-xs font-semibold px-3 py-1.5 rounded-full transition"></button>
     <button data-filter="sinStockS" onclick="setFilter('sinStockS')" class="filter-chip whitespace-nowrap text-xs font-semibold px-3 py-1.5 rounded-full transition"></button>
     <button data-filter="sinStockF" onclick="setFilter('sinStockF')" class="filter-chip whitespace-nowrap text-xs font-semibold px-3 py-1.5 rounded-full transition"></button>
+    <button data-filter="verificado" onclick="setFilter('verificado')" class="filter-chip whitespace-nowrap text-xs font-semibold px-3 py-1.5 rounded-full transition"></button>
+    <button data-filter="sinVerificar" onclick="setFilter('sinVerificar')" class="filter-chip whitespace-nowrap text-xs font-semibold px-3 py-1.5 rounded-full transition"></button>
     <button data-filter="prioridad" onclick="setFilter('prioridad')" class="filter-chip whitespace-nowrap text-xs font-semibold px-3 py-1.5 rounded-full transition"></button>
   </div>
 </header>
@@ -368,7 +370,9 @@ const FILTER_LABELS = {
   fisico: 'Diferencias físicas',
   sinStock: 'Sin Stock',
   sinStockS: 'Sin Stock S',
-  sinStockF: 'Sin Stock F'
+  sinStockF: 'Sin Stock F',
+  verificado: 'Verificados',
+  sinVerificar: 'Sin verificar'
 };
 
 /* =====================================================================
@@ -14685,7 +14689,8 @@ function getProductFlags(product) {
     lowStock: total < LOW_STOCK_THRESHOLD,
     noStockSystem: total === 0,
     noStockPhysical: physicalTotal === 0,
-    noStockBoth: total === 0 && physicalTotal === 0
+    noStockBoth: total === 0 && physicalTotal === 0,
+    verificado: !!product.verificado
   };
 }
 
@@ -14948,7 +14953,7 @@ function renderBlockPanel() {
   }
 
   const block = getBlock(state.selectedBlock);
-  const levels = ['todos', '1', '2', '3', '4'];
+  const levels = ['todos', '1', '2', '3', '4', '5', '6', '7', '8', '9', '10'];
   const sanitizedFilter = state.blockLevelFilter;
 
   wrapper.innerHTML = `
@@ -15443,7 +15448,7 @@ function renderBlockLevelSelection() {
       </div>
       <div class="mb-3 text-sm font-semibold text-slate-700">¿A qué nivel desea asignarlo?</div>
       <div class="grid grid-cols-2 gap-2 mb-3">
-        ${[1, 2, 3, 4].map(nivel => `
+        ${Array.from({ length: 10 }, (_, i) => i + 1).map(nivel => `
           <button type="button" onclick="confirmBlockLevelAssignment(${nivel})" class="rounded-2xl border border-slate-200 bg-white py-3 text-sm font-semibold text-slate-800 shadow-sm hover:bg-teal-50 hover:border-teal-300 transition">
             Nivel ${nivel}
           </button>
@@ -15538,6 +15543,8 @@ function getFilteredProducts() {
     if (state.filter === 'sinStock') return flags.noStockBoth;
     if (state.filter === 'sinStockS') return flags.noStockSystem;
     if (state.filter === 'sinStockF') return flags.noStockPhysical;
+    if (state.filter === 'verificado') return flags.verificado;
+    if (state.filter === 'sinVerificar') return !flags.verificado;
     return true;
   });
 }
@@ -15578,9 +15585,23 @@ function getGlobalEarliestVencimiento() {
   return min;
 }
 
+function toggleProductVerified(event, codigo) {
+  if (event) event.stopPropagation();
+  const p = state.products.find(x => x.codigo === codigo);
+  if (!p) return;
+  p.verificado = !p.verificado;
+  persist(codigo);
+  playSound(p.verificado ? 'positive' : 'negative');
+  showToast(p.verificado ? 'Marcado como verificado' : 'Marca de verificado removida');
+  renderProductList();
+}
+
 function renderProductCard(p, index = 0) {
   const flags = getProductFlags(p);
   let badges = '';
+  badges += flags.verificado
+    ? `<button type="button" onclick="toggleProductVerified(event, '${p.codigo}')" class="inline-flex items-center gap-1 text-[10px] font-bold px-2 py-1 rounded-full bg-emerald-500 text-white active:scale-95 transition"><i data-lucide="check-circle-2" class="w-3 h-3"></i>Verificado</button>`
+    : `<button type="button" onclick="toggleProductVerified(event, '${p.codigo}')" class="inline-flex items-center gap-1 text-[10px] font-bold px-2 py-1 rounded-full bg-slate-100 text-slate-400 border border-dashed border-slate-300 active:scale-95 transition hover:border-emerald-400 hover:text-emerald-500"><i data-lucide="circle" class="w-3 h-3"></i>Verificar</button>`;
   if (flags.hasVencido) badges += badgeHTML('Vencido', 'bg-red-50 text-red-600', 'alert-triangle');
   if (flags.hasProximo) badges += badgeHTML('Por vencer', 'bg-amber-50 text-amber-600', 'clock');
   if (flags.lowStock) badges += badgeHTML('Stock bajo', 'bg-orange-50 text-orange-600', 'trending-down');
@@ -15594,8 +15615,8 @@ function renderProductCard(p, index = 0) {
   badges += badgeHTML(`${p.lotes.length} lote${p.lotes.length !== 1 ? 's' : ''}`, 'bg-slate-100 text-slate-500');
   const physicalTotal = p.lotes.reduce((s, l) => s + Number(l.cantidadF || 0), 0);
   const delay = Math.min(index, 14) * 25;
-  const thumb = p.imagenUrl
-    ? `<img src="${p.imagenUrl}" alt="${p.nombre}" loading="lazy" class="w-12 h-12 rounded-xl object-cover border border-slate-200 shrink-0" onerror="this.replaceWith(Object.assign(document.createElement('div'), { className: 'w-12 h-12 rounded-xl bg-slate-100 border border-slate-200 flex items-center justify-center shrink-0', innerHTML: '<i data-lucide=\\'package\\' class=\\'w-5 h-5 text-slate-300\\'></i>' })); lucide.createIcons();">`
+  const thumb = p.imagenURL
+    ? `<img src="${p.imagenURL}" alt="${p.nombre}" loading="lazy" class="w-12 h-12 rounded-xl object-cover border border-slate-200 shrink-0" onerror="this.replaceWith(Object.assign(document.createElement('div'), { className: 'w-12 h-12 rounded-xl bg-slate-100 border border-slate-200 flex items-center justify-center shrink-0', innerHTML: '<i data-lucide=\\'package\\' class=\\'w-5 h-5 text-slate-300\\'></i>' })); lucide.createIcons();">`
     : `<div class="w-12 h-12 rounded-xl bg-slate-100 border border-slate-200 flex items-center justify-center shrink-0"><i data-lucide="package" class="w-5 h-5 text-slate-300"></i></div>`;
 
   return `
