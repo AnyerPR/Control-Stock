@@ -14212,6 +14212,7 @@ function buildMockData() {
 ===================================================================== */
 const BLOCK_IDS = Array.from({ length: 26 }, (_, i) => String.fromCharCode(65 + i));
 
+const CLIENT_ID = `client_${Math.random().toString(36).slice(2, 10)}`;
 let state = {
   products: [],
   filter: 'todos',
@@ -14224,19 +14225,110 @@ let state = {
   blockProductSearch: ''
 };
 
+function normalizeTimestamp(value) {
+  if (!value) return 0;
+  if (typeof value === 'number') return value;
+  if (value && typeof value.toMillis === 'function') return value.toMillis();
+  return 0;
+}
+
+function isDetailModalOpen() {
+  const modal = document.getElementById('detailModal');
+  return modal && !modal.classList.contains('hidden');
+}
+
+function captureProductDetailDraft() {
+  if (!isDetailModalOpen() || !state.currentCode) return null;
+  const currentProduct = state.products.find(x => x.codigo === state.currentCode);
+  if (!currentProduct) return null;
+
+  const rows = Array.from(document.querySelectorAll('#lotesContainer [data-lote-id]'));
+  return {
+    nombre: document.getElementById('editNombre')?.value || currentProduct.nombre,
+    descripcion: document.getElementById('editDescripcion')?.value || currentProduct.descripcion || '',
+    lotes: rows.map(row => ({
+      id: row.dataset.loteId,
+      numeroLote: row.querySelector('.lote-numero')?.value.trim() || '',
+      loteFisico: row.querySelector('.lote-fisico')?.value.trim() || '',
+      cantidadF: Number(row.querySelector('.lote-cantidad-f')?.value) || 0,
+      cantidad: Number(row.querySelector('.lote-cantidad')?.value) || 0,
+      fechaFisica: row.querySelector('.lote-fecha-fisica')?.value || '',
+      precio: Number(row.querySelector('.lote-precio')?.value) || 0,
+      fechaVencimiento: row.querySelector('.lote-vencimiento')?.value || ''
+    }))
+  };
+}
+
+function isDraftDirty(product, draft) {
+  if (!draft) return false;
+  if (draft.nombre !== product.nombre) return true;
+  if (draft.descripcion !== (product.descripcion || '')) return true;
+  if (draft.lotes.length !== product.lotes.length) return true;
+  return draft.lotes.some(d => {
+    const lote = product.lotes.find(l => l.id === d.id);
+    if (!lote) return true;
+    return d.numeroLote !== lote.numeroLote ||
+      d.loteFisico !== (lote.loteFisico || '') ||
+      d.cantidadF !== Number(lote.cantidadF || 0) ||
+      d.cantidad !== Number(lote.cantidad || 0) ||
+      d.fechaFisica !== (lote.fechaFisica || '') ||
+      d.precio !== Number(lote.precio || 0) ||
+      d.fechaVencimiento !== lote.fechaVencimiento;
+  });
+}
+
+function restoreProductDetailDraft(draft) {
+  if (!draft) return;
+  document.getElementById('editNombre').value = draft.nombre;
+  document.getElementById('editDescripcion').value = draft.descripcion;
+  const currentProduct = state.products.find(x => x.codigo === state.currentCode);
+  if (!currentProduct) return;
+  renderLotesEditor(currentProduct);
+  const rows = Array.from(document.querySelectorAll('#lotesContainer [data-lote-id]'));
+  rows.forEach(row => {
+    const draftLote = draft.lotes.find(l => l.id === row.dataset.loteId);
+    if (!draftLote) return;
+    row.querySelector('.lote-numero').value = draftLote.numeroLote;
+    row.querySelector('.lote-fisico').value = draftLote.loteFisico;
+    row.querySelector('.lote-cantidad-f').value = draftLote.cantidadF;
+    row.querySelector('.lote-cantidad').value = draftLote.cantidad;
+    row.querySelector('.lote-fecha-fisica').value = draftLote.fechaFisica;
+    row.querySelector('.lote-precio').value = draftLote.precio;
+    row.querySelector('.lote-vencimiento').value = draftLote.fechaVencimiento;
+  });
+}
+
+function refreshProductDetailIfOpen(codigo) {
+  if (state.currentCode !== codigo || !isDetailModalOpen()) return;
+  const product = state.products.find(x => x.codigo === codigo);
+  if (!product) return;
+  const draft = captureProductDetailDraft();
+  if (draft && isDraftDirty(product, draft)) {
+    showToast('Actualización remota recibida. Tu edición actual se conserva.');
+    restoreProductDetailDraft(draft);
+    return;
+  }
+
+  document.getElementById('detailCodeBadge').textContent = product.codigo;
+  document.getElementById('editNombre').value = product.nombre;
+  document.getElementById('editDescripcion').value = product.descripcion || '';
+  renderProductImage(product);
+  renderLotesEditor(product);
+}
+
 async function initBlocks() {
   try {
     const snapshot = await bloquesCol.get();
     const byId = {};
     snapshot.forEach(doc => { byId[doc.id] = doc.data(); });
 
-    state.blocks = BLOCK_IDS.map(id => byId[id] ? { id, items: byId[id].items || [] } : { id, items: [] });
+    state.blocks = BLOCK_IDS.map(id => byId[id] ? { id, items: byId[id].items || [], updatedAt: normalizeTimestamp(byId[id].updatedAt) } : { id, items: [] });
 
     // Si faltan bloques en Firestore (primera vez que corre la app), los crea.
     const missing = BLOCK_IDS.filter(id => !byId[id]);
     if (missing.length > 0) {
       const batch = db.batch();
-      missing.forEach(id => batch.set(bloquesCol.doc(id), { id, items: [] }));
+      missing.forEach(id => batch.set(bloquesCol.doc(id), { id, items: [], updatedAt: Date.now() }));
       await batch.commit();
     }
   } catch (e) {
@@ -14250,9 +14342,23 @@ async function persistBlocks(blockId) {
   try {
     const block = getBlock(blockId);
     if (!block) return;
-    await bloquesCol.doc(blockId).set(sanitizeForFirestore(block));
+    const ref = bloquesCol.doc(blockId);
+    await db.runTransaction(async tx => {
+      const remoteDoc = await tx.get(ref);
+      const remoteUpdatedAt = normalizeTimestamp(remoteDoc.exists ? remoteDoc.data().updatedAt : 0);
+      const localUpdatedAt = normalizeTimestamp(block.updatedAt);
+      if (remoteDoc.exists && remoteUpdatedAt > localUpdatedAt) {
+        throw new Error('conflict-block');
+      }
+      block.updatedAt = Date.now();
+      tx.set(ref, sanitizeForFirestore(block));
+    });
   } catch (e) {
     console.error('Error al guardar el bloque en Firestore:', e);
+    if (e.message === 'conflict-block') {
+      showToast('Conflicto detectado: otro usuario modificó este bloque. Vuelve a abrirlo para sincronizar.');
+      return;
+    }
     showToast('No se pudo guardar el bloque en la nube.');
   }
 }
@@ -14262,13 +14368,135 @@ function getBlock(id) {
 }
 
 /* =====================================================================
+   REALTIME SYNC (Firestore onSnapshot)
+===================================================================== */
+function startRealtimeSync() {
+  productosCol.onSnapshot(snapshot => handleProductsSnapshot(snapshot), error => {
+    console.error('Realtime products listener error:', error);
+    showToast('No se pudo conectar al servicio de sincronización de productos.');
+  });
+
+  bloquesCol.onSnapshot(snapshot => handleBlocksSnapshot(snapshot), error => {
+    console.error('Realtime blocks listener error:', error);
+    showToast('No se pudo conectar al servicio de sincronización de bloques.');
+  });
+}
+
+function handleProductsSnapshot(snapshot) {
+  if (!snapshot || !snapshot.docChanges) return;
+  let shouldRenderProducts = false;
+  snapshot.docChanges().forEach(change => {
+    const remoteProduct = change.doc.data();
+    remoteProduct.updatedAt = normalizeTimestamp(remoteProduct.updatedAt);
+    const existingIndex = state.products.findIndex(p => p.codigo === remoteProduct.codigo);
+    if (change.type === 'removed') {
+      if (existingIndex !== -1) {
+        state.products.splice(existingIndex, 1);
+        shouldRenderProducts = true;
+        if (state.currentCode === remoteProduct.codigo && isDetailModalOpen()) {
+          showToast('Este medicamento fue eliminado desde otro dispositivo.');
+        }
+      }
+      return;
+    }
+
+    if (existingIndex !== -1) {
+      const localProduct = state.products[existingIndex];
+      const localUpdatedAt = normalizeTimestamp(localProduct.updatedAt);
+      if (remoteProduct.updatedAt <= localUpdatedAt) return;
+      state.products[existingIndex] = remoteProduct;
+      refreshProductDetailIfOpen(remoteProduct.codigo);
+      shouldRenderProducts = true;
+    } else {
+      state.products.push(remoteProduct);
+      shouldRenderProducts = true;
+    }
+  });
+
+  if (shouldRenderProducts) {
+    renderProductList();
+  }
+}
+
+function handleBlocksSnapshot(snapshot) {
+  if (!snapshot || !snapshot.docChanges) return;
+  let blockChanged = false;
+  snapshot.docChanges().forEach(change => {
+    const remoteBlock = change.doc.data();
+    const existingIndex = state.blocks.findIndex(b => b.id === remoteBlock.id);
+    if (existingIndex !== -1) {
+      const localBlock = state.blocks[existingIndex];
+      const localUpdatedAt = normalizeTimestamp(localBlock.updatedAt);
+      const remoteUpdatedAt = normalizeTimestamp(remoteBlock.updatedAt);
+      if (remoteUpdatedAt <= localUpdatedAt) return;
+      state.blocks[existingIndex] = remoteBlock;
+      blockChanged = true;
+    } else {
+      state.blocks.push(remoteBlock);
+      blockChanged = true;
+    }
+  });
+
+  if (blockChanged) {
+    refreshBlockPanelIfOpen();
+  }
+}
+
+function getBlockItemsHTML() {
+  const block = getBlock(state.selectedBlock);
+  if (!block) return '';
+  const sanitizedFilter = state.blockLevelFilter;
+  const filteredItems = (block.items || []).filter(item => sanitizedFilter === 'todos' || item.nivel === Number(sanitizedFilter));
+  if (filteredItems.length === 0) {
+    return `<div class="rounded-3xl border border-dashed border-slate-200 bg-slate-50 p-6 text-center text-slate-500">
+         <p class="font-semibold mb-1">Este bloque está vacío</p>
+         <p class="text-xs">Agrega insumos y asígnalos a un nivel.</p>
+       </div>`;
+  }
+  return filteredItems.map((item, idx) => {
+    const product = state.products.find(p => p.codigo === item.productCode) || { nombre: 'Producto no encontrado' };
+    return `<div class="anim-card-in card-tap flex items-center justify-between gap-3 rounded-2xl border border-slate-200 bg-white p-3 shadow-sm" style="animation-delay:${Math.min(idx * 30, 300)}ms">
+        <div class="flex-1 cursor-pointer" onclick="openProductDetail('${item.productCode}')">
+          <p class="text-xs text-slate-500">${item.productCode}</p>
+          <p class="font-semibold text-slate-900">${product.nombre}</p>
+        </div>
+        <div class="flex items-center gap-2">
+          <span class="text-[11px] font-bold uppercase tracking-[0.18em] text-slate-500">Nivel ${item.nivel}</span>
+          <button type="button" onclick="removeSupplyFromBlock('${item.id}')" class="text-slate-400 hover:text-red-600 active:scale-90 transition">
+            <i data-lucide="trash-2" class="w-4 h-4"></i>
+          </button>
+        </div>
+      </div>`;
+  }).join('');
+}
+
+function refreshBlockPanelIfOpen() {
+  if (!state.selectedBlock) return;
+  const wrapper = document.getElementById('blockPanelWrapper');
+  if (!wrapper) return;
+  const productsGrid = document.getElementById('blockProductsGrid');
+  const itemsContainer = document.getElementById('blockItemsContainer');
+  if (itemsContainer) {
+    itemsContainer.innerHTML = getBlockItemsHTML();
+    lucide.createIcons();
+  }
+  if (productsGrid && state.blockAddMode === 'selectProduct') {
+    productsGrid.innerHTML = getBlockProductsGridHTML();
+  }
+}
+
+/* =====================================================================
    PERSISTENCIA (Cloud Firestore)
 ===================================================================== */
 async function initData() {
   try {
     const snapshot = await productosCol.get();
     if (!snapshot.empty) {
-      state.products = snapshot.docs.map(doc => doc.data());
+      state.products = snapshot.docs.map(doc => {
+        const data = doc.data();
+        data.updatedAt = normalizeTimestamp(data.updatedAt);
+        return data;
+      });
     } else {
       // Firestore vacío (primera vez): siembra con el inventario base.
       state.products = INVENTARIO_PERSONALIZADO.length > 0 ? INVENTARIO_PERSONALIZADO : buildMockData();
@@ -14300,9 +14528,23 @@ async function persist(codigo) {
   try {
     const p = state.products.find(x => x.codigo === codigo);
     if (!p) return;
-    await productosCol.doc(safeDocId(codigo)).set(sanitizeForFirestore(p));
+    const ref = productosCol.doc(safeDocId(codigo));
+    await db.runTransaction(async tx => {
+      const remoteDoc = await tx.get(ref);
+      const remoteUpdatedAt = normalizeTimestamp(remoteDoc.exists ? remoteDoc.data().updatedAt : 0);
+      const localUpdatedAt = normalizeTimestamp(p.updatedAt);
+      if (remoteDoc.exists && remoteUpdatedAt > localUpdatedAt) {
+        throw new Error('conflict-product');
+      }
+      p.updatedAt = Date.now();
+      tx.set(ref, sanitizeForFirestore(p));
+    });
   } catch (e) {
     console.error('Error al guardar el producto en Firestore:', e);
+    if (e.message === 'conflict-product') {
+      showToast('Conflicto detectado: otro usuario actualizó este suministro primero. Vuelve a abrirlo para sincronizar.');
+      return;
+    }
     showToast('No se pudo guardar en la nube. Revisa tu conexión.');
   }
 }
@@ -14310,9 +14552,23 @@ async function persist(codigo) {
 // Elimina un producto de Firestore (usado al borrar un suministro completo).
 async function deleteProductFromFirestore(codigo) {
   try {
-    await productosCol.doc(safeDocId(codigo)).delete();
+    const ref = productosCol.doc(safeDocId(codigo));
+    await db.runTransaction(async tx => {
+      const remoteDoc = await tx.get(ref);
+      const remoteUpdatedAt = normalizeTimestamp(remoteDoc.exists ? remoteDoc.data().updatedAt : 0);
+      const localProduct = state.products.find(x => x.codigo === codigo);
+      const localUpdatedAt = normalizeTimestamp(localProduct?.updatedAt);
+      if (remoteDoc.exists && remoteUpdatedAt > localUpdatedAt) {
+        throw new Error('conflict-product-delete');
+      }
+      tx.delete(ref);
+    });
   } catch (e) {
     console.error('Error al eliminar el producto en Firestore:', e);
+    if (e.message === 'conflict-product-delete') {
+      showToast('No se pudo eliminar: el suministro fue actualizado desde otro dispositivo. Sincroniza antes de eliminar.');
+      return;
+    }
     showToast('No se pudo eliminar en la nube. Revisa tu conexión.');
   }
 }
@@ -14574,7 +14830,11 @@ function addSupplyToBlock() {
 
 function updateBlockProductSearch(value) {
   state.blockProductSearch = value;
-  renderBlockPanel();
+  // Actualizar solo la lista de productos sin re-renderizar todo
+  const productsGrid = document.getElementById('blockProductsGrid');
+  if (productsGrid) {
+    productsGrid.innerHTML = getBlockProductsGridHTML();
+  }
 }
 
 function startBlockAddProduct(productCode) {
@@ -14657,27 +14917,6 @@ function renderBlockPanel() {
   const block = getBlock(state.selectedBlock);
   const levels = ['todos', '1', '2', '3', '4'];
   const sanitizedFilter = state.blockLevelFilter;
-  const filteredItems = (block.items || []).filter(item => sanitizedFilter === 'todos' || item.nivel === Number(sanitizedFilter));
-  const listHtml = filteredItems.length === 0
-    ? `<div class="rounded-3xl border border-dashed border-slate-200 bg-slate-50 p-6 text-center text-slate-500">
-         <p class="font-semibold mb-1">Este bloque está vacío</p>
-         <p class="text-xs">Agrega insumos y asígnalos a un nivel.</p>
-       </div>`
-    : filteredItems.map((item, idx) => {
-      const product = state.products.find(p => p.codigo === item.productCode) || { nombre: 'Producto no encontrado' };
-      return `<div class="anim-card-in card-tap flex items-center justify-between gap-3 rounded-2xl border border-slate-200 bg-white p-3 shadow-sm" style="animation-delay:${Math.min(idx * 30, 300)}ms">
-        <div>
-          <p class="text-xs text-slate-500">${item.productCode}</p>
-          <p class="font-semibold text-slate-900">${product.nombre}</p>
-        </div>
-        <div class="flex items-center gap-2">
-          <span class="text-[11px] font-bold uppercase tracking-[0.18em] text-slate-500">Nivel ${item.nivel}</span>
-          <button type="button" onclick="removeSupplyFromBlock('${item.id}')" class="text-slate-400 hover:text-red-600 active:scale-90 transition">
-            <i data-lucide="trash-2" class="w-4 h-4"></i>
-          </button>
-        </div>
-      </div>`;
-    }).join('');
 
   wrapper.innerHTML = `
   <div class="anim-card-in mb-4 rounded-3xl bg-white border border-slate-200 shadow-sm overflow-hidden">
@@ -14711,8 +14950,8 @@ function renderBlockPanel() {
     ${state.blockAddMode === 'selectProduct' ? renderBlockProductSelection() : ''}
     ${state.blockAddMode === 'selectLevel' ? renderBlockLevelSelection() : ''}
     <div class="px-4 pb-4">
-      <div class="grid gap-3">
-        ${listHtml}
+      <div id="blockItemsContainer" class="grid gap-3">
+        ${getBlockItemsHTML()}
       </div>
     </div>
   </div>`;
@@ -14754,15 +14993,7 @@ function renderBlockProductSelection() {
     })
     .sort((a, b) => a.nombre.localeCompare(b.nombre));
 
-  const available = availableProducts.length === 0
-    ? `<div class="rounded-2xl border border-slate-200 bg-slate-50 p-4 text-sm text-slate-500 text-center">No se encontraron medicamentos con ese término.</div>`
-    : availableProducts.map(product => `
-      <button type="button" onclick="startBlockAddProduct('${product.codigo}')" class="text-left rounded-2xl border border-slate-200 bg-slate-50 p-3 shadow-sm hover:bg-slate-100 transition">
-        <p class="text-xs text-slate-500">${product.codigo}</p>
-        <p class="font-semibold text-slate-900">${product.nombre}</p>
-        <p class="text-xs text-slate-500 mt-1">${product.descripcion || 'Sin descripción'}</p>
-      </button>
-    `).join('');
+  const available = getBlockProductsGridHTML();
 
   return `
     <div class="px-4 pb-4">
@@ -14772,12 +15003,36 @@ function renderBlockProductSelection() {
           placeholder="Buscar medicamento..."
           class="w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-800 outline-none focus:border-teal-400 focus:ring-2 focus:ring-teal-200" />
       </div>
-      <div class="grid gap-2">${available}</div>
+      <div id="blockProductsGrid" class="grid gap-2">${available}</div>
       <button type="button" onclick="cancelBlockAdd()" class="mt-3 text-xs font-semibold text-slate-500 hover:text-slate-700">
         Cancelar
       </button>
     </div>
   `;
+}
+
+function getBlockProductsGridHTML() {
+  const query = (state.blockProductSearch || '').trim().toLowerCase();
+  const availableProducts = state.products
+    .filter(product => {
+      if (!query) return true;
+      return product.nombre.toLowerCase().includes(query) ||
+        (product.descripcion || '').toLowerCase().includes(query) ||
+        product.codigo.toLowerCase().includes(query);
+    })
+    .sort((a, b) => a.nombre.localeCompare(b.nombre));
+
+  if (availableProducts.length === 0) {
+    return `<div class="rounded-2xl border border-slate-200 bg-slate-50 p-4 text-sm text-slate-500 text-center">No se encontraron medicamentos con ese término.</div>`;
+  }
+
+  return availableProducts.map(product => `
+    <button type="button" onclick="startBlockAddProduct('${product.codigo}')" class="text-left rounded-2xl border border-slate-200 bg-slate-50 p-3 shadow-sm hover:bg-slate-100 transition">
+      <p class="text-xs text-slate-500">${product.codigo}</p>
+      <p class="font-semibold text-slate-900">${product.nombre}</p>
+      <p class="text-xs text-slate-500 mt-1">${product.descripcion || 'Sin descripción'}</p>
+    </button>
+  `).join('');
 }
 
 /* =====================================================================
@@ -14816,6 +15071,15 @@ function badgeHTML(label, colorClasses, icon) {
   </span>`;
 }
 
+function getProductBlockLocations(codigo) {
+  if (!Array.isArray(state.blocks)) return [];
+  return state.blocks.flatMap(block => {
+    return (block.items || [])
+      .filter(item => item.productCode === codigo)
+      .map(item => ({ block: block.id, nivel: item.nivel }));
+  });
+}
+
 function renderProductCard(p, index = 0) {
   const flags = getProductFlags(p);
   let badges = '';
@@ -14845,6 +15109,12 @@ function renderProductCard(p, index = 0) {
           <p class="text-[11px] font-bold text-teal-700 tracking-wide">${p.codigo}</p>
           <h3 class="font-semibold text-slate-800 text-[15px] leading-tight truncate">${p.nombre}</h3>
           <p class="text-xs text-slate-500 mt-0.5 truncate">${p.descripcion || 'Sin descripción'}</p>
+          ${(() => {
+            const locations = getProductBlockLocations(p.codigo);
+            if (!locations.length) return '';
+            const locText = locations.map(loc => `Bloque ${loc.block} · Nivel ${loc.nivel}`).join(' • ');
+            return `<p class="text-[11px] text-slate-500 mt-1 truncate">${locText}</p>`;
+          })()}
         </div>
       </div>
       <div class="text-right shrink-0">
@@ -15375,6 +15645,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   renderFilterChips();
   showLoadingState();
   await initData();
+  startRealtimeSync();
   renderProductList();
   renderBlockSelectorButtons();
   renderBlockPanel();
