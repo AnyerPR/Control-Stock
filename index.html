@@ -73,12 +73,17 @@
     </button>
   </div>
 
-  <!-- Selector de bloques -->
-  <div class="px-4 pb-3">
-    <button id="blockSelectorBtn" onclick="toggleBlockSelector()" class="bg-white text-slate-700 rounded-full w-11 h-11 flex items-center justify-center shadow-sm border border-slate-200 hover:bg-slate-50 active:scale-90 transition">
-      <i data-lucide="layers" class="w-5 h-5"></i>
+  <!-- Selector de bloques y Pedido -->
+  <div class="px-4 pb-3 flex flex-wrap items-center gap-2">
+    <button id="blockSelectorBtn" onclick="toggleBlockSelector()" class="inline-flex items-center gap-2 bg-white text-slate-700 rounded-full px-4 py-2 shadow-sm border border-slate-200 hover:bg-slate-50 active:scale-90 transition">
+      <i data-lucide="layers" class="w-4 h-4"></i>
+      <span class="text-sm font-semibold">Bloques</span>
     </button>
-    <div id="blockSelector" class="mt-3 hidden rounded-3xl bg-white border border-slate-200 p-3 shadow-sm">
+    <button id="orderBtn" onclick="toggleOrderPanel()" class="inline-flex items-center gap-2 bg-white text-slate-700 rounded-full px-4 py-2 shadow-sm border border-slate-200 hover:bg-slate-50 active:scale-90 transition">
+      <i data-lucide="shopping-cart" class="w-4 h-4"></i>
+      <span class="text-sm font-semibold">Pedido</span>
+    </button>
+    <div id="blockSelector" class="mt-3 hidden rounded-3xl bg-white border border-slate-200 p-3 shadow-sm w-full">
       <div id="blockSelectorButtons" class="grid grid-cols-6 gap-2"></div>
     </div>
   </div>
@@ -103,6 +108,7 @@
     <button data-filter="proximo" onclick="setFilter('proximo')" class="filter-chip whitespace-nowrap text-xs font-semibold px-3 py-1.5 rounded-full transition"></button>
     <button data-filter="vencido" onclick="setFilter('vencido')" class="filter-chip whitespace-nowrap text-xs font-semibold px-3 py-1.5 rounded-full transition"></button>
     <button data-filter="fisico" onclick="setFilter('fisico')" class="filter-chip whitespace-nowrap text-xs font-semibold px-3 py-1.5 rounded-full transition"></button>
+    <button data-filter="prioridad" onclick="setFilter('prioridad')" class="filter-chip whitespace-nowrap text-xs font-semibold px-3 py-1.5 rounded-full transition"></button>
   </div>
 </header>
 
@@ -110,6 +116,7 @@
      CONTENIDO PRINCIPAL
 ============================================================ -->
 <main class="px-4 py-4 max-w-3xl mx-auto">
+  <div id="orderPanelWrapper"></div>
   <div id="blockPanelWrapper"></div>
   <div id="resultsCount" class="text-xs text-slate-500 mb-2 font-medium"></div>
   <div id="productList" class="grid grid-cols-1 sm:grid-cols-2 gap-3"></div>
@@ -349,7 +356,7 @@ function safeDocId(id) {
 const LOW_STOCK_THRESHOLD = 20;   // Unidades totales por debajo de las cuales se marca "Stock bajo"
 const EXPIRY_WARNING_DAYS = 30;   // Días antes del vencimiento para marcar "Próximo a vencer"
 
-const FILTER_LABELS = { todos: 'Todos', bajo: 'Stock bajo', proximo: 'Por vencer', vencido: 'Vencidos', fisico: 'Diferencias físicas' };
+const FILTER_LABELS = { todos: 'Todos', prioridad: 'Prioridad', bajo: 'Stock bajo', proximo: 'Por vencer', vencido: 'Vencidos', fisico: 'Diferencias físicas' };
 
 /* =====================================================================
    📋 ESPACIO PARA SOBRESCRIBIR EL INVENTARIO (opcional)
@@ -14222,7 +14229,11 @@ let state = {
   blockLevelFilter: 'todos',
   blockAddMode: null,
   blockAddProduct: null,
-  blockProductSearch: ''
+  blockProductSearch: '',
+  orderMode: null,
+  orderProductSearch: '',
+  orderSelectedProduct: null,
+  orderItems: []
 };
 
 function normalizeTimestamp(value) {
@@ -14804,6 +14815,7 @@ function selectBlock(id) {
     closeBlockPanel();
     return;
   }
+  state.orderMode = null;
   state.selectedBlock = id;
   state.blockLevelFilter = 'todos';
   state.blockAddMode = null;
@@ -14813,6 +14825,7 @@ function selectBlock(id) {
   if (selector) selector.classList.add('hidden');
   renderBlockSelectorButtons();
   renderBlockPanel();
+  renderOrderPanel();
 }
 
 function setBlockLevelFilter(level) {
@@ -14958,6 +14971,254 @@ function renderBlockPanel() {
   lucide.createIcons();
 }
 
+function toggleOrderPanel() {
+  if (state.orderMode === 'pedido') {
+    closeOrderPanel();
+    return;
+  }
+  state.orderMode = 'pedido';
+  state.selectedBlock = null;
+  state.blockAddMode = null;
+  state.blockAddProduct = null;
+  state.blockProductSearch = '';
+  state.orderSelectedProduct = null;
+  state.orderProductSearch = '';
+  renderBlockPanel();
+  renderOrderPanel();
+}
+
+function closeOrderPanel() {
+  state.orderMode = null;
+  renderOrderPanel();
+}
+
+function clearOrder() {
+  state.orderItems = [];
+  state.orderSelectedProduct = null;
+  renderOrderPanel();
+  showToast('Pedido limpiado');
+}
+
+function setOrderProductSearch(value) {
+  state.orderProductSearch = value;
+  renderOrderPanel();
+}
+
+function selectOrderProduct(codigo) {
+  state.orderSelectedProduct = codigo;
+  renderOrderPanel();
+}
+
+function addOrderItem(loteId) {
+  if (!state.orderSelectedProduct) {
+    showToast('Selecciona primero un medicamento');
+    return;
+  }
+  const product = state.products.find(p => p.codigo === state.orderSelectedProduct);
+  if (!product) return;
+  const lote = product.lotes.find(l => l.id === loteId);
+  if (!lote) {
+    showToast('No se encontró el lote seleccionado');
+    return;
+  }
+  if (state.orderItems.some(item => item.productCode === product.codigo && item.loteId === loteId)) {
+    showToast('Este lote ya está en el pedido');
+    return;
+  }
+  state.orderItems.push({
+    productCode: product.codigo,
+    codigo: product.codigo,
+    nombre: product.nombre,
+    descripcion: product.descripcion || '',
+    loteId: lote.id,
+    loteNumero: lote.numeroLote,
+    fecha: lote.fechaVencimiento || '',
+    cantidadAprobada: Number(lote.cantidad) || 0
+  });
+  renderOrderPanel();
+  showToast(`Lote ${lote.numeroLote} agregado al pedido`);
+}
+
+function updateOrderItemQuantity(index, value) {
+  const item = state.orderItems[index];
+  if (!item) return;
+  item.cantidadAprobada = Number(value) || 0;
+}
+
+function removeOrderItem(index) {
+  state.orderItems.splice(index, 1);
+  renderOrderPanel();
+}
+
+function getOrderItemsHTML() {
+  if (!state.orderItems || state.orderItems.length === 0) {
+    return `<tr><td colspan="7" class="px-4 py-6 text-center text-sm text-slate-500">No hay productos en el pedido. Selecciona un medicamento y luego un lote.</td></tr>`;
+  }
+  return state.orderItems.map((item, idx) => `
+    <tr class="hover:bg-slate-50">
+      <td class="px-4 py-3 text-slate-700 font-semibold">${item.codigo}</td>
+      <td class="px-4 py-3 text-slate-700">${item.nombre}</td>
+      <td class="px-4 py-3 text-slate-500 text-sm">${item.descripcion || 'Sin descripción'}</td>
+      <td class="px-4 py-3 text-slate-700">${item.loteNumero}</td>
+      <td class="px-4 py-3 text-slate-700">${formatDate(item.fecha)}</td>
+      <td class="px-4 py-3">
+        <input type="number" min="0" value="${item.cantidadAprobada}" onchange="updateOrderItemQuantity(${idx}, this.value)" class="w-full rounded-xl border border-slate-200 px-2 py-2 text-sm text-slate-800 outline-none focus:ring-2 focus:ring-teal-200" />
+      </td>
+      <td class="px-4 py-3 text-right">
+        <button type="button" onclick="removeOrderItem(${idx})" class="text-sm font-semibold text-rose-600 hover:text-rose-800">Eliminar</button>
+      </td>
+    </tr>
+  `).join('');
+}
+
+function getAvailableOrderProductsHTML() {
+  const query = (state.orderProductSearch || '').trim().toLowerCase();
+  const products = state.products
+    .filter(product => {
+      if (!query) return true;
+      return product.nombre.toLowerCase().includes(query) ||
+        (product.descripcion || '').toLowerCase().includes(query) ||
+        product.codigo.toLowerCase().includes(query);
+    })
+    .sort((a, b) => a.nombre.localeCompare(b.nombre));
+
+  if (products.length === 0) {
+    return `<div class="rounded-2xl border border-slate-200 bg-white p-4 text-sm text-slate-500 text-center">No se encontraron medicamentos con ese término.</div>`;
+  }
+
+  return products.map(product => `
+    <button type="button" onclick="selectOrderProduct('${product.codigo}')" class="w-full text-left rounded-2xl border px-4 py-3 transition ${state.orderSelectedProduct === product.codigo ? 'border-teal-500 bg-white shadow-sm' : 'border-slate-200 bg-white hover:border-teal-300 hover:bg-slate-50'}">
+      <div class="flex items-start justify-between gap-2">
+        <div>
+          <p class="text-xs text-slate-500">${product.codigo}</p>
+          <p class="font-semibold text-slate-900">${product.nombre}</p>
+          <p class="text-xs text-slate-500 mt-1 truncate">${product.descripcion || 'Sin descripción'}</p>
+        </div>
+        <span class="text-[11px] font-semibold text-slate-500">${getTotalStock(product)} disp.</span>
+      </div>
+    </button>
+  `).join('');
+}
+
+function getOrderLotsHTML() {
+  if (!state.orderSelectedProduct) {
+    return `<div class="rounded-2xl border border-slate-200 bg-white p-6 text-center text-sm text-slate-500">Selecciona primero un medicamento para ver sus lotes.</div>`;
+  }
+
+  const product = state.products.find(p => p.codigo === state.orderSelectedProduct);
+  if (!product) {
+    return `<div class="rounded-2xl border border-slate-200 bg-white p-6 text-center text-sm text-slate-500">Producto no encontrado.</div>`;
+  }
+
+  const availableLots = (product.lotes || []).filter(l => Number(l.cantidad || 0) > 0).sort((a, b) => new Date(a.fechaVencimiento + 'T00:00:00') - new Date(b.fechaVencimiento + 'T00:00:00'));
+  if (availableLots.length === 0) {
+    return `<div class="rounded-2xl border border-slate-200 bg-white p-6 text-center text-sm text-slate-500">No hay lotes disponibles con stock para este medicamento.</div>`;
+  }
+
+  return availableLots.map(lote => `
+    <button type="button" onclick="addOrderItem('${lote.id}')" class="w-full text-left rounded-2xl border border-slate-200 bg-white p-3 shadow-sm hover:border-teal-300 hover:bg-teal-50 transition">
+      <div class="flex items-center justify-between gap-3">
+        <div>
+          <p class="text-xs text-slate-500">Lote ${lote.numeroLote}</p>
+          <p class="font-semibold text-slate-900">${lote.cantidad} unidades</p>
+        </div>
+        <span class="text-xs font-semibold text-slate-500">${formatDate(lote.fechaVencimiento)}</span>
+      </div>
+      <p class="text-xs text-slate-500 mt-2">${lote.loteFisico || 'Lote sin ubicación'}</p>
+    </button>
+  `).join('');
+}
+
+function renderOrderPanel() {
+  const wrapper = document.getElementById('orderPanelWrapper');
+  const resultsCount = document.getElementById('resultsCount');
+  const productList = document.getElementById('productList');
+  const emptyState = document.getElementById('emptyState');
+  if (!wrapper) return;
+
+  if (state.orderMode !== 'pedido') {
+    wrapper.innerHTML = '';
+    if (resultsCount) resultsCount.classList.remove('hidden');
+    if (productList) productList.classList.remove('hidden');
+    if (emptyState && productList && productList.innerHTML.trim().length === 0) {
+      emptyState.classList.remove('hidden');
+      emptyState.classList.add('flex');
+    }
+    return;
+  }
+
+  if (resultsCount) resultsCount.classList.add('hidden');
+  if (productList) productList.classList.add('hidden');
+  if (emptyState) {
+    emptyState.classList.add('hidden');
+    emptyState.classList.remove('flex');
+  }
+
+  const selectedProduct = state.products.find(p => p.codigo === state.orderSelectedProduct);
+
+  wrapper.innerHTML = `
+  <div class="anim-card-in mb-4 rounded-3xl bg-white border border-slate-200 shadow-sm overflow-hidden">
+    <div class="flex flex-wrap items-center justify-between gap-3 px-4 py-4 border-b border-slate-200">
+      <div>
+        <p class="text-xs uppercase tracking-[0.24em] text-slate-400">Salida de medicamentos</p>
+        <h2 class="text-2xl font-semibold text-slate-900">Pedido</h2>
+      </div>
+      <div class="flex flex-wrap items-center gap-2">
+        <button type="button" onclick="clearOrder()" class="rounded-2xl border border-slate-200 bg-slate-50 px-3 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-100 transition">Limpiar pedido</button>
+        <button type="button" onclick="closeOrderPanel()" class="rounded-2xl border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-100 transition">
+          <i data-lucide="x" class="w-4 h-4"></i>
+        </button>
+      </div>
+    </div>
+    <div class="px-4 py-4 space-y-4">
+      <div class="overflow-x-auto rounded-3xl border border-slate-200 bg-slate-50">
+        <table class="min-w-full text-left text-sm">
+          <thead class="bg-slate-100">
+            <tr>
+              <th class="px-4 py-3 font-semibold text-slate-600">Código</th>
+              <th class="px-4 py-3 font-semibold text-slate-600">Nombre</th>
+              <th class="px-4 py-3 font-semibold text-slate-600">Descripción</th>
+              <th class="px-4 py-3 font-semibold text-slate-600">Lote</th>
+              <th class="px-4 py-3 font-semibold text-slate-600">Fecha</th>
+              <th class="px-4 py-3 font-semibold text-slate-600">Cantidad aprobada</th>
+              <th class="px-4 py-3 font-semibold text-slate-600">Acción</th>
+            </tr>
+          </thead>
+          <tbody id="orderItemsTable" class="divide-y divide-slate-200">
+            ${getOrderItemsHTML()}
+          </tbody>
+        </table>
+      </div>
+      <div class="grid gap-4 lg:grid-cols-[1.1fr_0.9fr]">
+        <div class="rounded-3xl border border-slate-200 bg-slate-50 p-4">
+          <div class="flex items-center justify-between gap-3 mb-3">
+            <div>
+              <p class="text-xs font-semibold text-slate-500 uppercase">Lista de medicamentos</p>
+              <h3 class="text-sm font-semibold text-slate-900">Seleccione un medicamento</h3>
+            </div>
+            <span class="text-xs text-slate-500">${state.products.length} disponibles</span>
+          </div>
+          <input id="orderProductSearchInput" value="${state.orderProductSearch || ''}" oninput="setOrderProductSearch(this.value)"
+            placeholder="Buscar medicamento..."
+            class="w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-800 outline-none focus:border-teal-400 focus:ring-2 focus:ring-teal-200" />
+          <div id="availableOrderProducts" class="mt-3 grid gap-2 max-h-[29rem] overflow-y-auto">${getAvailableOrderProductsHTML()}</div>
+        </div>
+        <div class="rounded-3xl border border-slate-200 bg-slate-50 p-4">
+          <div class="flex items-center justify-between gap-3 mb-3">
+            <div>
+              <p class="text-xs font-semibold text-slate-500 uppercase">Lotes disponibles</p>
+              <h3 class="text-sm font-semibold text-slate-900">${selectedProduct ? `Para ${selectedProduct.nombre}` : 'Elija un medicamento'}</h3>
+            </div>
+            ${selectedProduct ? `<span class="text-xs text-slate-500">${selectedProduct.lotes.filter(l => Number(l.cantidad || 0) > 0).length} con stock</span>` : ''}
+          </div>
+          <div id="orderLotsContainer" class="grid gap-2 max-h-[29rem] overflow-y-auto">${getOrderLotsHTML()}</div>
+        </div>
+      </div>
+    </div>
+  </div>`;
+  lucide.createIcons();
+}
+
 function renderBlockLevelSelection() {
   const productCode = state.blockAddProduct;
   const product = state.products.find(p => p.codigo === productCode) || { nombre: 'Producto no encontrado', codigo: productCode };
@@ -15080,6 +15341,27 @@ function getProductBlockLocations(codigo) {
   });
 }
 
+function getEarliestVencimiento(product) {
+  if (!product || !Array.isArray(product.lotes) || product.lotes.length === 0) return Infinity;
+  let min = Infinity;
+  product.lotes.forEach(l => {
+    if (!l.fechaVencimiento) return;
+    const t = new Date(l.fechaVencimiento + 'T00:00:00').getTime();
+    if (!isNaN(t) && t < min) min = t;
+  });
+  return min;
+}
+
+function getGlobalEarliestVencimiento() {
+  if (!Array.isArray(state.products) || state.products.length === 0) return Infinity;
+  let min = Infinity;
+  state.products.forEach(p => {
+    const v = getEarliestVencimiento(p);
+    if (v < min) min = v;
+  });
+  return min;
+}
+
 function renderProductCard(p, index = 0) {
   const flags = getProductFlags(p);
   let badges = '';
@@ -15143,10 +15425,20 @@ function renderProductList() {
   } else {
     empty.classList.add('hidden');
     empty.classList.remove('flex');
-    container.innerHTML = list
-      .sort((a, b) => a.nombre.localeCompare(b.nombre))
-      .map((p, i) => renderProductCard(p, i))
-      .join('');
+    let sortedList = list.slice();
+    if (state.filter === 'prioridad') {
+      sortedList.sort((a, b) => {
+        const ea = getEarliestVencimiento(a);
+        const eb = getEarliestVencimiento(b);
+        if (ea === eb) return a.nombre.localeCompare(b.nombre);
+        if (ea === Infinity) return 1;
+        if (eb === Infinity) return -1;
+        return ea - eb;
+      });
+    } else {
+      sortedList.sort((a, b) => a.nombre.localeCompare(b.nombre));
+    }
+    container.innerHTML = sortedList.map((p, i) => renderProductCard(p, i)).join('');
   }
   lucide.createIcons();
 }
@@ -15304,19 +15596,43 @@ async function removeProductImage(event) {
 
 function renderLotesEditor(p) {
   const container = document.getElementById('lotesContainer');
+  // calcular la fecha de vencimiento más próxima dentro de este producto
+  let minTs = Infinity;
+  p.lotes.forEach(l => {
+    if (!l.fechaVencimiento) return;
+    const t = new Date(l.fechaVencimiento + 'T00:00:00').getTime();
+    if (!isNaN(t) && t < minTs) minTs = t;
+  });
+  // calcular la fecha de vencimiento más próxima global
+  const globalMinTs = getGlobalEarliestVencimiento();
+
   container.innerHTML = p.lotes.map(l => {
     const status = getLoteStatus(l);
+    const isPriority = (function() {
+      if (!l.fechaVencimiento) return false;
+      const t = new Date(l.fechaVencimiento + 'T00:00:00').getTime();
+      return !isNaN(t) && t === minTs;
+    })();
+    const isGlobalPriority = (function() {
+      if (!l.fechaVencimiento) return false;
+      const t = new Date(l.fechaVencimiento + 'T00:00:00').getTime();
+      return !isNaN(t) && t === globalMinTs;
+    })();
+
+    const priorityClass = isGlobalPriority ? 'ring-2 ring-rose-300 bg-rose-50/70' : (isPriority ? 'ring-1 ring-yellow-300 bg-yellow-50/60' : '');
+
     const statusBadge =
       status === 'vencido' ? badgeHTML('Vencido', 'bg-red-50 text-red-600', 'alert-triangle') :
       status === 'proximo' ? badgeHTML('Por vencer', 'bg-amber-50 text-amber-600', 'clock') :
       badgeHTML('Vigente', 'bg-emerald-50 text-emerald-600', 'check');
 
     return `
-    <div class="bg-white rounded-2xl border border-slate-200 p-3.5 ${Number(l.cantidadF || 0) > Number(l.cantidad || 0) ? 'bg-emerald-50/80' : Number(l.cantidadF || 0) < Number(l.cantidad || 0) ? 'bg-rose-50/80' : ''}" data-lote-id="${l.id}">
+    <div class="bg-white rounded-2xl border border-slate-200 p-3.5 ${Number(l.cantidadF || 0) > Number(l.cantidad || 0) ? 'bg-emerald-50/80' : Number(l.cantidadF || 0) < Number(l.cantidad || 0) ? 'bg-rose-50/80' : ''} ${priorityClass}" data-lote-id="${l.id}">
       <div class="flex items-center justify-between mb-2.5">
         <span class="text-xs font-bold text-slate-600">Lote</span>
         <div class="flex items-center gap-2">
           ${statusBadge}
+          ${isGlobalPriority ? `<span class="text-[11px] font-bold text-rose-700 bg-rose-100 px-2 py-0.5 rounded-full">Prioridad global</span>` : (isPriority ? `<span class="text-[11px] font-bold text-yellow-700 bg-yellow-100 px-2 py-0.5 rounded-full">Prioridad</span>` : '')}
           <label class="flex items-center gap-1 text-[11px] text-slate-500">
             <input type="checkbox" class="lote-coincide" onchange="toggleLoteCoincide(this)" ${Number(l.cantidadF || 0) === Number(l.cantidad || 0) ? 'checked' : ''}>
             <span>Coincide</span>
@@ -15649,6 +15965,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   renderProductList();
   renderBlockSelectorButtons();
   renderBlockPanel();
+  renderOrderPanel();
   lucide.createIcons();
 });
 
