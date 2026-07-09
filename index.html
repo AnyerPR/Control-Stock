@@ -14262,6 +14262,18 @@ function normalizeTimestamp(value) {
   return 0;
 }
 
+// Convierte un error de Firebase en un texto corto y legible para mostrar
+// en el toast, incluyendo el código real (ej. "permission-denied",
+// "unavailable") en vez de un mensaje genérico. Así se puede diagnosticar
+// el problema sin tener que abrir la consola del navegador.
+function errorSuffix(e) {
+  if (!e) return '.';
+  const code = e.code || '';
+  if (code) return ` (${code}). Revisa la consola para más detalle.`;
+  if (e.message) return `: ${e.message}`;
+  return '. Revisa tu conexión.';
+}
+
 function isDetailModalOpen() {
   const modal = document.getElementById('detailModal');
   return modal && !modal.classList.contains('hidden');
@@ -14346,26 +14358,42 @@ function refreshProductDetailIfOpen(codigo) {
   renderLotesEditor(product);
 }
 
-async function initBlocks() {
-  try {
-    const snapshot = await bloquesCol.get();
-    const byId = {};
-    snapshot.forEach(doc => { byId[doc.id] = doc.data(); });
+function initBlocks() {
+  return new Promise((resolve) => {
+    let firstLoad = true;
+    bloquesCol.onSnapshot(async snapshot => {
+      if (firstLoad) {
+        firstLoad = false;
+        const byId = {};
+        snapshot.forEach(doc => { byId[doc.id] = doc.data(); });
+        state.blocks = BLOCK_IDS.map(id => byId[id] ? { id, items: byId[id].items || [], updatedAt: normalizeTimestamp(byId[id].updatedAt) } : { id, items: [] });
 
-    state.blocks = BLOCK_IDS.map(id => byId[id] ? { id, items: byId[id].items || [], updatedAt: normalizeTimestamp(byId[id].updatedAt) } : { id, items: [] });
-
-    // Si faltan bloques en Firestore (primera vez que corre la app), los crea.
-    const missing = BLOCK_IDS.filter(id => !byId[id]);
-    if (missing.length > 0) {
-      const batch = db.batch();
-      missing.forEach(id => batch.set(bloquesCol.doc(id), { id, items: [], updatedAt: Date.now() }));
-      await batch.commit();
-    }
-  } catch (e) {
-    console.error('Error al cargar bloques desde Firestore:', e);
-    showToast('No se pudieron cargar los bloques. Verifica tu conexión.');
-    state.blocks = BLOCK_IDS.map(id => ({ id, items: [] }));
-  }
+        // Si faltan bloques en Firestore (primera vez que corre la app), los crea.
+        const missing = BLOCK_IDS.filter(id => !byId[id]);
+        if (missing.length > 0) {
+          try {
+            const batch = db.batch();
+            missing.forEach(id => batch.set(bloquesCol.doc(id), { id, items: [], updatedAt: Date.now() }));
+            await batch.commit();
+          } catch (e) {
+            console.error('Error al inicializar bloques en Firestore:', e);
+            showToast('No se pudieron crear los bloques' + errorSuffix(e));
+          }
+        }
+        resolve();
+      } else {
+        handleBlocksSnapshot(snapshot);
+      }
+    }, error => {
+      console.error('Error al cargar bloques desde Firestore:', error);
+      showToast('No se pudieron cargar los bloques' + errorSuffix(error));
+      if (firstLoad) {
+        firstLoad = false;
+        state.blocks = BLOCK_IDS.map(id => ({ id, items: [] }));
+        resolve();
+      }
+    });
+  });
 }
 
 async function persistBlocks(blockId) {
@@ -14389,7 +14417,7 @@ async function persistBlocks(blockId) {
       showToast('Conflicto detectado: otro usuario modificó este bloque. Vuelve a abrirlo para sincronizar.');
       return;
     }
-    showToast('No se pudo guardar el bloque en la nube.');
+    showToast('No se pudo guardar el bloque' + errorSuffix(e));
   }
 }
 
@@ -14399,18 +14427,15 @@ function getBlock(id) {
 
 /* =====================================================================
    REALTIME SYNC (Firestore onSnapshot)
+   Nota: los listeners en tiempo real se establecen directamente dentro
+   de initData() e initBlocks() (una sola suscripción por colección,
+   reutilizada también para la carga inicial). Antes había un .get()
+   de toda la colección DENTRO de initData()/initBlocks() y ADEMÁS un
+   onSnapshot() por separado en startRealtimeSync() — cada uno lee la
+   colección completa, así que cada carga de página costaba el DOBLE
+   de lecturas de las necesarias. Ahora es un único listener por
+   colección para toda la vida de la página.
 ===================================================================== */
-function startRealtimeSync() {
-  productosCol.onSnapshot(snapshot => handleProductsSnapshot(snapshot), error => {
-    console.error('Realtime products listener error:', error);
-    showToast('No se pudo conectar al servicio de sincronización de productos.');
-  });
-
-  bloquesCol.onSnapshot(snapshot => handleBlocksSnapshot(snapshot), error => {
-    console.error('Realtime blocks listener error:', error);
-    showToast('No se pudo conectar al servicio de sincronización de bloques.');
-  });
-}
 
 function handleProductsSnapshot(snapshot) {
   if (!snapshot || !snapshot.docChanges) return;
@@ -14518,26 +14543,42 @@ function refreshBlockPanelIfOpen() {
 /* =====================================================================
    PERSISTENCIA (Cloud Firestore)
 ===================================================================== */
-async function initData() {
-  try {
-    const snapshot = await productosCol.get();
-    if (!snapshot.empty) {
-      state.products = snapshot.docs.map(doc => {
-        const data = doc.data();
-        data.updatedAt = normalizeTimestamp(data.updatedAt);
-        return data;
-      });
-    } else {
-      // Firestore vacío (primera vez): siembra con el inventario base.
-      state.products = INVENTARIO_PERSONALIZADO.length > 0 ? INVENTARIO_PERSONALIZADO : buildMockData();
-      await seedProductsToFirestore(state.products);
-    }
-  } catch (e) {
-    console.error('Error al cargar productos desde Firestore:', e);
-    showToast('No se pudieron cargar los datos de la nube. Verifica tu conexión.');
-    state.products = INVENTARIO_PERSONALIZADO.length > 0 ? INVENTARIO_PERSONALIZADO : buildMockData();
-  }
-  await initBlocks();
+function initData() {
+  return new Promise((resolve) => {
+    let firstLoad = true;
+    productosCol.onSnapshot(async snapshot => {
+      if (firstLoad) {
+        firstLoad = false;
+        if (!snapshot.empty) {
+          state.products = snapshot.docs.map(doc => {
+            const data = doc.data();
+            data.updatedAt = normalizeTimestamp(data.updatedAt);
+            return data;
+          });
+        } else {
+          // Firestore vacío (primera vez): siembra con el inventario base.
+          state.products = INVENTARIO_PERSONALIZADO.length > 0 ? INVENTARIO_PERSONALIZADO : buildMockData();
+          try {
+            await seedProductsToFirestore(state.products);
+          } catch (e) {
+            console.error('Error al inicializar productos en Firestore:', e);
+            showToast('No se pudo inicializar el inventario en la nube' + errorSuffix(e));
+          }
+        }
+        resolve();
+      } else {
+        handleProductsSnapshot(snapshot);
+      }
+    }, error => {
+      console.error('Error al cargar productos desde Firestore:', error);
+      showToast('No se pudieron cargar los datos de la nube' + errorSuffix(error));
+      if (firstLoad) {
+        firstLoad = false;
+        state.products = INVENTARIO_PERSONALIZADO.length > 0 ? INVENTARIO_PERSONALIZADO : buildMockData();
+        resolve();
+      }
+    });
+  }).then(() => initBlocks());
 }
 
 // Escribe el inventario completo en Firestore (usado solo la primera vez,
@@ -14575,7 +14616,7 @@ async function persist(codigo) {
       showToast('Conflicto detectado: otro usuario actualizó este suministro primero. Vuelve a abrirlo para sincronizar.');
       return;
     }
-    showToast('No se pudo guardar en la nube. Revisa tu conexión.');
+    showToast('No se pudo guardar en la nube' + errorSuffix(e));
   }
 }
 
@@ -14599,7 +14640,7 @@ async function deleteProductFromFirestore(codigo) {
       showToast('No se pudo eliminar: el suministro fue actualizado desde otro dispositivo. Sincroniza antes de eliminar.');
       return;
     }
-    showToast('No se pudo eliminar en la nube. Revisa tu conexión.');
+    showToast('No se pudo eliminar en la nube' + errorSuffix(e));
   }
 }
 
@@ -15091,9 +15132,10 @@ async function completeOrder() {
     updatedProducts.add(product.codigo);
   }
 
-  for (const codigo of updatedProducts) {
-    await persist(codigo);
-  }
+  // Mismo número de lecturas/escrituras que antes (una por producto distinto
+  // en el pedido, ya deduplicado arriba); solo se ejecutan en paralelo en vez
+  // de una por una, para que "Completar pedido" sea más rápido.
+  await Promise.all([...updatedProducts].map(codigo => persist(codigo)));
 
   const orderItemsCopy = state.orderItems.map(item => ({ ...item }));
   downloadOrderDocument(orderItemsCopy);
@@ -15807,7 +15849,7 @@ async function handleProductImageSelected(event) {
     showToast('Foto guardada');
   } catch (e) {
     console.error('Error al subir la imagen:', e);
-    showToast('No se pudo subir la foto. Revisa tu conexión.');
+    showToast('No se pudo subir la foto' + errorSuffix(e));
     renderProductImage(p);
   }
 }
@@ -16198,7 +16240,6 @@ document.addEventListener('DOMContentLoaded', async () => {
   renderFilterChips();
   showLoadingState();
   await initData();
-  startRealtimeSync();
   renderProductList();
   renderBlockSelectorButtons();
   renderBlockPanel();
