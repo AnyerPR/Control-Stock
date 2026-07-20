@@ -1,6 +1,0 @@
-{
-  "name": "Control de Stock Hospitalario",
-  "description": "Sistema de control de inventario de medicamentos y gestión de solicitudes y órdenes hospitalarias.",
-  "requestFramePermissions": [],
-  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
-}
