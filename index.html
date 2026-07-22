@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Control de Stock Hospitalario</title>
+    <script>
+      // Polyfill storage APIs to prevent SecurityError under file:// protocol
+      (function() {
+        function createMockStorage() {
+          var store = {};
+          return {
+            getItem: function(key) { return key in store ? store[key] : null; },
+            setItem: function(key, value) { store[key] = String(value); },
+            removeItem: function(key) { delete store[key]; },
+            clear: function() { store = {}; },
+            key: function(index) { return Object.keys(store)[index] || null; },
+            get length() { return Object.keys(store).length; }
+          };
+        }
+
+        try {
+          var test = window.localStorage;
+          if (!test) throw new Error();
+          test.setItem('__test__', '1');
+          test.removeItem('__test__');
+        } catch (e) {
+          console.warn("localStorage is blocked or not supported. Using polyfill.");
+          Object.defineProperty(window, 'localStorage', {
+            value: createMockStorage(),
+            configurable: true,
+            writable: true
+          });
+        }
+
+        try {
+          var testSession = window.sessionStorage;
+          if (!testSession) throw new Error();
+          testSession.setItem('__test__', '1');
+          testSession.removeItem('__test__');
+        } catch (e) {
+          console.warn("sessionStorage is blocked or not supported. Using polyfill.");
+          Object.defineProperty(window, 'sessionStorage', {
+            value: createMockStorage(),
+            configurable: true,
+            writable: true
+          });
+        }
+
+        try {
+          var idb = window.indexedDB;
+        } catch (e) {
+          console.warn("indexedDB is blocked or not supported. Polyfilling with dummy.");
+          Object.defineProperty(window, 'indexedDB', {
+            value: null,
+            configurable: true,
+            writable: true
+          });
+        }
+
+        if (!window.isSecureContext) {
+          try {
+            Object.defineProperty(window, 'isSecureContext', {
+              value: true,
+              configurable: true,
+              writable: true
+            });
+          } catch (e) {}
+        }
+      })();
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
