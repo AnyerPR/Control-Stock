@@ -822,17 +822,19 @@ export default function App() {
     if (currentUser?.rol === "Administrador" || currentUser?.departamento === "Almacén y Suministro") {
       return activeCatalogos;
     }
-    if (currentUser?.departamento === "Laboratorio") {
-      return activeCatalogos.filter((c) => c.id === "laboratorio");
-    }
-    if (currentUser?.departamento === "Odontología") {
-      return activeCatalogos.filter((c) => c.id === "odontologia");
-    }
     const userCats = currentUser?.catalogos || [];
     if (userCats.length > 0) {
       return activeCatalogos.filter((c) => userCats.includes(c.id));
     }
-    return activeCatalogos;
+    const defaultCatalogMap: Record<string, string> = {
+      Laboratorio: "laboratorio",
+      Odontología: "odontologia"
+    };
+    const fallbackCatalogId = defaultCatalogMap[currentUser?.departamento || ""];
+    if (fallbackCatalogId) {
+      return activeCatalogos.filter((c) => c.id === fallbackCatalogId);
+    }
+    return [];
   };
 
   // Filter & Search Logic

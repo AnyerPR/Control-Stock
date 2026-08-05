@@ -53,17 +53,8 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
     if (currentUser?.rol === "Administrador" || currentUser?.departamento === "Almacén y Suministro") {
       return activeCatalogos;
     }
-    if (currentUser?.departamento === "Laboratorio") {
-      return activeCatalogos.filter((c) => c.id === "laboratorio");
-    }
-    if (currentUser?.departamento === "Odontología") {
-      return activeCatalogos.filter((c) => c.id === "odontologia");
-    }
     const userCats = currentUser?.catalogos || [];
-    if (userCats.length > 0) {
-      return activeCatalogos.filter((c) => userCats.includes(c.id));
-    }
-    return activeCatalogos;
+    return activeCatalogos.filter((c) => userCats.includes(c.id));
   };
 
   const handleSetSolicitudCatalogId = (catId: string) => {
@@ -101,8 +92,9 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
   const [histStatusFilter, setHistStatusFilter] = useState("todos");
   const [histUserFilter, setHistUserFilter] = useState("");
 
+  const currentDepartment = currentUser.departamento || "Servicio General";
+
   // Create Form State
-  const [department, setDepartment] = useState(DEPARTAMENTOS[0]);
   const [description, setDescription] = useState("");
   const [priority, setPriority] = useState<"Baja" | "Media" | "Alta">("Media");
   const [observations, setObservations] = useState("");
@@ -291,7 +283,7 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
           numeroSolicitud,
           fecha: localDate,
           hora: localTime,
-          departamento: department,
+          departamento: currentDepartment,
           usuarioCreador: `${currentUser.nombre} (${currentUser.usuario})`,
           descripcion: finalDesc,
           prioridad: priority,
@@ -328,7 +320,7 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
           tipo: "Creación",
           solicitudId: newId,
           numeroSolicitud,
-          descripcionEvent: `Se creó la solicitud ${numeroSolicitud} para el departamento de ${department}.`,
+          descripcionEvent: `Se creó la solicitud ${numeroSolicitud} para el departamento de ${currentDepartment}.`,
           usuarioResponsable: `${currentUser.nombre} (${currentUser.usuario})`,
           fecha: localDate,
           hora: localTime,
@@ -339,7 +331,7 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
         localStorage.setItem("offline_historial", JSON.stringify(histList));
 
         // Notify chat
-        logSystemEvent(`🆕 **Nueva Solicitud**: Se creó la solicitud **${numeroSolicitud}** de **${department}** por el usuario **${currentUser.nombre}** (Prioridad: ${priority}).`);
+        logSystemEvent(`🆕 **Nueva Solicitud**: Se creó la solicitud **${numeroSolicitud}** de **${currentDepartment}** por el usuario **${currentUser.nombre}** (Prioridad: ${priority}).`);
 
         window.dispatchEvent(new Event("offline_solicitudes_update"));
         window.dispatchEvent(new Event("offline_historial_update"));
@@ -347,7 +339,6 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
         setDescription("");
         setObservations("");
         setPriority("Media");
-        setDepartment(DEPARTAMENTOS[0]);
         setSolicitudItems([]);
         setSolicitudCatalogId("");
         setActiveSubTab("list");
@@ -375,7 +366,7 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
         numeroSolicitud,
         fecha: localDate,
         hora: localTime,
-        departamento: department,
+        departamento: currentDepartment,
         usuarioCreador: `${currentUser.nombre} (${currentUser.usuario})`,
         descripcion: finalDesc,
         prioridad: priority,
@@ -406,7 +397,7 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
         tipo: "Creación",
         solicitudId: docRef.id,
         numeroSolicitud,
-        descripcionEvent: `Se creó la solicitud ${numeroSolicitud} para el departamento de ${department}.`,
+        descripcionEvent: `Se creó la solicitud ${numeroSolicitud} para el departamento de ${currentDepartment}.`,
         usuarioResponsable: `${currentUser.nombre} (${currentUser.usuario})`,
         fecha: localDate,
         hora: localTime,
@@ -416,12 +407,11 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
       await addDoc(histCol, histData);
       
       // Notify chat
-      logSystemEvent(`🆕 **Nueva Solicitud**: Se creó la solicitud **${numeroSolicitud}** de **${department}** por el usuario **${currentUser.nombre}** (Prioridad: ${priority}).`);
+      logSystemEvent(`🆕 **Nueva Solicitud**: Se creó la solicitud **${numeroSolicitud}** de **${currentDepartment}** por el usuario **${currentUser.nombre}** (Prioridad: ${priority}).`);
 
       setDescription("");
       setObservations("");
       setPriority("Media");
-      setDepartment(DEPARTAMENTOS[0]);
       setSolicitudItems([]);
       setSolicitudCatalogId("");
       setActiveSubTab("list");
@@ -1359,18 +1349,10 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
     // 6. Creator Filter (Usuario solicitante)
     if (creatorFilter && !item.usuarioCreador.toLowerCase().includes(creatorFilter.toLowerCase())) return false;
 
-    // 7. Role & Department permissions: each department can only see their own requests under strict RBAC.
+    // 7. Role & Department permissions: Almacén y Suministro see all, others only see their own department orders.
     const canSeeAll = currentUser.rol === "Administrador" || currentUser.departamento === "Almacén y Suministro" || currentUser.departamento === "Farmacia";
-    if (!canSeeAll) {
-      if (currentUser.departamento === "Laboratorio") {
-        if (item.departamento !== "Laboratorio" && item.catalogId !== "laboratorio") return false;
-        if (item.departamento === "Odontología") return false;
-      } else if (currentUser.departamento === "Odontología") {
-        if (item.departamento !== "Odontología" && item.catalogId !== "odontologia") return false;
-        if (item.departamento === "Laboratorio") return false;
-      } else {
-        if (item.departamento !== currentUser.departamento) return false;
-      }
+    if (!canSeeAll && item.departamento !== currentDepartment) {
+      return false;
     }
 
     // 8. Search by number or creator name
@@ -1856,21 +1838,9 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
                   <label className="block text-xs font-black uppercase text-slate-500 tracking-wider mb-1.5">
                     Departamento Solicitante
                   </label>
-                  {(currentUser.rol === "Administrador" || currentUser.departamento === "Farmacia") ? (
-                    <select
-                      value={department}
-                      onChange={(e) => setDepartment(e.target.value)}
-                      className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2.5 text-sm outline-none focus:ring-2 focus:ring-teal-400 font-extrabold text-teal-800"
-                    >
-                      {DEPARTAMENTOS.map((d) => (
-                        <option key={d} value={d}>{d}</option>
-                      ))}
-                    </select>
-                  ) : (
-                    <div className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-2.5 text-sm font-extrabold text-teal-800 h-[44px] flex items-center shadow-inner">
-                      {currentUser.departamento || "Servicio General"}
-                    </div>
-                  )}
+                  <div className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-2.5 text-sm font-extrabold text-teal-800 h-[44px] flex items-center shadow-inner">
+                    {currentDepartment}
+                  </div>
                 </div>
                 <div>
                   <label className="block text-xs font-black uppercase text-slate-500 tracking-wider mb-1.5">
@@ -2150,19 +2120,10 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
             if (!canSeeAll) {
               const sol = solicitudes.find(s => s.id === hist.solicitudId || s.numeroSolicitud === hist.numeroSolicitud);
               if (sol) {
-                if (currentUser.departamento === "Laboratorio") {
-                  if (sol.departamento !== "Laboratorio" && sol.catalogId !== "laboratorio") return false;
-                  if (sol.departamento === "Odontología") return false;
-                } else if (currentUser.departamento === "Odontología") {
-                  if (sol.departamento !== "Odontología" && sol.catalogId !== "odontologia") return false;
-                  if (sol.departamento === "Laboratorio") return false;
-                } else {
-                  if (sol.departamento !== currentUser.departamento) return false;
-                }
+                if (sol.departamento !== currentDepartment) return false;
               } else {
-                // Safe check using description event keywords to avoid leaks
-                const otherDepts = ["Laboratorio", "Odontología"].filter(d => d !== currentUser.departamento);
-                if (otherDepts.some(d => hist.descripcionEvent.toLowerCase().includes(d.toLowerCase()))) return false;
+                // Only allow history that clearly belongs to the user's department if no linked solicitud is available.
+                if (!hist.descripcionEvent.toLowerCase().includes(currentDepartment.toLowerCase())) return false;
               }
             }
 

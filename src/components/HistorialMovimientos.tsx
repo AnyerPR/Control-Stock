@@ -97,19 +97,25 @@ export default function HistorialMovimientos({ activeCatalogId, currentUser }: H
       return false;
     }
 
-    // 0b. Strict access control by department / catalog permissions
+    // 0b. Strict access control by department permissions for movement history
     if (currentUser) {
       const canSeeAll = currentUser.rol === "Administrador" || currentUser.departamento === "Almacén y Suministro" || currentUser.departamento === "Farmacia";
       if (!canSeeAll) {
-        if (currentUser.departamento === "Laboratorio" && movCatalogId !== "laboratorio") {
-          return false;
-        }
-        if (currentUser.departamento === "Odontología" && movCatalogId !== "odontologia") {
-          return false;
-        }
         const userCats = currentUser.catalogos || [];
-        if (userCats.length > 0 && !userCats.includes(movCatalogId)) {
-          return false;
+        if (userCats.length > 0) {
+          if (!userCats.includes(movCatalogId)) {
+            return false;
+          }
+        } else {
+          // If the user has no explicit catalog permissions, allow only movements from their own department if the movement is tagged
+          const departmentCatalogIdMap: Record<string, string> = {
+            Laboratorio: "laboratorio",
+            Odontología: "odontologia"
+          };
+          const expectedCatalogId = departmentCatalogIdMap[currentUser.departamento];
+          if (expectedCatalogId && movCatalogId !== expectedCatalogId) {
+            return false;
+          }
         }
       }
     }
