@@ -1,0 +1,21 @@
+{
+  "name": "Control de Stock Hospitalario",
+  "short_name": "ControlStock",
+  "start_url": ".",
+  "display": "standalone",
+  "background_color": "#ffffff",
+  "theme_color": "#0d9488",
+  "description": "Gestión de Inventario y Suministros Hospitalarios",
+  "icons": [
+    {
+      "src": "/logo.png",
+      "sizes": "192x192",
+      "type": "image/png"
+    },
+    {
+      "src": "/logo.png",
+      "sizes": "512x512",
+      "type": "image/png"
+    }
+  ]
+}

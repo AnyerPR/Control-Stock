@@ -75,6 +75,8 @@ const FILTROS_CATALOGO: Record<string, string> = {
 const BLOQUES = Array.from({ length: 26 }, (_, i) => String.fromCharCode(65 + i));
 
 export default function App() {
+  const [deferredPrompt, setDeferredPrompt] = useState<any>(null);
+  const [canInstall, setCanInstall] = useState(false);
   const [products, setProducts] = useState<Producto[]>([]);
   const [blocks, setBlocks] = useState<any[]>([]);
   const [users, setUsers] = useState<Usuario[]>([]);
@@ -167,6 +169,124 @@ export default function App() {
 
   // Click outside export menu / name suggestions to close them
   useEffect(() => {
+    // PWA beforeinstallprompt handling
+    const onBeforeInstallPrompt = (e: any) => {
+      try { e.preventDefault(); } catch (err) {}
+      setDeferredPrompt(e);
+      setCanInstall(true);
+    };
+    const onAppInstalled = () => {
+      setDeferredPrompt(null);
+      setCanInstall(false);
+      showToast("Aplicación instalada correctamente.");
+    };
+    window.addEventListener("beforeinstallprompt", onBeforeInstallPrompt as any);
+    window.addEventListener("appinstalled", onAppInstalled as any);
+    return () => {
+      window.removeEventListener("beforeinstallprompt", onBeforeInstallPrompt as any);
+      window.removeEventListener("appinstalled", onAppInstalled as any);
+    };
+  }, []);
+
+  const handleInstallClick = async () => {
+    if (!deferredPrompt) return;
+    try {
+      deferredPrompt.prompt();
+      const choice = await deferredPrompt.userChoice;
+      if (choice && choice.outcome === "accepted") {
+        showToast("Instalación iniciada.");
+      }
+    } catch (err) {
+      console.error("Install prompt failed:", err);
+    } finally {
+      setDeferredPrompt(null);
+      setCanInstall(false);
+    }
+  };
+
+  // Mass import handler reused by CargaMasiva to ensure product/lot logic is centralized
+  const handleMassImport = async (items: any[], progressCb?: (done: number, total: number) => void) => {
+    // Group by product lookup and lote when provided (to sum quantities per lote)
+    const grouped = new Map<string, { nombre: string; descripcion: string; cantidad: number; precioSum: number; lote?: string; fechaVto?: string; codigo?: string }>();
+    for (let i = 0; i < items.length; i++) {
+      const it = items[i];
+      const code = it.codigo ? String(it.codigo).trim() : undefined;
+      const lookup = code ? code.toLowerCase() : String(it.nombre).trim().toLowerCase().replace(/\s+/g, "");
+      const nombre = String(it.nombre).trim();
+      const desc = it.descripcion || "";
+      const qty = Number(it.cantidad || 0);
+      const price = Number(it.precio || 0);
+      const lote = it.lote ? String(it.lote).trim() : undefined;
+      const fechaVto = it.fechaVto ? String(it.fechaVto).trim() : undefined;
+
+      const key = `${lookup}||${lote ? lote.toLowerCase() : ""}`;
+      if (!grouped.has(key)) grouped.set(key, { nombre, descripcion: desc, cantidad: 0, precioSum: 0, lote, fechaVto, codigo: code });
+      const g = grouped.get(key)!;
+      g.cantidad += qty;
+      g.precioSum += price * qty;
+      if (progressCb) progressCb(i + 1, items.length);
+    }
+
+    const result = { imported: 0, errors: [] as string[], notFound: [] as string[], duplicates: [] as string[], finalProducts: [] as Producto };
+
+    for (const [key, data] of grouped.entries()) {
+      const lookup = key.split("||")[0];
+      const loteProvided = data.lote && String(data.lote).trim() !== "";
+      // Try to find existing product by code or name
+      let existing = undefined as Producto | undefined;
+      if (data.codigo) {
+        existing = products.find((p) => p.codigo.toLowerCase() === String(data.codigo).toLowerCase());
+      }
+      if (!existing) {
+        existing = products.find((p) => p.codigo.toLowerCase() === lookup) || products.find((p) => p.nombre.toLowerCase().replace(/\s+/g, "") === lookup);
+      }
+
+      const avgPrice = data.cantidad > 0 ? Math.round((data.precioSum / data.cantidad) * 100) / 100 : 0;
+
+      // Determine lote number to use
+      const loteNum = loteProvided ? String(data.lote).trim() : `CM-${Date.now()}-${Math.random().toString(36).slice(2,6)}`;
+      const loteId = `lote-${existing ? existing.codigo : generateNextCode(activeCatalogId)}-${Date.now()}-${Math.random().toString(36).slice(2,6)}`;
+
+      // If existing product and lote already exists -> treat as duplicate (do not create duplicate lote)
+      if (existing && loteProvided) {
+        const existsLot = (existing.lotes || []).some((l) => (l.numeroLote || "").toLowerCase() === String(data.lote).toLowerCase());
+        if (existsLot) {
+          result.duplicates.push(`Producto ${existing.codigo} - Lote ${data.lote} ya existe.`);
+          continue;
+        }
+      }
+
+      const newLot: Lote = {
+        id: loteId,
+        numeroLote: loteNum,
+        cantidad: data.cantidad,
+        cantidadF: data.cantidad,
+        fechaVencimiento: data.fechaVto || "",
+        precio: avgPrice,
+        loteFisico: "Carga Masiva",
+        fechaFisica: data.fechaVto || ""
+      };
+
+      if (existing) {
+        const updated: Producto = { ...existing, lotes: [...(existing.lotes || []), newLot], updatedAt: Date.now() };
+        await saveProductDoc(updated);
+        await saveMovementLog({ productoCodigo: updated.codigo, productoNombre: updated.nombre, lote: loteNum, cantidad: data.cantidad, precio: avgPrice, tipoMovimiento: "Entrada", usuario: currentUser ? `${currentUser.nombre} (${currentUser.usuario})` : "Carga Masiva", fecha: new Date().toISOString(), timestamp: Date.now(), catalogId: activeCatalogId });
+        result.imported++;
+        result.finalProducts.push(updated);
+      } else {
+        // Create new product using the existing creation logic
+        const newCode = generateNextCode(activeCatalogId);
+        const newProduct: Producto = { codigo: newCode, nombre: data.nombre, descripcion: data.descripcion || "", lotes: [newLot], updatedAt: Date.now(), catalogId: activeCatalogId };
+        await saveProductDoc(newProduct);
+        await saveMovementLog({ productoCodigo: newProduct.codigo, productoNombre: newProduct.nombre, lote: loteNum, cantidad: data.cantidad, precio: avgPrice, tipoMovimiento: "Entrada", usuario: currentUser ? `${currentUser.nombre} (${currentUser.usuario})` : "Carga Masiva", fecha: new Date().toISOString(), timestamp: Date.now(), catalogId: activeCatalogId });
+        result.imported++;
+        result.finalProducts.push(newProduct);
+      }
+    }
+
+    // Return result
+    return result;
+  };
     function handleClickOutside(event: MouseEvent) {
       if (exportMenuRef.current && !exportMenuRef.current.contains(event.target as Node)) {
         setShowExportMenu(false);
@@ -1864,20 +1984,23 @@ export default function App() {
         <div className="bg-slate-100 text-slate-800 min-h-screen pb-24 font-sans selection:bg-teal-500 selection:text-white">
           <header className="sticky top-0 z-30 text-white shadow-md bg-custom-sidebar">
             <div className="px-6 pt-4 pb-3 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-              <div>
-                <h1
-                  className="text-xl font-black leading-tight flex items-center gap-1.5 cursor-pointer"
-                  onClick={() => {
-                    setActiveTab(currentUser.rol === "Operador" ? "solicitudes" : "inventory");
-                    setShowBlocks(false);
-                    setSelectedBlock(null);
-                  }}
-                >
-                  Control de Stock
-                </h1>
-                <p className="text-teal-100 text-xs font-semibold opacity-90">
-                  Suministros Hospitalarios • Dr. José Manuel Rodríguez
-                </p>
+              <div className="flex items-center gap-3">
+                <img src="/logo.png" alt="Logo" className="h-10 w-auto rounded-md" />
+                <div>
+                  <h1
+                    className="text-xl font-black leading-tight flex items-center gap-1.5 cursor-pointer"
+                    onClick={() => {
+                      setActiveTab(currentUser.rol === "Operador" ? "solicitudes" : "inventory");
+                      setShowBlocks(false);
+                      setSelectedBlock(null);
+                    }}
+                  >
+                    Control de Stock
+                  </h1>
+                  <p className="text-teal-100 text-xs font-semibold opacity-90">
+                    Suministros Hospitalarios • Dr. José Manuel Rodríguez
+                  </p>
+                </div>
               </div>
 
               {/* Selector Global de Catálogo */}
@@ -1920,6 +2043,16 @@ export default function App() {
                 >
                   {isMuted ? <VolumeX className="w-4.5 h-4.5 text-rose-300" /> : <Volume2 className="w-4.5 h-4.5 text-emerald-300" />}
                 </button>
+
+                {canInstall && (
+                  <button
+                    onClick={handleInstallClick}
+                    className="p-2.5 bg-white/10 hover:bg-white/20 active:scale-95 transition rounded-xl text-white shadow-sm flex items-center justify-center cursor-pointer"
+                    title="Instalar aplicación"
+                  >
+                    <FileDown className="w-4.5 h-4.5" />
+                  </button>
+                )}
 
                 {currentUser.rol === "Administrador" && (
                   <button
@@ -2198,6 +2331,7 @@ export default function App() {
                 onImportComplete={(updated) => setProducts(updated)}
                 showToast={showToast}
                 activeCatalogId={activeCatalogId}
+                performImport={handleMassImport}
               />
             )}
 

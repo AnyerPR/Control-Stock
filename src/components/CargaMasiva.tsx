@@ -12,6 +12,7 @@ interface CargaMasivaProps {
   onImportComplete: (updatedProducts: Producto[]) => void;
   showToast: (message: string) => void;
   activeCatalogId: string;
+  performImport?: (items: any[], progressCb?: (done: number, total: number) => void) => Promise<any>;
 }
 
 interface ImportSummary {
@@ -22,7 +23,7 @@ interface ImportSummary {
   errors: string[];
 }
 
-export default function CargaMasiva({ products, currentUser, onImportComplete, showToast, activeCatalogId }: CargaMasivaProps) {
+export default function CargaMasiva({ products, currentUser, onImportComplete, showToast, activeCatalogId, performImport }: CargaMasivaProps) {
   const [isDragging, setIsDragging] = useState(false);
   const [loading, setLoading] = useState(false);
   const [summary, setSummary] = useState<ImportSummary | null>(null);
@@ -108,195 +109,290 @@ export default function CargaMasiva({ products, currentUser, onImportComplete, s
         const workbook = XLSX.read(data, { type: "array" });
         const firstSheetName = workbook.SheetNames[0];
         const worksheet = workbook.Sheets[firstSheetName];
-        const rawRows = XLSX.utils.sheet_to_json(worksheet) as any[];
 
-        if (rawRows.length === 0) {
-          setSummary({
-            total: 0,
-            imported: 0,
-            notFound: [],
-            duplicates: [],
-            errors: ["El archivo de Excel está vacío."]
-          });
+        // Read sheet as rows to allow ignoring first 9 rows and using row 10 as headers
+        const rows: any[][] = XLSX.utils.sheet_to_json(worksheet, { header: 1, raw: false });
+        if (!rows || rows.length < 10) {
+          setSummary({ total: 0, imported: 0, notFound: [], duplicates: [], errors: ["La planilla no contiene la fila de encabezados en la fila 10."] });
           setLoading(false);
           playSound("negative");
           return;
         }
 
-        const notFound: string[] = [];
-        const duplicates: string[] = [];
+        const headerRow = rows[9] as any[]; // 0-based index -> row 10
+        if (!headerRow || headerRow.length === 0) {
+          setSummary({ total: 0, imported: 0, notFound: [], duplicates: [], errors: ["Encabezado (fila 10) vacío o no válido."] });
+          setLoading(false);
+          playSound("negative");
+          return;
+        }
+
+        // Build header map: normalized header -> column index
+        const headerMap = new Map<string, number>();
+        headerRow.forEach((h, idx) => {
+          if (!h && h !== 0) return;
+          const key = cleanHeader(String(h));
+          headerMap.set(key, idx);
+        });
+
+        // Required headers detection
+        const requiredCandidates = ["suministro", "cantidad", "costounit", "costo", "cantidad"]; // variations
+        const hasSuministro = [...headerMap.keys()].some((k) => k.includes("suministro") || k.includes("producto") || k.includes("nombre") || k.includes("medicamento") || k.includes("insumo"));
+        const hasCantidad = [...headerMap.keys()].some((k) => k.includes("cantidad") || k.includes("cant"));
+        const hasCosto = [...headerMap.keys()].some((k) => k.includes("costounit") || k.includes("costo") || k.includes("precio") || k.includes("preciounitario") || k.includes("valor"));
+
+        if (!hasSuministro || !hasCantidad || !hasCosto) {
+          setSummary({ total: 0, imported: 0, notFound: [], duplicates: [], errors: ["Encabezados obligatorios faltantes (Suministro, Cantidad, Costo Unit.)."] });
+          setLoading(false);
+          playSound("negative");
+          return;
+        }
+
+        // Parse rows starting at row index 10 (0-based)
+        const previewItems: any[] = [];
         const errors: string[] = [];
-        let importedCount = 0;
+        const ignored = { empty: 0 };
 
-        // Map existing products by name and code for fast lookup (filtered by activeCatalogId)
-        const productsMapByName = new Map<string, Producto>();
-        const productsMapByCode = new Map<string, Producto>();
-        products.forEach((p) => {
-          const prodCatalogId = p.catalogId || "default-cat";
-          if (prodCatalogId === activeCatalogId) {
-            const cleanName = p.nombre.toLowerCase().replace(/\s+/g, "");
-            productsMapByName.set(cleanName, p);
-            productsMapByCode.set(p.codigo.toLowerCase(), p);
+        for (let r = 10; r < rows.length; r++) {
+          const raw = rows[r] as any[];
+          if (!raw || raw.length === 0 || raw.every((c) => c === null || c === undefined || String(c).trim() === "")) {
+            ignored.empty++;
+            continue;
           }
-        });
 
-        const productsToUpdate = new Map<string, Producto>();
-        const movementLogs: Movimiento[] = [];
-
-        for (let i = 0; i < rawRows.length; i++) {
-          const row = rawRows[i];
-          const rowNum = i + 2; // Rows are 1-based, plus header row is row 1, so data starts at row 2
-
-          let supplyNameOrCode = "";
-          let lotNum = "";
-          let expDateRaw = "";
-          let qty = 0;
-          let priceVal = 0;
-
-          // Align headers dynamically
-          Object.keys(row).forEach((key) => {
-            const cleanKey = cleanHeader(key);
-            const val = row[key];
-
-            if (["producto", "nombre", "medicamento", "insumo", "codigo"].includes(cleanKey)) {
-              supplyNameOrCode = String(val).trim();
-            } else if (["lote", "nºdelote", "numerodelote", "numlote"].includes(cleanKey)) {
-              lotNum = String(val).trim();
-            } else if (["vencimiento", "fechadevencimiento", "fecha", "vence", "fechavencimiento"].includes(cleanKey)) {
-              expDateRaw = normalizeDate(val);
-            } else if (["cantidad", "cant", "unidades"].includes(cleanKey)) {
-              qty = Number(val);
-            } else if (["precio", "preciounitario", "costo", "valor"].includes(cleanKey)) {
-              priceVal = Number(val);
+          const getCell = (names: string[]) => {
+            for (const n of names) {
+              const key = cleanHeader(n);
+              if (headerMap.has(key)) return raw[headerMap.get(key)!];
             }
-          });
-
-          if (!supplyNameOrCode) {
-            errors.push(`Fila ${rowNum}: Nombre o código del suministro no especificado.`);
-            continue;
-          }
-
-          // Lookup product
-          const cleanLookup = supplyNameOrCode.toLowerCase().replace(/\s+/g, "");
-          let product = productsMapByCode.get(cleanLookup) || productsMapByName.get(cleanLookup);
-
-          if (!product) {
-            notFound.push(`Fila ${rowNum}: "${supplyNameOrCode}" (No se encuentra en el inventario actual).`);
-            continue;
-          }
-
-          if (!lotNum) {
-            errors.push(`Fila ${rowNum}: "${supplyNameOrCode}" - Número de lote vacío.`);
-            continue;
-          }
-
-          if (isNaN(qty) || qty <= 0) {
-            errors.push(`Fila ${rowNum}: "${supplyNameOrCode}" - Cantidad inválida o menor a 1 (${qty || 0}).`);
-            continue;
-          }
-
-          if (isNaN(priceVal) || priceVal < 0) {
-            errors.push(`Fila ${rowNum}: "${supplyNameOrCode}" - Precio inválido (${priceVal || 0}).`);
-            continue;
-          }
-
-          const expiration = new Date(expDateRaw + "T00:00:00");
-          if (!expDateRaw || isNaN(expiration.getTime())) {
-            errors.push(`Fila ${rowNum}: "${supplyNameOrCode}" - Fecha de vencimiento vacía o inválida (${expDateRaw || ""}).`);
-            continue;
-          }
-
-          // Check if this lot already exists in the local state or database
-          const activeProduct = productsToUpdate.get(product.codigo) || JSON.parse(JSON.stringify(product));
-          if (activeProduct.lotes.some((l: Lote) => l.numeroLote.toLowerCase() === lotNum.toLowerCase())) {
-            duplicates.push(`Fila ${rowNum}: "${supplyNameOrCode}" - El Lote "${lotNum}" ya existe para este producto.`);
-            continue;
-          }
-
-          const newLot: Lote = {
-            id: `lote-${product.codigo}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-            numeroLote: lotNum,
-            cantidad: qty,
-            cantidadF: qty,
-            fechaVencimiento: expDateRaw,
-            precio: priceVal,
-            loteFisico: "Carga Masiva",
-            fechaFisica: expDateRaw
+            // fallback: try keys in headerMap that include the names
+            for (const [k, idx] of headerMap.entries()) {
+              for (const n of names) {
+                if (k.includes(cleanHeader(n))) return raw[idx];
+              }
+            }
+            return undefined;
           };
 
-          activeProduct.lotes.push(newLot);
-          activeProduct.updatedAt = Date.now();
-          productsToUpdate.set(product.codigo, activeProduct);
+          const suministro = getCell(["Suministro", "Producto", "Nombre", "Medicamento", "Insumo"]);
+          const uEmision = getCell(["U. de Emision", "U. de Emisión", "UdeEmision", "U. de Emision"]);
+          const cantidadRaw = getCell(["Cantidad", "Cant", "Unidades"]);
+          const costoRaw = getCell(["Costo Unit.", "Costo Unit", "Costo", "Precio", "Precio Unit.", "PrecioUnit"]);
+          const codigoRaw = getCell(["Código", "Codigo", "Cod"]);
+          const loteRaw = getCell(["Nº de Lote", "NºdeLote", "Numero de Lote", "Nro de Lote", "Lote", "NumLote"]);
+          const fechaVtoRaw = getCell(["Fecha Vto", "FechaVto", "Fecha Vencimiento", "FechaVencimiento", "Vto", "Vencimiento"]);
 
-          const movement: Movimiento = {
-            id: `mov-${product.codigo}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-            productoCodigo: product.codigo,
-            productoNombre: product.nombre,
-            lote: lotNum,
-            cantidad: qty,
-            precio: priceVal,
-            tipoMovimiento: "Entrada",
-            usuario: currentUser ? `${currentUser.nombre} (${currentUser.usuario})` : "Carga Masiva",
-            fecha: new Date().toISOString(),
-            timestamp: Date.now(),
-            catalogId: activeCatalogId
-          };
-
-          movementLogs.push(movement);
-          importedCount++;
-        }
-
-        if (productsToUpdate.size > 0) {
-          const batch = writeBatch(db);
-          const productsCol = collection(db, "productos");
-          const movementsCol = collection(db, "movimientos");
-
-          for (const [code, updatedProd] of productsToUpdate.entries()) {
-            const prodRef = doc(productsCol, code.replace(/\//g, "_"));
-            batch.set(prodRef, { ...updatedProd, verificado: false });
+          const rowNum = r + 1;
+          if (!suministro || String(suministro).trim() === "") {
+            errors.push(`Fila ${rowNum}: Suministro obligatorio vacío.`);
+            continue;
           }
 
-          for (const mov of movementLogs) {
-            const movRef = doc(movementsCol, mov.id);
-            batch.set(movRef, mov);
+          const cantidad = Number(String(cantidadRaw || "").replace(/\s+/g, "").replace(/,/g, ""));
+          const precio = Number(String(costoRaw || "").replace(/\s+/g, "").replace(/,/g, ""));
+
+          if (isNaN(cantidad) || cantidad <= 0) {
+            errors.push(`Fila ${rowNum}: Cantidad inválida ('${cantidadRaw}').`);
+            continue;
           }
 
-          await batch.commit();
+          if (isNaN(precio) || precio < 0) {
+            errors.push(`Fila ${rowNum}: Precio inválido ('${costoRaw}').`);
+            continue;
+          }
 
-          // Construct final products array to notify App.tsx
-          const finalProducts = products.map((p) => {
-            const updated = productsToUpdate.get(p.codigo);
-            return updated ? { ...updated, verificado: false } : p;
+          // Normalize date if present
+          const fechaVto = fechaVtoRaw ? normalizeDate(fechaVtoRaw) : "";
+
+          previewItems.push({
+            row: rowNum,
+            codigo: codigoRaw ? String(codigoRaw).trim() : undefined,
+            nombre: String(suministro).trim(),
+            descripcion: uEmision ? String(uEmision).trim() : "",
+            lote: loteRaw ? String(loteRaw).trim() : undefined,
+            fechaVto,
+            cantidad,
+            precio
           });
-
-          onImportComplete(finalProducts);
-          showToast(`Se importaron ${importedCount} lotes de forma masiva.`);
         }
 
-        setSummary({
-          total: rawRows.length,
-          imported: importedCount,
-          notFound,
-          duplicates,
-          errors
-        });
-        playSound("positive");
+        setPreview(previewItems);
+        setPreviewErrors(errors);
+        setIgnoredCount(ignored.empty || 0);
+        setLoading(false);
+        playSound(errors.length > 0 ? "negative" : "positive");
       } catch (err) {
         console.error("Error processing Excel file:", err);
-        setSummary({
-          total: 0,
-          imported: 0,
-          notFound: [],
-          duplicates: [],
-          errors: [`Error fatal de lectura: ${err instanceof Error ? err.message : String(err)}`]
-        });
-        playSound("negative");
-      } finally {
+        setSummary({ total: 0, imported: 0, notFound: [], duplicates: [], errors: [`Error fatal de lectura: ${err instanceof Error ? err.message : String(err)}`] });
         setLoading(false);
+        playSound("negative");
       }
     };
 
     reader.readAsArrayBuffer(file);
+  };
+
+  // New preview states
+  const [preview, setPreview] = useState<any[] | null>(null);
+  const [previewErrors, setPreviewErrors] = useState<string[]>([]);
+  const [ignoredCount, setIgnoredCount] = useState<number>(0);
+  const [importing, setImporting] = useState(false);
+  const [progress, setProgress] = useState<{ done: number; total: number } | null>(null);
+
+  const handleConfirmImport = async () => {
+    if (!preview || preview.length === 0) {
+      showToast("No hay filas válidas para importar.");
+      return;
+    }
+
+    if (!performImport && !performImportLocal) {
+      showToast("Función de importación no disponible.");
+      return;
+    }
+
+    setImporting(true);
+    setProgress({ done: 0, total: preview.length });
+
+    try {
+      const importFn = performImport || performImportLocal;
+      const result = await importFn(preview, (done, total) => setProgress({ done, total }));
+      // result expected: { imported, errors, notFound }
+      setSummary({ total: preview.length + ignoredCount, imported: result.imported || 0, notFound: result.notFound || [], duplicates: result.duplicates || [], errors: result.errors || [] });
+      if (result.imported && result.imported > 0) {
+        showToast(`Se importaron ${result.imported} productos/lotes.`);
+        playSound("positive");
+      } else {
+        playSound("negative");
+      }
+      // Notify parent app with updated products if provided
+      if (result.finalProducts) onImportComplete(result.finalProducts);
+    } catch (err) {
+      console.error("Import error:", err);
+      showToast("Error durante la importación masiva.");
+      playSound("negative");
+      setSummary({ total: preview.length + ignoredCount, imported: 0, notFound: [], duplicates: [], errors: [(err instanceof Error ? err.message : String(err))] });
+    } finally {
+      setImporting(false);
+      setProgress(null);
+      setPreview(null);
+    }
+  };
+
+  const handleCancelPreview = () => {
+    setPreview(null);
+    setPreviewErrors([]);
+    setIgnoredCount(0);
+  };
+
+  // Local fallback import using existing batch logic (used if App doesn't pass performImport)
+  const performImportLocal = async (items: any[], progressCb?: (done: number, total: number) => void) => {
+    const notFound: string[] = [];
+    const duplicates: string[] = [];
+    const errors: string[] = [];
+    let imported = 0;
+
+    // Build maps
+    const productsMapByName = new Map<string, Producto>();
+    const productsMapByCode = new Map<string, Producto>();
+    products.forEach((p) => {
+      const prodCatalogId = p.catalogId || "default-cat";
+      if (prodCatalogId === activeCatalogId) {
+        const cleanName = p.nombre.toLowerCase().replace(/\s+/g, "");
+        productsMapByName.set(cleanName, p);
+        productsMapByCode.set(p.codigo.toLowerCase(), p);
+      }
+    });
+
+    const productsToUpdate = new Map<string, Producto>();
+    const movementLogs: Movimiento[] = [];
+
+    for (let i = 0; i < items.length; i++) {
+      const it = items[i];
+      const codeCandidate = it.codigo ? String(it.codigo).trim().toLowerCase() : undefined;
+      const nameCandidate = String(it.nombre).trim();
+      const lookupKey = codeCandidate || nameCandidate.toLowerCase().replace(/\s+/g, "");
+
+      let product = codeCandidate ? productsMapByCode.get(codeCandidate) : undefined;
+      if (!product) product = productsMapByName.get(lookupKey);
+
+      // If not found, create minimal product record (generate code)
+      if (!product) {
+        // Generate code naive: prefix 'P' + timestamp
+        const genCode = `P${Date.now()}${Math.random().toString(36).slice(2,5)}`;
+        const newProd: Producto = {
+          codigo: genCode,
+          nombre: nameCandidate,
+          descripcion: it.descripcion || "",
+          lotes: [],
+          updatedAt: Date.now(),
+          catalogId: activeCatalogId
+        };
+        productsToUpdate.set(newProd.codigo, newProd);
+        product = newProd;
+      }
+
+      // Group occurrences: we'll create a single lote per occurrence (or we could aggregate external duplicates)
+      const loteId = `lote-${product.codigo}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+      const loteNum = `CM-${Date.now()}`;
+      const newLot: Lote = {
+        id: loteId,
+        numeroLote: loteNum,
+        cantidad: Number(it.cantidad || 0),
+        cantidadF: Number(it.cantidad || 0),
+        fechaVencimiento: "",
+        precio: Number(it.precio || 0),
+        loteFisico: "Carga Masiva",
+        fechaFisica: ""
+      };
+
+      const existing = productsToUpdate.get(product.codigo) || JSON.parse(JSON.stringify(product));
+      existing.lotes = existing.lotes || [];
+      existing.lotes.push(newLot);
+      existing.updatedAt = Date.now();
+      productsToUpdate.set(existing.codigo, existing);
+
+      movementLogs.push({
+        id: `mov-${existing.codigo}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+        productoCodigo: existing.codigo,
+        productoNombre: existing.nombre,
+        lote: loteNum,
+        cantidad: newLot.cantidad,
+        precio: newLot.precio,
+        tipoMovimiento: "Entrada",
+        usuario: currentUser ? `${currentUser.nombre} (${currentUser.usuario})` : "Carga Masiva",
+        fecha: new Date().toISOString(),
+        timestamp: Date.now(),
+        catalogId: activeCatalogId
+      });
+
+      imported++;
+      if (progressCb) progressCb(i + 1, items.length);
+    }
+
+    // Commit to Firestore
+    if (productsToUpdate.size > 0) {
+      const batch = writeBatch(db);
+      const productsCol = collection(db, "productos");
+      const movementsCol = collection(db, "movimientos");
+
+      for (const [code, updatedProd] of productsToUpdate.entries()) {
+        batch.set(doc(productsCol, code.replace(/\//g, "_")), { ...updatedProd, verificado: false });
+      }
+
+      for (const mov of movementLogs) {
+        batch.set(doc(movementsCol, mov.id), mov);
+      }
+
+      await batch.commit();
+    }
+
+    // Build finalProducts to return if needed
+    const finalProducts = products.map((p) => {
+      const updated = productsToUpdate.get(p.codigo);
+      return updated ? { ...updated, verificado: false } : p;
+    });
+
+    return { imported, notFound, duplicates, errors, finalProducts };
   };
 
   const triggerFileBrowser = () => {
@@ -349,6 +445,63 @@ export default function CargaMasiva({ products, currentUser, onImportComplete, s
             </div>
           )}
         </form>
+
+        {preview && (
+          <div className="mt-6 bg-white rounded-2xl border border-slate-200 p-4">
+            <h4 className="font-bold text-sm mb-3">Previsualización ({preview.length} filas válidas)</h4>
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm table-auto">
+                <thead>
+                  <tr className="text-left text-xs text-slate-500">
+                    <th className="p-2">Nombre</th>
+                    <th className="p-2">Descripción</th>
+                    <th className="p-2">Lote</th>
+                    <th className="p-2">Fecha Vto</th>
+                    <th className="p-2">Cantidad</th>
+                    <th className="p-2">Precio</th>
+                    <th className="p-2">Estado</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {preview.map((row, idx) => (
+                    <tr key={idx} className="border-t border-slate-100">
+                      <td className="p-2 align-top">{row.nombre}</td>
+                      <td className="p-2 align-top">{row.descripcion}</td>
+                      <td className="p-2 align-top font-mono">{row.lote || "-"}</td>
+                      <td className="p-2 align-top font-mono">{row.fechaVto || "-"}</td>
+                      <td className="p-2 align-top font-mono">{row.cantidad}</td>
+                      <td className="p-2 align-top font-mono">{row.precio}</td>
+                      <td className="p-2 align-top text-sm text-emerald-700 font-bold">Válido</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+
+            <div className="mt-4 flex items-center justify-between gap-4">
+              <div className="text-xs text-slate-600">
+                <div>Total filas leídas: {preview.length + ignoredCount}</div>
+                <div>Válidos: {preview.length}</div>
+                <div>Errores: {previewErrors.length}</div>
+                <div>Filas vacías ignoradas: {ignoredCount}</div>
+              </div>
+
+              <div className="flex items-center gap-2">
+                <button onClick={handleCancelPreview} disabled={importing} className="px-3 py-2 rounded-xl bg-rose-50 text-rose-700 text-xs font-bold">Cancelar</button>
+                <button onClick={handleConfirmImport} disabled={importing} className="px-3 py-2 rounded-xl bg-emerald-600 text-white text-xs font-bold">Confirmar importación</button>
+              </div>
+            </div>
+
+            {importing && progress && (
+              <div className="mt-3">
+                <div className="w-full bg-slate-100 rounded-full h-2">
+                  <div className="bg-emerald-600 h-2 rounded-full" style={{ width: `${(progress.done / Math.max(progress.total, 1)) * 100}%` }}></div>
+                </div>
+                <div className="text-xs text-slate-500 mt-1">Procesando {progress.done} / {progress.total}</div>
+              </div>
+            )}
+          </div>
+        )}
       </div>
 
       {summary && (
