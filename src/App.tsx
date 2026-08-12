@@ -287,6 +287,8 @@ export default function App() {
     // Return result
     return result;
   };
+
+  useEffect(() => {
     function handleClickOutside(event: MouseEvent) {
       if (exportMenuRef.current && !exportMenuRef.current.contains(event.target as Node)) {
         setShowExportMenu(false);
