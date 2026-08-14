@@ -3,12 +3,12 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="theme-color" content="#0d9488" />
-    <link rel="manifest" href="/assets/manifest-CROJV6JU.webmanifest" />
-    <link rel="apple-touch-icon" href="/logo.png" />
+    <link rel="manifest" href="./assets/manifest-CROJV6JU.webmanifest" />
+    <link rel="apple-touch-icon" href="./assets/logo-KsiQ_YHG.png" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Control de Stock Hospitalario</title>
     <script>
-      // Polyfill storage APIs to prevent SecurityError under file:// protocol
+      // Storage polyfill for offline / file:// protocol compatibility
       (function() {
         function createMockStorage() {
           var store = {};
@@ -23,42 +23,18 @@
         }
 
         try {
-          var origFetch = window.fetch || (typeof globalThis !== 'undefined' ? globalThis.fetch : undefined);
-          var _fetchImpl = origFetch ? function() { return origFetch.apply(this || window, arguments); } : undefined;
-          
-          var fetchDescriptor = {
-            get: function() { return _fetchImpl; },
-            set: function(v) { _fetchImpl = v; },
-            configurable: true,
-            enumerable: true
-          };
-
-          if (typeof Window !== 'undefined' && Window.prototype) {
-            try { Object.defineProperty(Window.prototype, 'fetch', fetchDescriptor); } catch (e) {}
-          }
-          try { Object.defineProperty(window, 'fetch', fetchDescriptor); } catch (e) {}
-          if (typeof globalThis !== 'undefined' && globalThis !== window) {
-            try { Object.defineProperty(globalThis, 'fetch', fetchDescriptor); } catch (e) {}
-          }
-          if (typeof self !== 'undefined' && self !== window) {
-            try { Object.defineProperty(self, 'fetch', fetchDescriptor); } catch (e) {}
-          }
-        } catch (e) {
-          console.warn("Could not patch fetch descriptor:", e);
-        }
-
-        try {
           var test = window.localStorage;
           if (!test) throw new Error();
           test.setItem('__test__', '1');
           test.removeItem('__test__');
         } catch (e) {
-          console.warn("localStorage is blocked or not supported. Using polyfill.");
-          Object.defineProperty(window, 'localStorage', {
-            value: createMockStorage(),
-            configurable: true,
-            writable: true
-          });
+          try {
+            Object.defineProperty(window, 'localStorage', {
+              value: createMockStorage(),
+              configurable: true,
+              writable: true
+            });
+          } catch (err) {}
         }
 
         try {
@@ -67,36 +43,16 @@
           testSession.setItem('__test__', '1');
           testSession.removeItem('__test__');
         } catch (e) {
-          console.warn("sessionStorage is blocked or not supported. Using polyfill.");
-          Object.defineProperty(window, 'sessionStorage', {
-            value: createMockStorage(),
-            configurable: true,
-            writable: true
-          });
-        }
-
-        try {
-          var idb = window.indexedDB;
-        } catch (e) {
-          console.warn("indexedDB is blocked or not supported. Polyfilling with dummy.");
-          Object.defineProperty(window, 'indexedDB', {
-            value: null,
-            configurable: true,
-            writable: true
-          });
-        }
-
-        if (!window.isSecureContext) {
           try {
-            Object.defineProperty(window, 'isSecureContext', {
-              value: true,
+            Object.defineProperty(window, 'sessionStorage', {
+              value: createMockStorage(),
               configurable: true,
               writable: true
             });
-          } catch (e) {}
+          } catch (err) {}
         }
 
-        // Force cleanup of obsolete service workers and caches
+        // Clean obsolete service worker caches
         try {
           if ('serviceWorker' in navigator) {
             navigator.serviceWorker.getRegistrations().then(function(regs) {
@@ -115,8 +71,8 @@
         } catch (e) {}
       })();
     </script>
-    <script type="module" crossorigin src="/assets/index-FcPhs0eG.js"></script>
-    <link rel="stylesheet" crossorigin href="/assets/index-umGP1blo.css">
+    <script type="module" crossorigin src="./assets/index-CDmcn9lz.js"></script>
+    <link rel="stylesheet" crossorigin href="./assets/index-x1EC_n8u.css">
   </head>
   <body>
     <div id="root"></div>
