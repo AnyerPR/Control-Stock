@@ -29,9 +29,17 @@ const targets = [
   path.resolve(__dirname, '..', 'dist', 'index_todo_en_uno.html'),
 ];
 
-for (const target of targets) {
-  fs.copyFileSync(source, target);
+if (fs.existsSync(source)) {
+  for (const target of targets) {
+    const dir = path.dirname(target);
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
+    }
+    fs.copyFileSync(source, target);
+  }
+  fs.rmSync(path.resolve(__dirname, '..', 'dist', 'single'), { recursive: true, force: true });
+  console.log('Built single-file output and copied index variants successfully.');
+} else {
+  console.warn('Single-file source not found at:', source);
 }
 
-fs.rmSync(path.resolve(__dirname, '..', 'dist', 'single'), { recursive: true, force: true });
-console.log('Built single-file output and copied index variants successfully.');

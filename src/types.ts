@@ -140,3 +140,23 @@ export interface ConfiguracionDoc {
   colores?: ColoresConfig;
   periodoActual?: string;
 }
+
+export interface CargaMasivaRecord {
+  id: string;
+  fecha: string;
+  timestamp: number;
+  usuario: string;
+  activeCatalogId: string;
+  totalItems: number;
+  importedItems: number;
+  nombreArchivo?: string;
+  lotesCreados: Array<{ productoCodigo: string; loteId: string; cantidad: number }>;
+  lotesModificados?: Array<{ productoCodigo: string; loteId: string; cantidadAgregada: number; cantidadPrevia?: number }>;
+  productosCreados: string[];
+  movimientosCreados: string[];
+  snapshotProductos?: Producto[];
+  revertida?: boolean;
+  fechaReversion?: string;
+  usuarioReversion?: string;
+}
+

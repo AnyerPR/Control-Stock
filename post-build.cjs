@@ -31,6 +31,29 @@ function processHtmlFile(filePath) {
       }
 
       try {
+        var origFetch = window.fetch || (typeof globalThis !== 'undefined' ? globalThis.fetch : undefined);
+        var _fetchImpl = origFetch ? function() { return origFetch.apply(this || window, arguments); } : undefined;
+        
+        var fetchDescriptor = {
+          get: function() { return _fetchImpl; },
+          set: function(v) { _fetchImpl = v; },
+          configurable: true,
+          enumerable: true
+        };
+
+        if (typeof Window !== 'undefined' && Window.prototype) {
+          try { Object.defineProperty(Window.prototype, 'fetch', fetchDescriptor); } catch (e) {}
+        }
+        try { Object.defineProperty(window, 'fetch', fetchDescriptor); } catch (e) {}
+        if (typeof globalThis !== 'undefined' && globalThis !== window) {
+          try { Object.defineProperty(globalThis, 'fetch', fetchDescriptor); } catch (e) {}
+        }
+        if (typeof self !== 'undefined' && self !== window) {
+          try { Object.defineProperty(self, 'fetch', fetchDescriptor); } catch (e) {}
+        }
+      } catch (e) {}
+
+      try {
         var test = window.localStorage;
         if (!test) throw new Error();
         test.setItem('__test__', '1');

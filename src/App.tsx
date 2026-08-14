@@ -1,12 +1,13 @@
 import React, { useState, useEffect, useRef } from "react";
 import { collection, doc, query, onSnapshot, getDocs, getDoc, writeBatch, updateDoc, setDoc, deleteDoc } from "firebase/firestore";
 import { db } from "./firebase";
-import { Producto, Usuario, Lote, Movimiento, ColoresConfig, Departamento, getEnabledModules } from "./types";
+import { Producto, Usuario, Lote, Movimiento, ColoresConfig, Departamento, getEnabledModules, CargaMasivaRecord } from "./types";
 import { playSound, setMuteState } from "./utils/audio";
 import { hashPassword } from "./components/Login";
 
 // Componentes modulares
 import MarqueeText from "./components/MarqueeText";
+import appLogo from "./Logo.png";
 import CargaMasiva from "./components/CargaMasiva";
 import HistorialMovimientos from "./components/HistorialMovimientos";
 import BlockPanel from "./components/BlockPanel";
@@ -18,6 +19,13 @@ import ConfiguracionPanel from "./components/ConfiguracionPanel";
 import ChatLateral from "./components/ChatLateral";
 import { logSystemEvent } from "./utils/chatHelper";
 import { exportToWord, exportToPDF } from "./utils/exportUtils";
+import {
+  normalizeSupplyName,
+  normalizeCompactName,
+  getInitialPrefix,
+  generateNextCodeConsecutive,
+  analyzeItemMatch
+} from "./utils/productMatching";
 
 // Suministros predefinidos para autosembrado (si la base de datos está vacía)
 import { bH as DEFAULT_PRODUCTS } from "./defaultProducts";
@@ -83,6 +91,7 @@ export default function App() {
   const [departamentos, setDepartamentos] = useState<Departamento[]>([]);
   const [catalogos, setCatalogos] = useState<any[]>([]);
   const [activeCatalogId, setActiveCatalogId] = useState<string>("default-cat");
+  const [cargasMasivasList, setCargasMasivasList] = useState<CargaMasivaRecord[]>([]);
   const [currentUser, setCurrentUser] = useState<Usuario | null>(() => {
     const saved = localStorage.getItem("current_user");
     if (saved) {
@@ -204,88 +213,393 @@ export default function App() {
     }
   };
 
-  // Mass import handler reused by CargaMasiva to ensure product/lot logic is centralized
-  const handleMassImport = async (items: any[], progressCb?: (done: number, total: number) => void) => {
-    // Group by product lookup and lote when provided (to sum quantities per lote)
-    const grouped = new Map<string, { nombre: string; descripcion: string; cantidad: number; precioSum: number; lote?: string; fechaVto?: string; codigo?: string }>();
+  // Mass import handler: Never deletes existing products; matches by (nombre + descripcion); creates lotes or new products; logs batch record
+  const handleMassImport = async (
+    items: any[],
+    nombreArchivo?: string,
+    progressCb?: (done: number, total: number) => void
+  ) => {
+    const isLocalFileMode = typeof window !== "undefined" && window.location.protocol === "file:";
+
+    const initialCatalogProducts = products.filter(p => (p.catalogId || "default-cat") === activeCatalogId);
+    // Keep a pristine snapshot of products before this mass import
+    const snapshotBeforeCarga: Producto[] = JSON.parse(JSON.stringify(products));
+    const workingProducts = JSON.parse(JSON.stringify(products)) as Producto[];
+    const productosToSaveMap = new Map<string, Producto>();
+    const movimientosToSave: Movimiento[] = [];
+
+    const lotesCreados: Array<{ productoCodigo: string; loteId: string; cantidad: number }> = [];
+    const lotesModificados: Array<{ productoCodigo: string; loteId: string; cantidadAgregada: number; cantidadPrevia?: number }> = [];
+    const productosCreados: string[] = [];
+    const movimientosCreados: string[] = [];
+
+    const usuarioStr = currentUser ? `${currentUser.nombre} (${currentUser.usuario})` : "Carga Masiva";
+
     for (let i = 0; i < items.length; i++) {
       const it = items[i];
-      const code = it.codigo ? String(it.codigo).trim() : undefined;
-      const lookup = code ? code.toLowerCase() : String(it.nombre).trim().toLowerCase().replace(/\s+/g, "");
-      const nombre = String(it.nombre).trim();
-      const desc = it.descripcion || "";
-      const qty = Number(it.cantidad || 0);
-      const price = Number(it.precio || 0);
-      const lote = it.lote ? String(it.lote).trim() : undefined;
-      const fechaVto = it.fechaVto ? String(it.fechaVto).trim() : undefined;
+      const itemNombre = String(it.nombre || "").trim();
+      const itemDesc = it.descripcion ? String(it.descripcion).trim() : "";
+      const itemQty = Number(it.cantidad || 0);
+      const itemPrice = Number(it.precio || 0);
+      const itemLote = it.lote ? String(it.lote).trim() : undefined;
+      const itemFechaVto = it.fechaVto ? String(it.fechaVto).trim() : "";
+      const explicitTargetCode = it.targetProductCode ? String(it.targetProductCode).trim() : undefined;
 
-      const key = `${lookup}||${lote ? lote.toLowerCase() : ""}`;
-      if (!grouped.has(key)) grouped.set(key, { nombre, descripcion: desc, cantidad: 0, precioSum: 0, lote, fechaVto, codigo: code });
-      const g = grouped.get(key)!;
-      g.cantidad += qty;
-      g.precioSum += price * qty;
-      if (progressCb) progressCb(i + 1, items.length);
-    }
+      if (!itemNombre) continue;
 
-    const result = { imported: 0, errors: [] as string[], notFound: [] as string[], duplicates: [] as string[], finalProducts: [] as Producto };
+      let matchedExistingProd: Producto | null = null;
+      let targetCode = "";
+      const loteNum = itemLote && itemLote !== "" ? itemLote : `CM-${Date.now().toString().slice(-4)}-${Math.floor(Math.random() * 1000)}`;
 
-    for (const [key, data] of grouped.entries()) {
-      const lookup = key.split("||")[0];
-      const loteProvided = data.lote && String(data.lote).trim() !== "";
-      // Try to find existing product by code or name
-      let existing = undefined as Producto | undefined;
-      if (data.codigo) {
-        existing = products.find((p) => p.codigo.toLowerCase() === String(data.codigo).toLowerCase());
-      }
-      if (!existing) {
-        existing = products.find((p) => p.codigo.toLowerCase() === lookup) || products.find((p) => p.nombre.toLowerCase().replace(/\s+/g, "") === lookup);
-      }
+      if (explicitTargetCode) {
+        // Prioridad: Usar el código asignado por el usuario o detectado en la previsualización
+        matchedExistingProd = workingProducts.find(
+          (p) => (p.catalogId || "default-cat") === activeCatalogId && p.codigo.toUpperCase() === explicitTargetCode.toUpperCase()
+        ) || null;
 
-      const avgPrice = data.cantidad > 0 ? Math.round((data.precioSum / data.cantidad) * 100) / 100 : 0;
+        if (matchedExistingProd) {
+          targetCode = matchedExistingProd.codigo;
+        } else {
+          targetCode = explicitTargetCode;
+        }
+      } else {
+        // Realizar análisis de coincidencia automático
+        const analysis = analyzeItemMatch(
+          itemNombre,
+          itemDesc,
+          initialCatalogProducts,
+          workingProducts,
+          activeCatalogId
+        );
 
-      // Determine lote number to use
-      const loteNum = loteProvided ? String(data.lote).trim() : `CM-${Date.now()}-${Math.random().toString(36).slice(2,6)}`;
-      const loteId = `lote-${existing ? existing.codigo : generateNextCode(activeCatalogId)}-${Date.now()}-${Math.random().toString(36).slice(2,6)}`;
-
-      // If existing product and lote already exists -> treat as duplicate (do not create duplicate lote)
-      if (existing && loteProvided) {
-        const existsLot = (existing.lotes || []).some((l) => (l.numeroLote || "").toLowerCase() === String(data.lote).toLowerCase());
-        if (existsLot) {
-          result.duplicates.push(`Producto ${existing.codigo} - Lote ${data.lote} ya existe.`);
-          continue;
+        if (analysis.matchedProduct) {
+          matchedExistingProd = analysis.matchedProduct;
+          targetCode = analysis.matchedProduct.codigo;
+        } else {
+          targetCode = analysis.projectedCode || generateNextCodeConsecutive(activeCatalogId, analysis.prefix, workingProducts);
         }
       }
 
-      const newLot: Lote = {
-        id: loteId,
-        numeroLote: loteNum,
-        cantidad: data.cantidad,
-        cantidadF: data.cantidad,
-        fechaVencimiento: data.fechaVto || "",
-        precio: avgPrice,
-        loteFisico: "Carga Masiva",
-        fechaFisica: data.fechaVto || ""
+      if (matchedExistingProd) {
+        // 1. SI EXISTE: REUTILIZAR CÓDIGO EXISTENTE (No crear nuevo código)
+        const existingProd = matchedExistingProd;
+        targetCode = existingProd.codigo;
+
+        if ((!existingProd.descripcion || existingProd.descripcion.trim() === "") && itemDesc) {
+          existingProd.descripcion = itemDesc;
+        }
+
+        // Buscar si ya existe un lote con ese mismo número de lote
+        const existingLot = existingProd.lotes?.find(
+          (l) => l.numeroLote && normalizeSupplyName(l.numeroLote) === normalizeSupplyName(loteNum)
+        );
+
+        let loteId = "";
+        if (existingLot) {
+          loteId = existingLot.id;
+          const prevQty = Number(existingLot.cantidad || 0);
+          existingLot.cantidad = prevQty + itemQty;
+          existingLot.cantidadF = (Number(existingLot.cantidadF) || prevQty) + itemQty;
+          if (itemPrice > 0) existingLot.precio = itemPrice;
+          if (itemFechaVto) existingLot.fechaVencimiento = itemFechaVto;
+
+          lotesModificados.push({
+            productoCodigo: targetCode,
+            loteId,
+            cantidadAgregada: itemQty,
+            cantidadPrevia: prevQty
+          });
+        } else {
+          loteId = `lote-${targetCode}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+          const newLot: Lote = {
+            id: loteId,
+            numeroLote: loteNum,
+            cantidad: itemQty,
+            cantidadF: itemQty,
+            fechaVencimiento: itemFechaVto,
+            precio: itemPrice,
+            loteFisico: "Almacén",
+            fechaFisica: itemFechaVto
+          };
+          existingProd.lotes = [...(existingProd.lotes || []), newLot];
+          lotesCreados.push({ productoCodigo: targetCode, loteId, cantidad: itemQty });
+        }
+
+        existingProd.updatedAt = Date.now();
+        productosToSaveMap.set(targetCode, existingProd);
+      } else {
+        // 2. SI NO EXISTE: USAR CÓDIGO NUEVO (O ASIGNADO)
+        const loteId = `lote-${targetCode}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+        const newLot: Lote = {
+          id: loteId,
+          numeroLote: loteNum,
+          cantidad: itemQty,
+          cantidadF: itemQty,
+          fechaVencimiento: itemFechaVto,
+          precio: itemPrice,
+          loteFisico: "Almacén",
+          fechaFisica: itemFechaVto
+        };
+
+        const newProd: Producto = {
+          codigo: targetCode,
+          nombre: itemNombre,
+          descripcion: itemDesc,
+          lotes: [newLot],
+          updatedAt: Date.now(),
+          catalogId: activeCatalogId,
+          verificado: false
+        };
+
+        workingProducts.push(newProd);
+        productosToSaveMap.set(targetCode, newProd);
+        if (!productosCreados.includes(targetCode)) {
+          productosCreados.push(targetCode);
+        }
+        lotesCreados.push({ productoCodigo: targetCode, loteId, cantidad: itemQty });
+      }
+
+      // Record movement
+      const movId = `mov-${targetCode}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+      const movRecord: Movimiento = {
+        id: movId,
+        productoCodigo: targetCode,
+        productoNombre: itemNombre,
+        lote: loteNum,
+        cantidad: itemQty,
+        precio: itemPrice,
+        tipoMovimiento: "Entrada",
+        usuario: usuarioStr,
+        fecha: new Date().toISOString(),
+        timestamp: Date.now(),
+        catalogId: activeCatalogId
       };
 
-      if (existing) {
-        const updated: Producto = { ...existing, lotes: [...(existing.lotes || []), newLot], updatedAt: Date.now() };
-        await saveProductDoc(updated);
-        await saveMovementLog({ productoCodigo: updated.codigo, productoNombre: updated.nombre, lote: loteNum, cantidad: data.cantidad, precio: avgPrice, tipoMovimiento: "Entrada", usuario: currentUser ? `${currentUser.nombre} (${currentUser.usuario})` : "Carga Masiva", fecha: new Date().toISOString(), timestamp: Date.now(), catalogId: activeCatalogId });
-        result.imported++;
-        result.finalProducts.push(updated);
-      } else {
-        // Create new product using the existing creation logic
-        const newCode = generateNextCode(activeCatalogId);
-        const newProduct: Producto = { codigo: newCode, nombre: data.nombre, descripcion: data.descripcion || "", lotes: [newLot], updatedAt: Date.now(), catalogId: activeCatalogId };
-        await saveProductDoc(newProduct);
-        await saveMovementLog({ productoCodigo: newProduct.codigo, productoNombre: newProduct.nombre, lote: loteNum, cantidad: data.cantidad, precio: avgPrice, tipoMovimiento: "Entrada", usuario: currentUser ? `${currentUser.nombre} (${currentUser.usuario})` : "Carga Masiva", fecha: new Date().toISOString(), timestamp: Date.now(), catalogId: activeCatalogId });
-        result.imported++;
-        result.finalProducts.push(newProduct);
-      }
+      movimientosToSave.push(movRecord);
+      movimientosCreados.push(movId);
+
+      if (progressCb) progressCb(i + 1, items.length);
     }
 
-    // Return result
-    return result;
+    // Create batch record
+    const cargaRecord: CargaMasivaRecord = {
+      id: `cm-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      fecha: new Date().toLocaleString("es-ES"),
+      timestamp: Date.now(),
+      usuario: usuarioStr,
+      activeCatalogId,
+      totalItems: items.length,
+      importedItems: items.length,
+      nombreArchivo: nombreArchivo || "Carga_Masiva.xlsx",
+      lotesCreados,
+      lotesModificados,
+      productosCreados,
+      movimientosCreados,
+      snapshotProductos: snapshotBeforeCarga,
+      revertida: false
+    };
+
+    // Save to Firestore or LocalStorage
+    if (!isLocalFileMode) {
+      const batch = writeBatch(db);
+
+      for (const prod of productosToSaveMap.values()) {
+        batch.set(doc(db, "productos", prod.codigo.replace(/\//g, "_")), prod);
+      }
+
+      for (const mov of movimientosToSave) {
+        batch.set(doc(db, "movimientos", mov.id), mov);
+      }
+
+      batch.set(doc(db, "cargas_masivas", cargaRecord.id), cargaRecord);
+
+      await batch.commit();
+    } else {
+      localStorage.setItem("offline_productos", JSON.stringify(workingProducts));
+
+      let storedMovs = JSON.parse(localStorage.getItem("offline_movimientos") || "[]");
+      storedMovs = [...movimientosToSave, ...storedMovs];
+      localStorage.setItem("offline_movimientos", JSON.stringify(storedMovs));
+
+      let storedCMs = JSON.parse(localStorage.getItem("offline_cargas_masivas") || "[]");
+      storedCMs = [cargaRecord, ...storedCMs];
+      localStorage.setItem("offline_cargas_masivas", JSON.stringify(storedCMs));
+
+      window.dispatchEvent(new Event("offline_productos_update"));
+      window.dispatchEvent(new Event("offline_movimientos_update"));
+      window.dispatchEvent(new Event("offline_cargas_masivas_update"));
+    }
+
+    setProducts(workingProducts);
+    setCargasMasivasList((prev) => [cargaRecord, ...prev]);
+
+    logSystemEvent(
+      `📦 **Carga Masiva Exitosa**: Se cargaron **${items.length}** ítems (${productosCreados.length} productos nuevos, ${lotesCreados.length} lotes agregados) por el usuario ${cargaRecord.usuario}.`
+    );
+
+    return {
+      imported: items.length,
+      errors: [],
+      notFound: [],
+      duplicates: [],
+      finalProducts: workingProducts,
+      cargaRecordId: cargaRecord.id
+    };
+  };
+
+  // Revert Carga Masiva Handler
+  const handleRevertirCarga = async (cargaId: string): Promise<boolean> => {
+    const isLocalFileMode = typeof window !== "undefined" && window.location.protocol === "file:";
+
+    const record = cargasMasivasList.find((c) => c.id === cargaId);
+    if (!record) {
+      showToast("No se encontró la carga masiva seleccionada.");
+      return false;
+    }
+
+    if (record.revertida) {
+      showToast("Esta carga masiva ya fue revertida anteriormente.");
+      return false;
+    }
+
+    if (
+      !confirm(
+        `¿Estás seguro de que deseas revertir la carga masiva del ${record.fecha}?\nSe eliminarán los lotes agregados y los productos creados en esta carga sin afectar datos previos.`
+      )
+    ) {
+      return false;
+    }
+
+    try {
+      const lotesToRemove = new Set<string>((record.lotesCreados || []).map((l) => l.loteId));
+      const lotesModificadosMap = new Map<string, number>();
+      (record.lotesModificados || []).forEach((lm) => {
+        lotesModificadosMap.set(lm.loteId, lm.cantidadAgregada);
+      });
+
+      const newProdsCreated = new Set<string>(record.productosCreados || []);
+      const movsToRemove = new Set<string>(record.movimientosCreados || []);
+
+      const currentProductsList = JSON.parse(JSON.stringify(products)) as Producto[];
+      const productsToSave: Producto[] = [];
+      const productsToDelete: string[] = [];
+
+      // If we have a snapshot and it was the latest action, we can cross-reference safely
+      const affectedCodes = new Set([
+        ...(record.productosCreados || []),
+        ...(record.lotesCreados || []).map((l) => l.productoCodigo),
+        ...(record.lotesModificados || []).map((l) => l.productoCodigo)
+      ]);
+
+      for (const code of affectedCodes) {
+        const prod = currentProductsList.find((p) => p.codigo === code);
+        if (!prod) continue;
+
+        // 1. Remove freshly created lots from this carga
+        let remainingLotes = (prod.lotes || []).filter((l) => !lotesToRemove.has(l.id));
+
+        // 2. Decrement quantity from modified lots
+        remainingLotes = remainingLotes.map((l) => {
+          if (lotesModificadosMap.has(l.id)) {
+            const addedQty = lotesModificadosMap.get(l.id) || 0;
+            const newQty = Math.max(0, (Number(l.cantidad) || 0) - addedQty);
+            const newQtyF = l.cantidadF !== undefined ? Math.max(0, (Number(l.cantidadF) || 0) - addedQty) : newQty;
+            return {
+              ...l,
+              cantidad: newQty,
+              cantidadF: newQtyF
+            };
+          }
+          return l;
+        });
+
+        // If product was newly created during this import and now has no remaining lots
+        if (newProdsCreated.has(code) && remainingLotes.length === 0) {
+          productsToDelete.push(code);
+        } else {
+          productsToSave.push({
+            ...prod,
+            lotes: remainingLotes,
+            updatedAt: Date.now()
+          });
+        }
+      }
+
+      const updatedRecord: CargaMasivaRecord = {
+        ...record,
+        revertida: true,
+        fechaReversion: new Date().toISOString(),
+        usuarioReversion: currentUser ? `${currentUser.nombre} (${currentUser.usuario})` : "Administrador"
+      };
+
+      if (!isLocalFileMode) {
+        const batch = writeBatch(db);
+
+        for (const code of productsToDelete) {
+          batch.delete(doc(db, "productos", code.replace(/\//g, "_")));
+        }
+
+        for (const prod of productsToSave) {
+          batch.set(doc(db, "productos", prod.codigo.replace(/\//g, "_")), prod);
+        }
+
+        for (const movId of movsToRemove) {
+          batch.delete(doc(db, "movimientos", movId));
+        }
+
+        batch.set(doc(db, "cargas_masivas", record.id), updatedRecord);
+
+        await batch.commit();
+      } else {
+        const deleteSet = new Set(productsToDelete);
+        const saveMap = new Map(productsToSave.map((p) => [p.codigo, p]));
+
+        const offlineProds = currentProductsList
+          .filter((p) => !deleteSet.has(p.codigo))
+          .map((p) => saveMap.get(p.codigo) || p);
+
+        localStorage.setItem("offline_productos", JSON.stringify(offlineProds));
+
+        let offlineMovs = JSON.parse(localStorage.getItem("offline_movimientos") || "[]");
+        offlineMovs = offlineMovs.filter((m: any) => !movsToRemove.has(m.id));
+        localStorage.setItem("offline_movimientos", JSON.stringify(offlineMovs));
+
+        let offlineCMs = JSON.parse(localStorage.getItem("offline_cargas_masivas") || "[]");
+        offlineCMs = offlineCMs.map((c: any) => (c.id === record.id ? updatedRecord : c));
+        localStorage.setItem("offline_cargas_masivas", JSON.stringify(offlineCMs));
+
+        window.dispatchEvent(new Event("offline_productos_update"));
+        window.dispatchEvent(new Event("offline_movimientos_update"));
+        window.dispatchEvent(new Event("offline_cargas_masivas_update"));
+      }
+
+      const deleteSet = new Set(productsToDelete);
+      const saveMap = new Map(productsToSave.map((p) => [p.codigo, p]));
+
+      const updatedStateList = currentProductsList
+        .filter((p) => !deleteSet.has(p.codigo))
+        .map((p) => saveMap.get(p.codigo) || p);
+
+      setProducts(updatedStateList);
+
+      setCargasMasivasList((prev) =>
+        prev.map((c) => (c.id === record.id ? updatedRecord : c))
+      );
+
+      const userStr = currentUser ? `${currentUser.nombre} (${currentUser.usuario})` : "Administrador";
+      logSystemEvent(
+        `↺ **Reversión de Carga Masiva**: El usuario ${userStr} revirtió la carga del ${record.fecha}. Se eliminaron ${productsToDelete.length} productos y ${record.lotesCreados.length} lotes.`
+      );
+
+      showToast("Carga masiva revertida exitosamente.");
+      playSound("positive");
+      return true;
+    } catch (err) {
+      console.error("Error reverting carga masiva:", err);
+      showToast("Error al revertir la carga masiva.");
+      playSound("negative");
+      return false;
+    }
   };
 
   useEffect(() => {
@@ -585,217 +899,282 @@ export default function App() {
         }
       };
 
+      const handleOfflineCMsUpdate = () => {
+        const stored = localStorage.getItem("offline_cargas_masivas");
+        if (stored) {
+          try { setCargasMasivasList(JSON.parse(stored)); } catch (e) {}
+        }
+      };
+
+      // Initial load offline cargas_masivas
+      const storedCM = localStorage.getItem("offline_cargas_masivas");
+      if (storedCM) {
+        try { setCargasMasivasList(JSON.parse(storedCM)); } catch (e) {}
+      }
+
       window.addEventListener("offline_productos_update", handleOfflineProductsUpdate);
       window.addEventListener("offline_departamentos_update", handleOfflineDeptsUpdate);
       window.addEventListener("offline_catalogos_update", handleOfflineCatsUpdate);
+      window.addEventListener("offline_cargas_masivas_update", handleOfflineCMsUpdate);
 
       setLoading(false);
       return () => {
         window.removeEventListener("offline_productos_update", handleOfflineProductsUpdate);
         window.removeEventListener("offline_departamentos_update", handleOfflineDeptsUpdate);
         window.removeEventListener("offline_catalogos_update", handleOfflineCatsUpdate);
+        window.removeEventListener("offline_cargas_masivas_update", handleOfflineCMsUpdate);
       };
     }
 
     setLoading(true);
 
     // 1. Sync configuration (Colores & Periodo)
-    const unsubColores = onSnapshot(doc(db, "configuracion", "colores"), (docSnap) => {
-      if (docSnap.exists() && docSnap.data().colores) {
-        setColores(docSnap.data().colores);
-      }
-    });
+    const unsubColores = onSnapshot(
+      doc(db, "configuracion", "colores"),
+      (docSnap) => {
+        if (docSnap.exists() && docSnap.data().colores) {
+          setColores(docSnap.data().colores);
+        }
+      },
+      (err) => console.warn("Colores sync fallback (offline/reconnecting):", err?.message || err)
+    );
 
-    const unsubPeriodo = onSnapshot(doc(db, "configuracion", "periodo"), (docSnap) => {
-      if (docSnap.exists() && docSnap.data().periodoActual) {
-        setActivePeriod(docSnap.data().periodoActual);
-      }
-    });
+    const unsubPeriodo = onSnapshot(
+      doc(db, "configuracion", "periodo"),
+      (docSnap) => {
+        if (docSnap.exists() && docSnap.data().periodoActual) {
+          setActivePeriod(docSnap.data().periodoActual);
+        }
+      },
+      (err) => console.warn("Periodo sync fallback (offline/reconnecting):", err?.message || err)
+    );
 
     // 2. Sync Products
-    const unsubProducts = onSnapshot(collection(db, "productos"), async (snapshot) => {
-      if (snapshot.empty) {
-        // Seeding database if empty
-        try {
-          const batch = writeBatch(db);
-          const colRef = collection(db, "productos");
-          DEFAULT_PRODUCTS.forEach((p) => {
-            const docRef = doc(colRef, p.codigo.replace(/\//g, "_"));
-            batch.set(docRef, { ...p, updatedAt: Date.now() });
+    const unsubProducts = onSnapshot(
+      collection(db, "productos"),
+      async (snapshot) => {
+        if (snapshot.empty) {
+          // Seeding database if empty
+          try {
+            const batch = writeBatch(db);
+            const colRef = collection(db, "productos");
+            DEFAULT_PRODUCTS.forEach((p) => {
+              const docRef = doc(colRef, p.codigo.replace(/\//g, "_"));
+              batch.set(docRef, { ...p, updatedAt: Date.now() });
+            });
+            await batch.commit();
+          } catch (err) {
+            console.error("Error seeding products database:", err);
+          }
+        } else {
+          const list: Producto[] = [];
+          snapshot.forEach((d) => {
+            list.push(d.data() as Producto);
           });
-          await batch.commit();
-        } catch (err) {
-          console.error("Error seeding products database:", err);
+          setProducts(list);
+          setLoading(false);
         }
-      } else {
-        const list: Producto[] = [];
-        snapshot.forEach((d) => {
-          list.push(d.data() as Producto);
-        });
-        setProducts(list);
+      },
+      (err) => {
+        console.warn("Products sync fallback (offline/reconnecting):", err?.message || err);
         setLoading(false);
       }
-    });
+    );
 
     // 3. Sync Blocks
-    const unsubBlocks = onSnapshot(collection(db, "bloques"), async (snapshot) => {
-      const dbBlocks: Record<string, any> = {};
-      snapshot.forEach((d) => {
-        dbBlocks[d.id] = d.data();
-      });
+    const unsubBlocks = onSnapshot(
+      collection(db, "bloques"),
+      async (snapshot) => {
+        const dbBlocks: Record<string, any> = {};
+        snapshot.forEach((d) => {
+          dbBlocks[d.id] = d.data();
+        });
 
-      const fullBlocks = BLOQUES.map((id) => ({
-        id,
-        items: dbBlocks[id]?.items || [],
-        updatedAt: dbBlocks[id]?.updatedAt || Date.now()
-      }));
+        const fullBlocks = BLOQUES.map((id) => ({
+          id,
+          items: dbBlocks[id]?.items || [],
+          updatedAt: dbBlocks[id]?.updatedAt || Date.now()
+        }));
 
-      // Seed missing blocks to Firestore
-      const missing = BLOQUES.filter((id) => !dbBlocks[id]);
-      if (missing.length > 0) {
-        try {
-          const batch = writeBatch(db);
-          const colRef = collection(db, "bloques");
-          missing.forEach((id) => {
-            batch.set(doc(colRef, id), { id, items: [], updatedAt: Date.now() });
-          });
-          await batch.commit();
-        } catch (err) {
-          console.error("Error seeding empty blocks:", err);
-        }
-      }
-      setBlocks(fullBlocks);
-    });
-
-    // 4. Sync Users
-    const unsubUsers = onSnapshot(collection(db, "usuarios"), async (snapshot) => {
-      const list: Usuario[] = [];
-      const batchUpdates: Promise<void>[] = [];
-
-      snapshot.forEach((d) => {
-        const u = d.data() as Usuario;
-        if (!u.departamento) {
-          u.departamento = "Almacén y Suministro";
-          batchUpdates.push(setDoc(doc(db, "usuarios", d.id), { departamento: "Almacén y Suministro" }, { merge: true }));
-        }
-        list.push(u);
-      });
-
-      if (batchUpdates.length > 0) {
-        Promise.all(batchUpdates).catch((err) => console.error("Error updating existing users department:", err));
-      }
-
-      // Auto-create default users if empty
-      const defaultUsers = [
-        { nombre: "Anyer", usuario: "Anyer", pass: "303005", rol: "Administrador" as const },
-        { nombre: "Francisco", usuario: "Francisco", pass: "14147", rol: "Administrador" as const },
-        { nombre: "Ivelyn", usuario: "Ivelyn", pass: "6606", rol: "Administrador" as const }
-      ];
-
-      let seeded = false;
-      for (const def of defaultUsers) {
-        if (!list.some((u) => u.usuario.toLowerCase() === def.usuario.toLowerCase())) {
+        // Seed missing blocks to Firestore
+        const missing = BLOQUES.filter((id) => !dbBlocks[id]);
+        if (missing.length > 0) {
           try {
-            const hash = await hashPassword(def.pass);
-            const newUser: Usuario = {
-              id: `user-${def.usuario.toLowerCase()}`,
-              nombre: def.nombre,
-              usuario: def.usuario,
-              contrasenaHash: hash,
-              rol: def.rol,
-              estado: "Activo",
-              updatedAt: Date.now(),
-              departamento: "Almacén y Suministro"
-            };
-            await setDoc(doc(db, "usuarios", newUser.id), newUser);
-            list.push(newUser);
-            seeded = true;
+            const batch = writeBatch(db);
+            const colRef = collection(db, "bloques");
+            missing.forEach((id) => {
+              batch.set(doc(colRef, id), { id, items: [], updatedAt: Date.now() });
+            });
+            await batch.commit();
           } catch (err) {
-            console.error("Error seeding default users:", err);
+            console.error("Error seeding empty blocks:", err);
           }
         }
-      }
+        setBlocks(fullBlocks);
+      },
+      (err) => console.warn("Blocks sync fallback (offline/reconnecting):", err?.message || err)
+    );
 
-      setUsers(list);
-    });
+    // 4. Sync Users
+    const unsubUsers = onSnapshot(
+      collection(db, "usuarios"),
+      async (snapshot) => {
+        const list: Usuario[] = [];
+        const batchUpdates: Promise<void>[] = [];
+
+        snapshot.forEach((d) => {
+          const u = d.data() as Usuario;
+          if (u.usuario?.toLowerCase() === "rossy" || u.nombre?.toLowerCase().includes("rossy")) {
+            if (u.departamento === "Odontología" || !u.departamento) {
+              u.departamento = "Laboratorio";
+              batchUpdates.push(setDoc(doc(db, "usuarios", d.id), { departamento: "Laboratorio" }, { merge: true }));
+            }
+          } else if (!u.departamento) {
+            u.departamento = "Almacén y Suministro";
+            batchUpdates.push(setDoc(doc(db, "usuarios", d.id), { departamento: "Almacén y Suministro" }, { merge: true }));
+          }
+          list.push(u);
+        });
+
+        if (batchUpdates.length > 0) {
+          Promise.all(batchUpdates).catch((err) => console.error("Error updating existing users department:", err));
+        }
+
+        // Auto-create default users if empty
+        const defaultUsers = [
+          { nombre: "Anyer", usuario: "Anyer", pass: "303005", rol: "Administrador" as const },
+          { nombre: "Francisco", usuario: "Francisco", pass: "14147", rol: "Administrador" as const },
+          { nombre: "Ivelyn", usuario: "Ivelyn", pass: "6606", rol: "Administrador" as const }
+        ];
+
+        let seeded = false;
+        for (const def of defaultUsers) {
+          if (!list.some((u) => u.usuario.toLowerCase() === def.usuario.toLowerCase())) {
+            try {
+              const hash = await hashPassword(def.pass);
+              const newUser: Usuario = {
+                id: `user-${def.usuario.toLowerCase()}`,
+                nombre: def.nombre,
+                usuario: def.usuario,
+                contrasenaHash: hash,
+                rol: def.rol,
+                estado: "Activo",
+                updatedAt: Date.now(),
+                departamento: "Almacén y Suministro"
+              };
+              await setDoc(doc(db, "usuarios", newUser.id), newUser);
+              list.push(newUser);
+              seeded = true;
+            } catch (err) {
+              console.error("Error seeding default users:", err);
+            }
+          }
+        }
+
+        setUsers(list);
+      },
+      (err) => console.warn("Users sync fallback (offline/reconnecting):", err?.message || err)
+    );
 
     // 5. Sync Departments
-    const unsubDepts = onSnapshot(collection(db, "departamentos"), async (snapshot) => {
-      if (snapshot.empty) {
-        try {
-          const batch = writeBatch(db);
-          const colRef = collection(db, "departamentos");
-          const defaultDepts = [
-            "Almacén y Suministro",
-            "Odontología",
-            "Laboratorio",
-            "Quirófano",
-            "Urgencias",
-            "Pediatría",
-            "Gineco-Obstetricia",
-            "Cirugía General",
-            "Consulta Externa",
-            "Farmacia Clínica"
-          ];
-          defaultDepts.forEach((name) => {
-            const id = `dept-${name.toLowerCase().replace(/[^a-z0-9]/g, "-")}`;
-            batch.set(doc(colRef, id), {
-              id,
-              nombre: name,
-              activo: true,
-              createdAt: Date.now()
+    const unsubDepts = onSnapshot(
+      collection(db, "departamentos"),
+      async (snapshot) => {
+        if (snapshot.empty) {
+          try {
+            const batch = writeBatch(db);
+            const colRef = collection(db, "departamentos");
+            const defaultDepts = [
+              "Almacén y Suministro",
+              "Odontología",
+              "Laboratorio",
+              "Quirófano",
+              "Urgencias",
+              "Pediatría",
+              "Gineco-Obstetricia",
+              "Cirugía General",
+              "Consulta Externa",
+              "Farmacia Clínica"
+            ];
+            defaultDepts.forEach((name) => {
+              const id = `dept-${name.toLowerCase().replace(/[^a-z0-9]/g, "-")}`;
+              batch.set(doc(colRef, id), {
+                id,
+                nombre: name,
+                activo: true,
+                createdAt: Date.now()
+              });
             });
-          });
-          await batch.commit();
-        } catch (err) {
-          console.error("Error seeding departments:", err);
+            await batch.commit();
+          } catch (err) {
+            console.error("Error seeding departments:", err);
+          }
+        } else {
+          const list: Departamento[] = [];
+          snapshot.forEach((d) => list.push(d.data() as Departamento));
+          list.sort((a, b) => a.nombre.localeCompare(b.nombre));
+          setDepartamentos(list);
         }
-      } else {
-        const list: Departamento[] = [];
-        snapshot.forEach((d) => list.push(d.data() as Departamento));
-        list.sort((a, b) => a.nombre.localeCompare(b.nombre));
-        setDepartamentos(list);
-      }
-    });
+      },
+      (err) => console.warn("Departments sync fallback (offline/reconnecting):", err?.message || err)
+    );
 
     // 6. Sync Catalogos
-    const unsubCatalogos = onSnapshot(collection(db, "catalogos"), (snapshot) => {
-      const list: any[] = [];
-      snapshot.forEach((d) => {
-        list.push({ id: d.id, ...d.data() });
-      });
-      list.sort((a, b) => {
-        const activeA = a.activo ? 1 : 0;
-        const activeB = b.activo ? 1 : 0;
-        return activeB - activeA || a.nombre.localeCompare(b.nombre);
-      });
-      setCatalogos(list);
-      
-      if (list.length > 0) {
-        const stored = localStorage.getItem("active_catalog_id");
-        const activeItem = list.find((c) => c.activo);
-        const storedExistsAndActive = list.find((c) => c.id === stored && c.activo);
-        if (storedExistsAndActive) {
-          setActiveCatalogId(stored!);
-        } else if (activeItem) {
-          setActiveCatalogId(activeItem.id);
-          localStorage.setItem("active_catalog_id", activeItem.id);
+    const unsubCatalogos = onSnapshot(
+      collection(db, "catalogos"),
+      (snapshot) => {
+        const list: any[] = [];
+        snapshot.forEach((d) => {
+          list.push({ id: d.id, ...d.data() });
+        });
+        list.sort((a, b) => {
+          const activeA = a.activo ? 1 : 0;
+          const activeB = b.activo ? 1 : 0;
+          return activeB - activeA || a.nombre.localeCompare(b.nombre);
+        });
+        setCatalogos(list);
+        
+        if (list.length > 0) {
+          const stored = localStorage.getItem("active_catalog_id");
+          const activeItem = list.find((c) => c.activo);
+          const storedExistsAndActive = list.find((c) => c.id === stored && c.activo);
+          if (storedExistsAndActive) {
+            setActiveCatalogId(stored!);
+          } else if (activeItem) {
+            setActiveCatalogId(activeItem.id);
+            localStorage.setItem("active_catalog_id", activeItem.id);
+          } else {
+            setActiveCatalogId(list[0].id);
+            localStorage.setItem("active_catalog_id", list[0].id);
+          }
         } else {
-          setActiveCatalogId(list[0].id);
-          localStorage.setItem("active_catalog_id", list[0].id);
+          // Seed default catalog if empty
+          const defaultCatRef = doc(db, "catalogos", "default-cat");
+          setDoc(defaultCatRef, {
+            id: "default-cat",
+            nombre: "Medicamentos e Insumos",
+            descripcion: "Catálogo por defecto del sistema de stock",
+            activo: true,
+            createdAt: Date.now()
+          }).catch(err => console.error("Error seeding default catalog:", err));
         }
-      } else {
-        // Seed default catalog if empty
-        const defaultCatRef = doc(db, "catalogos", "default-cat");
-        setDoc(defaultCatRef, {
-          id: "default-cat",
-          nombre: "Medicamentos e Insumos",
-          descripcion: "Catálogo por defecto del sistema de stock",
-          activo: true,
-          createdAt: Date.now()
-        }).catch(err => console.error("Error seeding default catalog:", err));
-      }
-    });
+      },
+      (err) => console.warn("Catalogos sync fallback (offline/reconnecting):", err?.message || err)
+    );
+
+    // 7. Sync Cargas Masivas
+    const unsubCargasMasivas = onSnapshot(
+      collection(db, "cargas_masivas"),
+      (snapshot) => {
+        const list: CargaMasivaRecord[] = [];
+        snapshot.forEach((d) => {
+          list.push({ id: d.id, ...d.data() } as CargaMasivaRecord);
+        });
+        list.sort((a, b) => b.timestamp - a.timestamp);
+        setCargasMasivasList(list);
+      },
+      (err) => console.warn("Cargas masivas sync fallback (offline/reconnecting):", err?.message || err)
+    );
 
     return () => {
       unsubColores();
@@ -805,6 +1184,7 @@ export default function App() {
       unsubUsers();
       unsubDepts();
       unsubCatalogos();
+      unsubCargasMasivas();
     };
   }, [activePeriod]);
 
@@ -1291,14 +1671,18 @@ export default function App() {
 
   // Lot field editor inside Detail Modal
   const handleEditLotField = (lotId: string, field: keyof Lote, value: any) => {
+    let sanitizedValue = value;
+    if ((field === "numeroLote" || field === "loteFisico") && typeof sanitizedValue === "string") {
+      sanitizedValue = sanitizedValue.toUpperCase();
+    }
     setEditLotes((prev) =>
       prev.map((l) => {
         if (l.id === lotId) {
-          const updated = { ...l, [field]: value };
+          const updated = { ...l, [field]: sanitizedValue };
           if (coincidenLotesMap[lotId]) {
-            if (field === "cantidad") updated.cantidadF = Number(value);
-            else if (field === "fechaVencimiento") updated.fechaFisica = String(value);
-            else if (field === "numeroLote") updated.loteFisico = String(value);
+            if (field === "cantidad") updated.cantidadF = Number(sanitizedValue);
+            else if (field === "fechaVencimiento") updated.fechaFisica = String(sanitizedValue);
+            else if (field === "numeroLote") updated.loteFisico = String(sanitizedValue);
           }
           return updated;
         }
@@ -1461,65 +1845,101 @@ export default function App() {
     }
   };
 
-  const generateNextCode = (currentCatalogId: string, customPrefix?: string): string => {
-    const catalogProducts = products.filter(p => (p.catalogId || "default-cat") === currentCatalogId);
-    let prefix = customPrefix || "B";
+  const generateNextCode = (currentCatalogId: string, customPrefix?: string, customList?: Producto[]): string => {
+    const listToUse = customList || products;
+    const catalogProducts = listToUse.filter(p => (p.catalogId || "default-cat") === currentCatalogId);
 
-    if (!customPrefix && catalogProducts.length > 0) {
-      const prefixCount: Record<string, number> = {};
-      catalogProducts.forEach(p => {
-        const match = p.codigo.match(/^([A-Z]+)/i);
-        if (match) {
-          const pref = match[1].toUpperCase();
-          prefixCount[pref] = (prefixCount[pref] || 0) + 1;
-        }
+    if (customPrefix) {
+      const prefix = customPrefix.toUpperCase();
+      const numbers: number[] = [];
+      listToUse.forEach(p => {
+        const regex = new RegExp(`^${prefix.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&')}[^0-9]*(\\d+)`, "i");
+        const match = p.codigo.trim().match(regex);
+        if (match) numbers.push(parseInt(match[1], 10));
       });
-
-      let maxCount = 0;
-      let bestPrefix = "";
-      for (const pref in prefixCount) {
-        if (prefixCount[pref] > maxCount) {
-          maxCount = prefixCount[pref];
-          bestPrefix = pref;
-        }
+      const nextNum = numbers.length > 0 ? Math.max(...numbers) + 1 : 1;
+      let padLength = 3;
+      const samePrefix = listToUse.filter(p => p.codigo.trim().toUpperCase().startsWith(prefix));
+      if (samePrefix.length > 0) {
+        const digitMatch = samePrefix[0].codigo.match(/\d+/);
+        if (digitMatch && digitMatch[0].length >= 3) padLength = digitMatch[0].length;
       }
-      if (bestPrefix) {
-        prefix = bestPrefix;
+      let finalCode = `${prefix}${String(nextNum).padStart(padLength, "0")}`;
+      let inc = 1;
+      while (listToUse.some(p => p.codigo.trim().toUpperCase() === finalCode.toUpperCase())) {
+        finalCode = `${prefix}${String(nextNum + inc).padStart(padLength, "0")}`;
+        inc++;
+      }
+      return finalCode;
+    }
+
+    if (catalogProducts.length === 0) {
+      return "P001";
+    }
+
+    // Analyze existing codes in current catalog
+    const prefixCount: Record<string, number> = {};
+    const numericCodes: number[] = [];
+
+    catalogProducts.forEach(p => {
+      const code = p.codigo.trim();
+      const matchWithPrefix = code.match(/^([A-Za-z\-_]+)(\d+)$/);
+      if (matchWithPrefix) {
+        const pref = matchWithPrefix[1].toUpperCase();
+        prefixCount[pref] = (prefixCount[pref] || 0) + 1;
+      } else if (/^\d+$/.test(code)) {
+        numericCodes.push(parseInt(code, 10));
+      }
+    });
+
+    // If most products use pure numeric codes (e.g. 1001, 1002)
+    if (numericCodes.length > 0 && numericCodes.length >= catalogProducts.length / 2) {
+      const maxNum = Math.max(...numericCodes);
+      const nextNum = maxNum + 1;
+      const sampleNumericStr = catalogProducts.find(p => /^\d+$/.test(p.codigo.trim()))?.codigo.trim() || "";
+      const padLength = sampleNumericStr.length || 3;
+      let finalCode = String(nextNum).padStart(padLength, "0");
+      let inc = 1;
+      while (listToUse.some(p => p.codigo === finalCode)) {
+        finalCode = String(nextNum + inc).padStart(padLength, "0");
+        inc++;
+      }
+      return finalCode;
+    }
+
+    // Find the most frequent letter prefix
+    let bestPrefix = "P";
+    let maxCount = 0;
+    for (const pref in prefixCount) {
+      if (prefixCount[pref] > maxCount) {
+        maxCount = prefixCount[pref];
+        bestPrefix = pref;
       }
     }
 
     const numbers: number[] = [];
-    products.forEach(p => {
-      const regex = new RegExp(`^${prefix}(\\d+)`, "i");
-      const match = p.codigo.match(regex);
+    let sampleCode = "";
+    catalogProducts.forEach(p => {
+      const regex = new RegExp(`^${bestPrefix.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&')}[^0-9]*(\\d+)$`, "i");
+      const match = p.codigo.trim().match(regex);
       if (match) {
         numbers.push(parseInt(match[1], 10));
+        if (!sampleCode) sampleCode = p.codigo.trim();
       }
     });
 
-    let nextNum = 1;
-    if (numbers.length > 0) {
-      nextNum = Math.max(...numbers) + 1;
-    }
-
+    const nextNum = numbers.length > 0 ? Math.max(...numbers) + 1 : 1;
     let padLength = 3;
-    const samePrefixProducts = products.filter(p => p.codigo.toUpperCase().startsWith(prefix));
-    if (samePrefixProducts.length > 0) {
-      const firstCode = samePrefixProducts[0].codigo;
-      const digitMatch = firstCode.match(/\d+/);
-      if (digitMatch) {
-        padLength = digitMatch[0].length;
-      }
+    if (sampleCode) {
+      const digitMatch = sampleCode.match(/\d+/);
+      if (digitMatch && digitMatch[0].length >= 3) padLength = digitMatch[0].length;
     }
 
-    const formattedNum = String(nextNum).padStart(padLength, "0");
-    const candidateCode = `${prefix}${formattedNum}`;
-
-    let finalCode = candidateCode;
-    let increment = 1;
-    while (products.some(p => p.codigo === finalCode)) {
-      finalCode = `${prefix}${String(nextNum + increment).padStart(padLength, "0")}`;
-      increment++;
+    let finalCode = `${bestPrefix}${String(nextNum).padStart(padLength, "0")}`;
+    let inc = 1;
+    while (listToUse.some(p => p.codigo.toUpperCase() === finalCode.toUpperCase())) {
+      finalCode = `${bestPrefix}${String(nextNum + inc).padStart(padLength, "0")}`;
+      inc++;
     }
 
     return finalCode;
@@ -1541,12 +1961,38 @@ export default function App() {
       return;
     }
 
-    // Auto-generate code if empty
-    if (!code) {
-      code = generateNextCode(activeCatalogId);
-    }
+    const cleanStr = (str?: string) =>
+      String(str || "")
+        .trim()
+        .toLowerCase()
+        .normalize("NFD")
+        .replace(/[\u0300-\u036f]/g, "")
+        .replace(/\s+/g, " ");
 
-    const existingProd = products.find((p) => p.codigo === code);
+    const getInitialPrefix = (nameStr: string): string => {
+      if (!nameStr) return "P";
+      const normalized = nameStr.normalize("NFD").replace(/[\u0300-\u036f]/g, "").trim();
+      const letterMatch = normalized.match(/[a-zA-Z]/);
+      if (letterMatch) {
+        return letterMatch[0].toUpperCase();
+      }
+      return "P";
+    };
+
+    // 1. Check if product already exists in active catalog (by code if typed, or by clean name)
+    let existingProd = products.find((p) => {
+      const catId = p.catalogId || "default-cat";
+      if (catId !== activeCatalogId) return false;
+      if (code && p.codigo.trim().toUpperCase() === code) return true;
+      return cleanStr(p.nombre) === cleanStr(name);
+    });
+
+    if (existingProd) {
+      code = existingProd.codigo;
+    } else if (!code) {
+      const initialPrefix = getInitialPrefix(name);
+      code = generateNextCode(activeCatalogId, initialPrefix, products);
+    }
 
     const newLot: Lote = {
       id: `lote-${code}-${Date.now()}`,
@@ -1987,7 +2433,7 @@ export default function App() {
           <header className="sticky top-0 z-30 text-white shadow-md bg-custom-sidebar">
             <div className="px-6 pt-4 pb-3 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
               <div className="flex items-center gap-3">
-                <img src="/logo.png" alt="Logo" className="h-10 w-auto rounded-md" />
+                <img src={appLogo} alt="Logo" className="h-10 w-auto max-w-[50px] object-contain rounded-md shadow-sm" />
                 <div>
                   <h1
                     className="text-xl font-black leading-tight flex items-center gap-1.5 cursor-pointer"
@@ -2324,7 +2770,7 @@ export default function App() {
             </div>
           )}
 
-          <main className="px-6 py-6 max-w-4xl mx-auto">
+          <main className={`px-4 sm:px-6 py-6 mx-auto ${activeTab === "carga_masiva" || activeTab === "solicitudes" || activeTab === "configuracion" ? "max-w-7xl" : "max-w-4xl"}`}>
             {/* Contenido Principal */}
             {activeTab === "carga_masiva" && (
               <CargaMasiva
@@ -2334,6 +2780,8 @@ export default function App() {
                 showToast={showToast}
                 activeCatalogId={activeCatalogId}
                 performImport={handleMassImport}
+                cargasMasivasList={cargasMasivasList}
+                onRevertirCarga={handleRevertirCarga}
               />
             )}
 
@@ -2466,6 +2914,19 @@ export default function App() {
                           </span>
                         )}
                         
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setActiveTab("carga_masiva");
+                            playSound("click");
+                          }}
+                          className="inline-flex items-center gap-1.5 bg-emerald-50 border border-emerald-200 text-emerald-800 hover:bg-emerald-100 active:scale-95 transition rounded-xl px-3 py-1.5 text-[11px] font-black cursor-pointer shadow-xs uppercase tracking-wider"
+                          title="Subir archivo Excel para auditar e importar suministros y lotes"
+                        >
+                          <FileSpreadsheet className="w-3.5 h-3.5 text-emerald-700" />
+                          <span>Importar Excel</span>
+                        </button>
+
                         <div className="relative" ref={exportMenuRef}>
                           <button
                             type="button"
@@ -2858,8 +3319,8 @@ export default function App() {
                                 <input
                                   type="text"
                                   value={l.numeroLote}
-                                  onChange={(e) => handleEditLotField(l.id, "numeroLote", e.target.value)}
-                                  className="mt-1 w-full rounded-lg border border-slate-200 px-2.5 py-2 font-bold text-slate-800 bg-slate-50"
+                                  onChange={(e) => handleEditLotField(l.id, "numeroLote", e.target.value.toUpperCase())}
+                                  className="mt-1 w-full rounded-lg border border-slate-200 px-2.5 py-2 font-bold text-slate-800 bg-slate-50 uppercase"
                                 />
                               </div>
                               <div>
@@ -2870,9 +3331,9 @@ export default function App() {
                                   type="text"
                                   value={l.loteFisico || ""}
                                   disabled={!!coincidenLotesMap[l.id]}
-                                  onChange={(e) => handleEditLotField(l.id, "loteFisico", e.target.value)}
-                                  placeholder="Ej. Estante B"
-                                  className="mt-1 w-full rounded-lg border border-amber-200 bg-amber-50/50 disabled:bg-slate-100 disabled:border-slate-200 px-2.5 py-2 font-bold text-slate-800"
+                                  onChange={(e) => handleEditLotField(l.id, "loteFisico", e.target.value.toUpperCase())}
+                                  placeholder="Ej. ESTANTE B"
+                                  className="mt-1 w-full rounded-lg border border-amber-200 bg-amber-50/50 disabled:bg-slate-100 disabled:border-slate-200 px-2.5 py-2 font-bold text-slate-800 uppercase"
                                 />
                               </div>
 
@@ -2973,8 +3434,8 @@ export default function App() {
                       type="text"
                       placeholder="Ej. AB-202"
                       value={newLotNum}
-                      onChange={(e) => setNewLotNum(e.target.value)}
-                      className="mt-1.5 w-full rounded-xl border border-slate-200 px-3.5 py-2.5 text-sm outline-none focus:ring-2 focus:ring-teal-400 bg-slate-50"
+                      onChange={(e) => setNewLotNum(e.target.value.toUpperCase())}
+                      className="mt-1.5 w-full rounded-xl border border-slate-200 px-3.5 py-2.5 text-sm outline-none focus:ring-2 focus:ring-teal-400 bg-slate-50 uppercase font-bold"
                     />
                   </div>
 
@@ -3028,10 +3489,10 @@ export default function App() {
                     <label className="text-xs font-bold text-amber-600 uppercase tracking-wider">Lote F (Físico) / Ubicación</label>
                     <input
                       type="text"
-                      placeholder="Ej. Estante B"
+                      placeholder="Ej. ESTANTE B"
                       value={newLotLocation}
-                      onChange={(e) => setNewLotLocation(e.target.value)}
-                      className="mt-1.5 w-full rounded-xl border border-amber-200 bg-amber-50/50 px-3.5 py-2.5 text-sm outline-none focus:ring-2 focus:ring-amber-400"
+                      onChange={(e) => setNewLotLocation(e.target.value.toUpperCase())}
+                      className="mt-1.5 w-full rounded-xl border border-amber-200 bg-amber-50/50 px-3.5 py-2.5 text-sm outline-none focus:ring-2 focus:ring-amber-400 uppercase font-bold"
                     />
                   </div>
 
@@ -3149,18 +3610,18 @@ export default function App() {
                           type="text"
                           placeholder="Ej. LX-411"
                           value={newProdLotNum}
-                          onChange={(e) => setNewProdLotNum(e.target.value)}
-                          className="mt-1.5 w-full rounded-xl border border-slate-200 px-3.5 py-2.5 text-sm outline-none focus:ring-2 focus:ring-teal-400 bg-white"
+                          onChange={(e) => setNewProdLotNum(e.target.value.toUpperCase())}
+                          className="mt-1.5 w-full rounded-xl border border-slate-200 px-3.5 py-2.5 text-sm outline-none focus:ring-2 focus:ring-teal-400 bg-white uppercase font-bold"
                         />
                       </div>
                       <div>
                         <label className="text-xs font-bold text-amber-600 uppercase tracking-wider">Lote F (Físico)</label>
                         <input
                           type="text"
-                          placeholder="Ej. Estante A"
+                          placeholder="Ej. ESTANTE A"
                           value={newProdLotLocation}
-                          onChange={(e) => setNewProdLotLocation(e.target.value)}
-                          className="mt-1.5 w-full rounded-xl border border-amber-200 bg-amber-50/50 px-3.5 py-2.5 text-sm outline-none focus:ring-2 focus:ring-amber-400"
+                          onChange={(e) => setNewProdLotLocation(e.target.value.toUpperCase())}
+                          className="mt-1.5 w-full rounded-xl border border-amber-200 bg-amber-50/50 px-3.5 py-2.5 text-sm outline-none focus:ring-2 focus:ring-amber-400 uppercase font-bold"
                         />
                       </div>
                     </div>

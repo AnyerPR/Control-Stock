@@ -1,6 +1,11 @@
-import { initializeApp } from "firebase/app";
+import { initializeApp, getApps, getApp } from "firebase/app";
 import { getAuth } from "firebase/auth";
-import { getFirestore } from "firebase/firestore";
+import { 
+  initializeFirestore, 
+  persistentLocalCache, 
+  persistentMultipleTabManager,
+  getFirestore 
+} from "firebase/firestore";
 
 // Configuración real del proyecto de Firebase proporcionada en la compilación
 const firebaseConfig = {
@@ -13,28 +18,41 @@ const firebaseConfig = {
   measurementId: "G-3NMS631VKY"
 };
 
-let app;
+let app: any;
 try {
-  app = initializeApp(firebaseConfig);
+  app = getApps().length > 0 ? getApp() : initializeApp(firebaseConfig);
 } catch (e) {
-  console.error("Firebase app initialization failed, creating mock:", e);
+  console.warn("Firebase app initialization fallback:", e);
   app = {} as any;
 }
 
 let db: any;
 try {
-  db = getFirestore(app);
+  if (typeof window !== "undefined" && app?.name) {
+    db = initializeFirestore(app, {
+      localCache: persistentLocalCache({
+        tabManager: persistentMultipleTabManager()
+      })
+    });
+  } else {
+    db = getFirestore(app);
+  }
 } catch (e) {
-  console.error("Firebase firestore initialization failed, creating mock:", e);
-  db = {} as any;
+  try {
+    db = getFirestore(app);
+  } catch (err) {
+    console.warn("Firebase firestore initialization fallback:", err);
+    db = {} as any;
+  }
 }
 
 let auth: any;
 try {
   auth = getAuth(app);
 } catch (e) {
-  console.error("Firebase auth initialization failed, creating mock:", e);
+  console.warn("Firebase auth initialization fallback:", e);
   auth = {} as any;
 }
 
 export { db, auth };
+

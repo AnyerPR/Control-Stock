@@ -108,13 +108,11 @@ export default function UserPanel({
       return;
     }
     setShowAddModal(true);
-    // Auto-select first active department
-    const activeDepts = departamentos.filter((d) => d.activo);
-    if (activeDepts.length > 0) {
-      setNewDepartment(activeDepts[0].nombre);
-    } else {
-      setNewDepartment("");
-    }
+    setNewName("");
+    setNewUsername("");
+    setNewPassword("");
+    setNewDepartment("");
+    setNewCatalogos([]);
     // Default modules
     if (newRole === "Administrador") {
       setNewModulos(["inventory", "carga_masiva", "solicitudes", "historial", "usuarios", "configuracion"]);
@@ -130,7 +128,7 @@ export default function UserPanel({
     const uName = newName.trim();
     const uUser = newUsername.trim();
     const uPass = newPassword;
-    const uDept = newDepartment || departamentos.filter((d) => d.activo)[0]?.nombre;
+    const uDept = newDepartment.trim();
 
     if (!uName || !uUser || !uPass) {
       alert("Por favor complete todos los campos obligatorios.");
@@ -138,7 +136,7 @@ export default function UserPanel({
     }
 
     if (!uDept) {
-      alert("No hay ningún departamento activo disponible en el sistema para asignar.");
+      alert("Por favor seleccione un departamento para el nuevo usuario.");
       return;
     }
 

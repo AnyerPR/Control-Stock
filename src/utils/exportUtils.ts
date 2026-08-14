@@ -441,122 +441,149 @@ export const exportOrderToWord = (orderItems: ExportOrderItem[], catalogName: st
       </xml>
       <![endif]-->
       <style>
-        @page {
-          size: 8.5in 11in; /* Portrait standard */
-          margin: 1.0in 1.0in 1.0in 1.0in;
+        @page Section1 {
+          size: 8.5in 11in;
+          margin: 0.75in 0.75in 0.75in 0.75in;
+          mso-header-margin: 0.5in;
+          mso-footer-margin: 0.5in;
+          mso-paper-source: 0;
+        }
+        div.Section1 {
+          page: Section1;
         }
         body {
-          font-family: Arial, sans-serif;
-          color: #333333;
-          line-height: 1.4;
+          font-family: Arial, Helvetica, sans-serif;
+          color: #1e293b;
+          font-size: 10pt;
+          line-height: 1.3;
+          margin: 0;
+          padding: 0;
+        }
+        table {
+          width: 100%;
+          border-collapse: collapse;
+          mso-table-lspace: 0pt;
+          mso-table-rspace: 0pt;
         }
         .header-table {
           width: 100%;
           border-collapse: collapse;
           border: none;
-          margin-bottom: 25px;
+          margin-bottom: 16pt;
         }
         .header-title {
-          font-size: 22px;
+          font-size: 16pt;
           font-weight: bold;
           color: #0f766e;
           font-family: Arial, sans-serif;
           margin: 0;
         }
         .header-subtitle {
-          font-size: 12px;
-          color: #4b5563;
-          margin-top: 5px;
+          font-size: 9pt;
+          color: #64748b;
+          margin-top: 3pt;
           margin-bottom: 0;
         }
         .metadata-box {
           background-color: #f8fafc;
-          border-left: 4px solid #0f766e;
-          padding: 12px;
-          margin-bottom: 25px;
-          font-size: 12px;
+          border: 1px solid #cbd5e1;
+          border-left: 4pt solid #0f766e;
+          padding: 8pt 10pt;
+          margin-bottom: 16pt;
+          font-size: 9pt;
         }
-        .metadata-box table {
+        .metadata-table {
           width: 100%;
           border-collapse: collapse;
-          border: none;
         }
         .metadata-label {
           font-weight: bold;
           color: #475569;
           width: 20%;
-          padding: 3px 0;
+          padding: 3pt 0;
         }
         .metadata-value {
-          color: #1e293b;
-          padding: 3px 0;
+          color: #0f172a;
+          padding: 3pt 0;
+          width: 30%;
         }
         .main-table {
           width: 100%;
           border-collapse: collapse;
-          font-size: 12px;
+          table-layout: fixed;
+          font-size: 9pt;
           font-family: Arial, sans-serif;
         }
         .main-table th {
           background-color: #0f766e;
           color: #ffffff;
           font-weight: bold;
+          font-size: 8.5pt;
+          text-transform: uppercase;
           text-align: left;
-          padding: 12px 10px;
+          padding: 7pt 6pt;
           border: 1px solid #0d9488;
+        }
+        .main-table td {
+          padding: 6pt 6pt;
+          border: 1px solid #cbd5e1;
+          font-size: 8.5pt;
+          vertical-align: middle;
         }
       </style>
     </head>
     <body>
-      <table class="header-table">
-        <tr>
-          <td>
-            <div class="header-title">Pedido de Salida de Suministros</div>
-            <div class="header-subtitle">Suministros Hospitalarios &bull; Dr. José Manuel Rodríguez</div>
-          </td>
-        </tr>
-      </table>
-
-      <div class="metadata-box">
-        <table>
+      <div class="Section1">
+        <table class="header-table">
           <tr>
-            <td class="metadata-label">Catálogo:</td>
-            <td class="metadata-value">${catalogName || "Medicamentos e Insumos"}</td>
-            <td class="metadata-label">Fecha Pedido:</td>
-            <td class="metadata-value">${new Date().toLocaleString()}</td>
-          </tr>
-          <tr>
-            <td class="metadata-label">Tipo de Salida:</td>
-            <td class="metadata-value">Despacho / Pedido de Stock</td>
-            <td class="metadata-label">Total Ítems:</td>
-            <td class="metadata-value">${orderItems.length} tipos de suministros</td>
+            <td>
+              <div class="header-title">Pedido de Salida de Suministros</div>
+              <div class="header-subtitle">Suministros Hospitalarios &bull; Dr. José Manuel Rodríguez</div>
+            </td>
           </tr>
         </table>
-      </div>
 
-      <table class="main-table">
-        <thead>
-          <tr>
-            <th style="width: 5%; text-align: center;">N.º</th>
-            <th style="width: 12%;">Código</th>
-            <th style="width: 28%;">Medicamento / Insumo</th>
-            <th style="width: 12%; text-align: center;">Lote</th>
-            <th style="width: 13%; text-align: center;">Vencimiento</th>
-            <th style="width: 10%; text-align: right;">Cantidad</th>
-            <th style="width: 10%; text-align: right;">Precio Unit.</th>
-            <th style="width: 10%; text-align: right;">Subtotal</th>
-          </tr>
-        </thead>
-        <tbody>
-          ${rowsHtml}
-          <tr>
-            <td colspan="5" style="border: 1px solid #dddddd; padding: 12px 10px; text-align: right; font-weight: bold; background-color: #f8fafc; font-size: 13px;">TOTAL GENERAL:</td>
-            <td style="border: 1px solid #dddddd; padding: 12px 10px; text-align: right; font-weight: bold; background-color: #f8fafc; color: #0f766e; font-size: 13px;">${totalCantidad}</td>
-            <td style="border: 1px solid #dddddd; padding: 12px 10px; text-align: right; font-weight: bold; background-color: #f8fafc; font-size: 13px;">—</td>
-            <td style="border: 1px solid #dddddd; padding: 12px 10px; text-align: right; font-weight: bold; background-color: #f8fafc; color: #0f766e; font-size: 13px;">RD$ ${totalPrecio.toFixed(2)}</td>
-          </tr>
-        </tbody>
-      </table>
+        <div class="metadata-box">
+          <table class="metadata-table">
+            <tr>
+              <td class="metadata-label">Catálogo:</td>
+              <td class="metadata-value"><strong>${catalogName || "Medicamentos e Insumos"}</strong></td>
+              <td class="metadata-label">Fecha Pedido:</td>
+              <td class="metadata-value">${new Date().toLocaleString()}</td>
+            </tr>
+            <tr>
+              <td class="metadata-label">Tipo de Salida:</td>
+              <td class="metadata-value">Despacho / Pedido de Stock</td>
+              <td class="metadata-label">Total Ítems:</td>
+              <td class="metadata-value">${orderItems.length} tipos de suministros</td>
+            </tr>
+          </table>
+        </div>
+
+        <table class="main-table">
+          <thead>
+            <tr>
+              <th style="width: 5%; text-align: center;">N.º</th>
+              <th style="width: 14%;">Código</th>
+              <th style="width: 33%;">Medicamento / Insumo</th>
+              <th style="width: 12%; text-align: center;">Lote</th>
+              <th style="width: 12%; text-align: center;">Vencimiento</th>
+              <th style="width: 8%; text-align: right;">Cantidad</th>
+              <th style="width: 8%; text-align: right;">Precio Unit.</th>
+              <th style="width: 8%; text-align: right;">Subtotal</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${rowsHtml}
+            <tr>
+              <td colspan="5" style="border: 1px solid #cbd5e1; padding: 8pt 6pt; text-align: right; font-weight: bold; background-color: #f8fafc; font-size: 9.5pt;">TOTAL GENERAL:</td>
+              <td style="border: 1px solid #cbd5e1; padding: 8pt 6pt; text-align: right; font-weight: bold; background-color: #f8fafc; color: #0f766e; font-size: 9.5pt;">${totalCantidad}</td>
+              <td style="border: 1px solid #cbd5e1; padding: 8pt 6pt; text-align: right; font-weight: bold; background-color: #f8fafc; font-size: 9.5pt;">—</td>
+              <td style="border: 1px solid #cbd5e1; padding: 8pt 6pt; text-align: right; font-weight: bold; background-color: #f8fafc; color: #0f766e; font-size: 9.5pt;">RD$ ${totalPrecio.toFixed(2)}</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
     </body>
     </html>
   `;
