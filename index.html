@@ -3,8 +3,8 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="theme-color" content="#0d9488" />
-    <link rel="manifest" href="./assets/manifest-CROJV6JU.webmanifest" />
-    <link rel="apple-touch-icon" href="./assets/logo-KsiQ_YHG.png" />
+    <link rel="manifest" href="./pwa.webmanifest" />
+    <link rel="apple-touch-icon" href="./assets/Logo-KsiQ_YHG.png" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Control de Stock Hospitalario</title>
     <script>
@@ -52,26 +52,9 @@
           } catch (err) {}
         }
 
-        // Clean obsolete service worker caches
-        try {
-          if ('serviceWorker' in navigator) {
-            navigator.serviceWorker.getRegistrations().then(function(regs) {
-              for (var i = 0; i < regs.length; i++) {
-                regs[i].unregister();
-              }
-            });
-          }
-          if (typeof window !== 'undefined' && 'caches' in window) {
-            caches.keys().then(function(keys) {
-              for (var j = 0; j < keys.length; j++) {
-                caches.delete(keys[j]);
-              }
-            });
-          }
-        } catch (e) {}
       })();
     </script>
-    <script type="module" crossorigin src="./assets/index-DPShY9NE.js"></script>
+    <script type="module" crossorigin src="./assets/index-D8Q9Uh2D.js"></script>
     <link rel="stylesheet" crossorigin href="./assets/index-D5rxygC_.css">
   </head>
   <body>
