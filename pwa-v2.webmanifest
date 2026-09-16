@@ -7,7 +7,7 @@
   "display": "standalone",
   "background_color": "#ffffff",
   "theme_color": "#0d9488",
-  "description": "Gestión de Inventario y Suministros Hospitalarios",
+  "description": "Gestion de Inventario y Suministros Hospitalarios",
   "icons": [
     {
       "src": "app-icon-512.png",
