@@ -5,18 +5,15 @@
   "type": "module",
   "scripts": {
     "dev": "vite --port=3000 --host=0.0.0.0",
-    "build": "vite build && node scripts/build-single.cjs && node post-build.cjs",
+    "build": "vite build && BUILD_SINGLE=true vite build --outDir dist/single && cp dist/single/index.html ./index_2.html && cp dist/single/index.html ./index_todo_en_uno.html && cp dist/single/index.html dist/index_2.html && cp dist/single/index.html dist/index_todo_en_uno.html && rm -rf dist/single && node post-build.cjs",
     "preview": "vite preview",
     "clean": "rm -rf dist server.js",
-    "lint": "tsc --noEmit",
-    "predeploy": "npm run build",
-    "deploy": "gh-pages -d dist"
+    "lint": "tsc --noEmit"
   },
   "dependencies": {
     "@google/genai": "^2.4.0",
     "@tailwindcss/vite": "^4.1.14",
     "@vitejs/plugin-react": "^5.0.4",
-    "docx": "^9.7.2",
     "dotenv": "^17.2.3",
     "express": "^4.21.2",
     "firebase": "^12.16.0",
@@ -34,7 +31,6 @@
     "@types/node": "^22.14.0",
     "autoprefixer": "^10.4.21",
     "esbuild": "^0.25.0",
-    "gh-pages": "^6.3.0",
     "tailwindcss": "^4.1.14",
     "tsx": "^4.21.0",
     "typescript": "~5.8.2",

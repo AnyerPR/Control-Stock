@@ -1,12 +1,10 @@
 import React, { useState, useEffect } from "react";
-import { collection, doc, query, orderBy, onSnapshot, addDoc, updateDoc, getCountFromServer, where, getDocs, writeBatch, limit, deleteDoc } from "firebase/firestore";
-import { db } from "../firebase";
+import { doc, query, orderBy, onSnapshot, addDoc, updateDoc, getCountFromServer, writeBatch, limit, deleteDoc } from "firebase/firestore";
+import { db, tenantCollection, tenantDoc, getActiveFarmaciaId, DEFAULT_FARMACIA_ID } from "../firebase";
 import { Usuario, Solicitud, RegistroHistorial, CambioEstado, Producto, Lote, Movimiento, SolicitudItem, Departamento } from "../types";
 import { playSound } from "../utils/audio";
 import { logSystemEvent } from "../utils/chatHelper";
 import { FileText, ClipboardList, Plus, Search, Filter, AlertCircle, HelpCircle, Calendar, Clock, RefreshCw, Layers, LoaderCircle, User, X, PlusCircle, Trash2 } from "lucide-react";
-import jsPDF from "jspdf";
-import autoTable from "jspdf-autotable";
 
 interface SolicitudesPanelProps {
   currentUser: Usuario;
@@ -55,8 +53,17 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
     if (currentUser?.rol === "Administrador" || currentUser?.departamento === "Almacén y Suministro") {
       return activeCatalogos;
     }
+    if (currentUser?.departamento === "Laboratorio") {
+      return activeCatalogos.filter((c) => c.id === "laboratorio");
+    }
+    if (currentUser?.departamento === "Odontología") {
+      return activeCatalogos.filter((c) => c.id === "odontologia");
+    }
     const userCats = currentUser?.catalogos || [];
-    return activeCatalogos.filter((c) => userCats.includes(c.id));
+    if (userCats.length > 0) {
+      return activeCatalogos.filter((c) => userCats.includes(c.id));
+    }
+    return activeCatalogos;
   };
 
   const handleSetSolicitudCatalogId = (catId: string) => {
@@ -94,16 +101,8 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
   const [histStatusFilter, setHistStatusFilter] = useState("todos");
   const [histUserFilter, setHistUserFilter] = useState("");
 
-  const currentDepartment = currentUser.departamento || "Laboratorio";
-  const [solicitudDept, setSolicitudDept] = useState<string>(() => currentUser.departamento || "Laboratorio");
-
-  useEffect(() => {
-    if (currentUser.departamento) {
-      setSolicitudDept(currentUser.departamento);
-    }
-  }, [currentUser]);
-
   // Create Form State
+  const [department, setDepartment] = useState(DEPARTAMENTOS[0]);
   const [description, setDescription] = useState("");
   const [priority, setPriority] = useState<"Baja" | "Media" | "Alta">("Media");
   const [observations, setObservations] = useState("");
@@ -163,7 +162,7 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
     }
 
     setLoading(true);
-    const colRef = collection(db, "solicitudes");
+    const colRef = tenantCollection("solicitudes");
     
     // Listen to all solicitudes to feed available periods
     const unsubAll = onSnapshot(colRef, (snapshot) => {
@@ -233,7 +232,7 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
     });
 
     // Listen to global history
-    const histCol = collection(db, "historial");
+    const histCol = tenantCollection("historial");
     const qHist = query(histCol, orderBy("timestamp", "desc"), limit(100));
     const unsubHist = onSnapshot(qHist, (snapshot) => {
       const list: RegistroHistorial[] = [];
@@ -270,10 +269,6 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
 
     const isLocalFileMode = typeof window !== "undefined" && window.location.protocol === "file:";
 
-    const effectiveDept = (currentUser.rol === "Administrador" || currentUser.departamento === "Almacén y Suministro")
-      ? (solicitudDept || currentUser.departamento || "Almacén y Suministro")
-      : (currentUser.departamento || solicitudDept || "Laboratorio");
-
     try {
       if (isLocalFileMode) {
         let storedSol = localStorage.getItem("offline_solicitudes");
@@ -296,7 +291,7 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
           numeroSolicitud,
           fecha: localDate,
           hora: localTime,
-          departamento: effectiveDept,
+          departamento: department,
           usuarioCreador: `${currentUser.nombre} (${currentUser.usuario})`,
           descripcion: finalDesc,
           prioridad: priority,
@@ -333,7 +328,7 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
           tipo: "Creación",
           solicitudId: newId,
           numeroSolicitud,
-          descripcionEvent: `Se creó la solicitud ${numeroSolicitud} para el departamento de ${effectiveDept}.`,
+          descripcionEvent: `Se creó la solicitud ${numeroSolicitud} para el departamento de ${department}.`,
           usuarioResponsable: `${currentUser.nombre} (${currentUser.usuario})`,
           fecha: localDate,
           hora: localTime,
@@ -344,7 +339,7 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
         localStorage.setItem("offline_historial", JSON.stringify(histList));
 
         // Notify chat
-        logSystemEvent(`🆕 **Nueva Solicitud**: Se creó la solicitud **${numeroSolicitud}** de **${effectiveDept}** por el usuario **${currentUser.nombre}** (Prioridad: ${priority}).`);
+        logSystemEvent(`🆕 **Nueva Solicitud**: Se creó la solicitud **${numeroSolicitud}** de **${department}** por el usuario **${currentUser.nombre}** (Prioridad: ${priority}).`);
 
         window.dispatchEvent(new Event("offline_solicitudes_update"));
         window.dispatchEvent(new Event("offline_historial_update"));
@@ -352,6 +347,7 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
         setDescription("");
         setObservations("");
         setPriority("Media");
+        setDepartment(DEPARTAMENTOS[0]);
         setSolicitudItems([]);
         setSolicitudCatalogId("");
         setActiveSubTab("list");
@@ -362,7 +358,7 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
       }
 
       // 1. Get next auto SOL-XXXX number
-      const colRef = collection(db, "solicitudes");
+      const colRef = tenantCollection("solicitudes");
       const countSnapshot = await getCountFromServer(colRef);
       const nextNum = String(countSnapshot.data().count + 1).padStart(4, "0");
       const numeroSolicitud = `SOL-${nextNum}`;
@@ -379,7 +375,7 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
         numeroSolicitud,
         fecha: localDate,
         hora: localTime,
-        departamento: effectiveDept,
+        departamento: department,
         usuarioCreador: `${currentUser.nombre} (${currentUser.usuario})`,
         descripcion: finalDesc,
         prioridad: priority,
@@ -405,12 +401,12 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
       const docRef = await addDoc(colRef, docData);
 
       // Create global history entry
-      const histCol = collection(db, "historial");
+      const histCol = tenantCollection("historial");
       const histData: Omit<RegistroHistorial, "id"> = {
         tipo: "Creación",
         solicitudId: docRef.id,
         numeroSolicitud,
-        descripcionEvent: `Se creó la solicitud ${numeroSolicitud} para el departamento de ${effectiveDept}.`,
+        descripcionEvent: `Se creó la solicitud ${numeroSolicitud} para el departamento de ${department}.`,
         usuarioResponsable: `${currentUser.nombre} (${currentUser.usuario})`,
         fecha: localDate,
         hora: localTime,
@@ -420,11 +416,12 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
       await addDoc(histCol, histData);
       
       // Notify chat
-      logSystemEvent(`🆕 **Nueva Solicitud**: Se creó la solicitud **${numeroSolicitud}** de **${effectiveDept}** por el usuario **${currentUser.nombre}** (Prioridad: ${priority}).`);
+      logSystemEvent(`🆕 **Nueva Solicitud**: Se creó la solicitud **${numeroSolicitud}** de **${department}** por el usuario **${currentUser.nombre}** (Prioridad: ${priority}).`);
 
       setDescription("");
       setObservations("");
       setPriority("Media");
+      setDepartment(DEPARTAMENTOS[0]);
       setSolicitudItems([]);
       setSolicitudCatalogId("");
       setActiveSubTab("list");
@@ -475,14 +472,14 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
       total += sub;
       
       return `
-        <tr style="page-break-inside: avoid;">
-          <td style="border: 1px solid #cbd5e1; padding: 7pt 5pt; text-align: center; font-size: 9pt; color: #64748b;">${idx + 1}</td>
-          <td style="border: 1px solid #cbd5e1; padding: 7pt 5pt; text-align: left; font-size: 9pt; font-weight: bold; color: #0f766e;">${item.productoCodigo}</td>
-          <td style="border: 1px solid #cbd5e1; padding: 7pt 5pt; text-align: left; font-size: 9pt; color: #1e293b;">${item.productoNombre}</td>
-          <td style="border: 1px solid #cbd5e1; padding: 7pt 5pt; text-align: center; font-size: 9pt; font-weight: bold; color: #475569;">${item.cantidadSolicitada}</td>
-          <td style="border: 1px solid #cbd5e1; padding: 7pt 5pt; text-align: center; font-size: 9pt; font-weight: bold; color: #0f766e;">${qty}</td>
-          <td style="border: 1px solid #cbd5e1; padding: 7pt 5pt; text-align: right; font-size: 9pt; color: #475569;">RD$ ${price.toFixed(2)}</td>
-          <td style="border: 1px solid #cbd5e1; padding: 7pt 5pt; text-align: right; font-size: 9pt; font-weight: bold; color: #0f766e;">RD$ ${sub.toFixed(2)}</td>
+        <tr>
+          <td style="border: 1px solid #cbd5e1; padding: 10px; text-align: center; font-size: 11px;">${idx + 1}</td>
+          <td style="border: 1px solid #cbd5e1; padding: 10px; text-align: left; font-size: 11px; font-weight: bold; color: #1e293b;">${item.productoCodigo}</td>
+          <td style="border: 1px solid #cbd5e1; padding: 10px; text-align: left; font-size: 11px;">${item.productoNombre}</td>
+          <td style="border: 1px solid #cbd5e1; padding: 10px; text-align: center; font-size: 11px;">${item.cantidadSolicitada}</td>
+          <td style="border: 1px solid #cbd5e1; padding: 10px; text-align: center; font-size: 11px; font-weight: bold;">${qty}</td>
+          <td style="border: 1px solid #cbd5e1; padding: 10px; text-align: right; font-size: 11px;">RD$ ${price.toFixed(2)}</td>
+          <td style="border: 1px solid #cbd5e1; padding: 10px; text-align: right; font-size: 11px; font-weight: bold;">RD$ ${sub.toFixed(2)}</td>
         </tr>
       `;
     }).join("");
@@ -491,201 +488,116 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
       <html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:w="urn:schemas-microsoft-com:office:word" xmlns="http://www.w3.org/TR/REC-html40">
       <head>
         <meta charset="utf-8">
-        <title>Orden de Suministros - ${sol.numeroSolicitud}</title>
-        <!--[if gte mso 9]>
-        <xml>
-          <w:WordDocument>
-            <w:View>Print</w:View>
-            <w:Zoom>100</w:Zoom>
-            <w:DoNotOptimizeForBrowser/>
-          </w:WordDocument>
-        </xml>
-        <![endif]-->
+        <title>Orden de Servicio - ${sol.numeroSolicitud}</title>
         <style>
-          @page Section1 {
-            size: 8.5in 11in;
-            margin: 0.75in 0.75in 0.75in 0.75in;
-            mso-header-margin: 0.5in;
-            mso-footer-margin: 0.5in;
-          }
-          div.Section1 {
-            page: Section1;
-          }
-          body {
-            font-family: Arial, 'Segoe UI', sans-serif;
-            color: #334155;
-            margin: 0;
-            padding: 0;
-          }
-          table {
-            border-collapse: collapse;
-            mso-table-lspace: 0pt;
-            mso-table-rspace: 0pt;
-          }
-          .header-table {
-            width: 100%;
-            border-collapse: collapse;
-            margin-bottom: 20px;
-            border-bottom: 2px solid #0f766e;
-            padding-bottom: 12px;
-          }
-          .title {
-            font-size: 16pt;
-            font-weight: bold;
-            color: #0f766e;
-            text-transform: uppercase;
-          }
-          .subtitle {
-            font-size: 9pt;
-            color: #64748b;
-            margin-top: 3px;
-          }
-          .info-box {
-            background-color: #f8fafc;
-            border: 1px solid #e2e8f0;
-            padding: 12px;
-            margin-bottom: 20px;
-          }
-          .info-table {
-            width: 100%;
-            border-collapse: collapse;
-          }
-          .info-table td {
-            padding: 4px 6px;
-            font-size: 9pt;
-            vertical-align: top;
-          }
-          .info-label {
-            font-weight: bold;
-            color: #475569;
-            width: 22%;
-          }
-          .info-value {
-            color: #1e293b;
-            width: 28%;
-          }
-          .product-table {
-            width: 100%;
-            border-collapse: collapse;
-            margin-top: 15px;
-            margin-bottom: 20px;
-          }
-          .product-table th {
-            background-color: #0f766e;
-            color: #ffffff;
-            font-size: 9pt;
-            font-weight: bold;
-            text-transform: uppercase;
-            padding: 8pt 6pt;
-            border: 1px solid #0f766e;
-          }
-          .obs-box {
-            margin-top: 20px;
-            padding: 10pt;
-            border-left: 4px solid #0f766e;
-            background-color: #f8fafc;
-            font-size: 9pt;
-          }
-          .signatures {
-            margin-top: 45px;
-            width: 100%;
-            page-break-inside: avoid;
-          }
-          .signatures td {
-            text-align: center;
-            font-size: 9pt;
-            width: 50%;
-            vertical-align: top;
-          }
-          .sig-line {
-            width: 70%;
-            border-top: 1px solid #94a3b8;
-            margin: 0 auto 6px auto;
-          }
+          body { font-family: 'Segoe UI', Arial, sans-serif; color: #334155; margin: 40px; }
+          .header-table { width: 100%; border-collapse: collapse; margin-bottom: 30px; }
+          .title { font-size: 20px; font-weight: bold; color: #0f766e; text-transform: uppercase; }
+          .subtitle { font-size: 11px; color: #64748b; margin-top: 5px; }
+          .info-box { background-color: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; padding: 15px; margin-bottom: 25px; }
+          .info-table { width: 100%; border-collapse: collapse; }
+          .info-table td { padding: 4px 0; font-size: 12px; }
+          .info-label { font-weight: bold; color: #475569; width: 30%; }
+          .info-value { color: #1e293b; }
+          .product-table { width: 100%; border-collapse: collapse; margin-top: 20px; margin-bottom: 25px; }
+          .product-table th { background-color: #0f766e; color: #ffffff; font-size: 11px; font-weight: bold; text-transform: uppercase; padding: 10px; text-align: left; border: 1px solid #0f766e; }
+          .total-section { text-align: right; font-size: 14px; margin-top: 20px; }
+          .obs-box { margin-top: 30px; padding: 15px; border-left: 4px solid #0f766e; background-color: #f8fafc; font-size: 12px; }
+          .signatures { margin-top: 60px; width: 100%; }
+          .signatures td { text-align: center; font-size: 11px; width: 50%; }
+          .sig-line { width: 60%; border-top: 1px solid #cbd5e1; margin: 0 auto 8px auto; }
         </style>
       </head>
       <body>
-        <div class="Section1">
-          <table class="header-table">
+        <table class="header-table">
+          <tr>
+            <td style="vertical-align: top;">
+              <div class="title">CONTROL DE STOCK - ORDEN DE SERVICIO</div>
+              <div class="subtitle">Suministros Hospitalarios &bull; Dr. José Manuel Rodríguez</div>
+            </td>
+            <td style="text-align: right; vertical-align: top; font-size: 12px; font-weight: bold; color: #0f766e;">
+              ${sol.numeroSolicitud}
+            </td>
+          </tr>
+        </table>
+
+        <div class="info-box">
+          <table class="info-table">
             <tr>
-              <td style="vertical-align: middle;">
-                <div class="title">CONTROL DE STOCK - ORDEN DE SERVICIO</div>
-                <div class="subtitle">Suministros Hospitalarios &bull; Dr. José Manuel Rodríguez</div>
-              </td>
-              <td style="text-align: right; vertical-align: middle;">
-                <div style="font-size: 13pt; font-weight: bold; color: #0f766e; background-color: #f0fdfa; border: 1px solid #ccfbf1; padding: 6px 12px; display: inline-block;">
-                  ${sol.numeroSolicitud}
-                </div>
-                <div style="font-size: 8pt; color: #64748b; margin-top: 4px;">Fecha: ${new Date(sol.fecha + "T00:00:00").toLocaleDateString("es-DO")} | ${sol.hora}</div>
-              </td>
+              <td class="info-label">Número de Orden:</td>
+              <td class="info-value"><strong>${sol.numeroSolicitud}</strong></td>
+              <td class="info-label">Fecha / Hora:</td>
+              <td class="info-value">${new Date(sol.fecha + "T00:00:00").toLocaleDateString("es-DO")} a las ${sol.hora}</td>
             </tr>
-          </table>
-
-          <div class="info-box">
-            <table class="info-table">
-              <tr>
-                <td class="info-label">Departamento Solicitante:</td>
-                <td class="info-value"><strong>${sol.departamento}</strong></td>
-                <td class="info-label">Usuario Solicitante:</td>
-                <td class="info-value">${sol.usuarioCreador}</td>
-              </tr>
-              <tr>
-                <td class="info-label">Estado de la Orden:</td>
-                <td class="info-value"><span style="color: #0f766e; font-weight: bold;">${sol.estado}</span></td>
-                <td class="info-label">Periodo Mensual:</td>
-                <td class="info-value">${sol.periodo}</td>
-              </tr>
-              ${sol.descripcion ? `
-              <tr>
-                <td class="info-label">Justificación:</td>
-                <td class="info-value" colspan="3">${sol.descripcion}</td>
-              </tr>` : ""}
-            </table>
-          </div>
-
-          <table class="product-table">
-            <thead>
-              <tr>
-                <th style="width: 5%; text-align: center;">N.º</th>
-                <th style="width: 14%;">Código</th>
-                <th style="width: 35%;">Descripción del Insumo</th>
-                <th style="width: 11%; text-align: center;">Cant. Sol.</th>
-                <th style="width: 11%; text-align: center;">Cant. Ent.</th>
-                <th style="width: 12%; text-align: right;">Precio Unit.</th>
-                <th style="width: 12%; text-align: right;">Importe</th>
-              </tr>
-            </thead>
-            <tbody>
-              ${itemsRows}
-              <tr>
-                <td colspan="6" style="border: 1px solid #cbd5e1; padding: 8pt 6pt; text-align: right; font-weight: bold; background-color: #f8fafc; font-size: 9.5pt;">TOTAL NETO:</td>
-                <td style="border: 1px solid #cbd5e1; padding: 8pt 6pt; text-align: right; font-weight: bold; background-color: #f8fafc; color: #0f766e; font-size: 9.5pt;">RD$ ${total.toFixed(2)}</td>
-              </tr>
-            </tbody>
-          </table>
-
-          ${sol.observaciones ? `
-          <div class="obs-box">
-            <strong>Observaciones Generales de Entrega:</strong><br/>
-            <span style="font-style: italic; color: #475569;">${sol.observaciones}</span>
-          </div>
-          ` : ""}
-
-          <table class="signatures">
             <tr>
-              <td>
-                <div class="sig-line"></div>
-                <strong>Entregado por (Almacén)</strong><br/>
-                <span style="font-size: 8pt; color: #64748b;">Firma y Sello</span>
-              </td>
-              <td>
-                <div class="sig-line"></div>
-                <strong>Recibido por (${sol.departamento})</strong><br/>
-                <span style="font-size: 8pt; color: #64748b;">Firma y Sello</span>
-              </td>
+              <td class="info-label">Departamento Solicitante:</td>
+              <td class="info-value"><strong>${sol.departamento}</strong></td>
+              <td class="info-label">Usuario Solicitante:</td>
+              <td class="info-value">${sol.usuarioCreador}</td>
+            </tr>
+            <tr>
+              <td class="info-label">Estado de la Orden:</td>
+              <td class="info-value"><span style="color: #0f766e; font-weight: bold;">${sol.estado}</span></td>
+              <td class="info-label">Periodo Mensual:</td>
+              <td class="info-value">${sol.periodo}</td>
             </tr>
           </table>
         </div>
+
+        <h3 style="font-size: 14px; font-weight: bold; color: #1e293b; margin-bottom: 10px; text-transform: uppercase;">Detalle de Insumos Despachados</h3>
+        <table class="product-table">
+          <thead>
+            <tr>
+              <th style="width: 5%; text-align: center;">#</th>
+              <th style="width: 15%;">Código</th>
+              <th style="width: 35%;">Nombre del Insumo / Medicamento</th>
+              <th style="width: 10%; text-align: center;">Cant. Sol.</th>
+              <th style="width: 10%; text-align: center;">Cant. Ent.</th>
+              <th style="width: 12%; text-align: right;">Precio Unit.</th>
+              <th style="width: 13%; text-align: right;">Importe</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${itemsRows}
+          </tbody>
+        </table>
+
+        <div class="total-section">
+          <table style="width: 100%; border-collapse: collapse;">
+            <tr>
+              <td style="width: 70%; border: none;"></td>
+              <td style="width: 15%; text-align: right; padding: 5px; font-size: 12px; color: #475569;">Subtotal:</td>
+              <td style="width: 15%; text-align: right; padding: 5px; font-size: 12px; color: #475569; font-weight: bold;">RD$ ${total.toFixed(2)}</td>
+            </tr>
+            <tr>
+              <td style="border: none;"></td>
+              <td style="text-align: right; padding: 5px; font-size: 14px; font-weight: bold; color: #0f766e; border-top: 2px solid #cbd5e1;">TOTAL NETO:</td>
+              <td style="text-align: right; padding: 5px; font-size: 14px; font-weight: bold; color: #0f766e; border-top: 2px solid #cbd5e1;">RD$ ${total.toFixed(2)}</td>
+            </tr>
+          </table>
+        </div>
+
+        ${sol.observaciones ? `
+        <div class="obs-box">
+          <strong>Observaciones Generales de Entrega:</strong><br/>
+          <span style="font-style: italic;">${sol.observaciones}</span>
+        </div>
+        ` : ""}
+
+        <table class="signatures" style="margin-top: 50px;">
+          <tr>
+            <td>
+              <div class="sig-line"></div>
+              <strong>Entregado por (Almacén)</strong><br/>
+              Firma y Sello
+            </td>
+            <td>
+              <div class="sig-line"></div>
+              <strong>Recibido por (${sol.departamento})</strong><br/>
+              Firma y Sello
+            </td>
+          </tr>
+        </table>
       </body>
       </html>
     `;
@@ -694,7 +606,7 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = `Orden_${sol.numeroSolicitud}_${(sol.departamento || "General").replace(/[^a-zA-Z0-9]/g, "_")}.doc`;
+    a.download = `Orden_${sol.numeroSolicitud}_${sol.departamento.replace(/[^a-zA-Z0-9]/g, "_")}.doc`;
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
@@ -707,91 +619,7 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
     const items = getExportItems(sol);
     let total = 0;
     
-    const doc = new jsPDF("p", "pt", "a4"); // Portrait A4 size (595.28 x 841.89 pt)
-
-    // Header background banner
-    doc.setFillColor(248, 250, 252);
-    doc.rect(40, 30, 515, 55, "F");
-
-    // Title
-    doc.setFont("helvetica", "bold");
-    doc.setFontSize(13);
-    doc.setTextColor(15, 118, 110); // Teal 700
-    doc.text("CONTROL DE STOCK - ORDEN DE SERVICIO", 55, 52);
-
-    doc.setFont("helvetica", "normal");
-    doc.setFontSize(8.5);
-    doc.setTextColor(71, 85, 105);
-    doc.text("Suministros Hospitalarios • Dr. José Manuel Rodríguez", 55, 68);
-
-    // Solicitud Number Badge on top-right
-    doc.setFont("helvetica", "bold");
-    doc.setFontSize(11);
-    doc.setTextColor(15, 118, 110);
-    doc.text(sol.numeroSolicitud, 470, 52);
-
-    doc.setFont("helvetica", "normal");
-    doc.setFontSize(7.5);
-    doc.setTextColor(100, 116, 139);
-    doc.text(`${new Date(sol.fecha + "T00:00:00").toLocaleDateString("es-DO")} ${sol.hora}`, 450, 68);
-
-    // Divider line
-    doc.setDrawColor(13, 148, 136); // Teal 600
-    doc.setLineWidth(2);
-    doc.line(40, 85, 555, 85);
-
-    // Metadata section box
-    doc.setFillColor(248, 250, 252);
-    doc.roundedRect(40, 95, 515, 60, 4, 4, "F");
-    doc.setDrawColor(226, 232, 240);
-    doc.setLineWidth(1);
-    doc.roundedRect(40, 95, 515, 60, 4, 4, "S");
-
-    doc.setFont("helvetica", "bold");
-    doc.setFontSize(8.5);
-    doc.setTextColor(71, 85, 105);
-    doc.text("Departamento Solicitante:", 52, 113);
-    doc.text("Usuario Solicitante:", 52, 130);
-    doc.text("Estado de la Orden:", 310, 113);
-    doc.text("Período Mensual:", 310, 130);
-
-    doc.setFont("helvetica", "bold");
-    doc.setTextColor(15, 118, 110);
-    doc.text(sol.departamento || "General", 175, 113);
-
-    doc.setFont("helvetica", "normal");
-    doc.setTextColor(30, 41, 59);
-    doc.text(sol.usuarioCreador || "Sistema", 175, 130);
-
-    doc.setFont("helvetica", "bold");
-    doc.setTextColor(15, 118, 110);
-    doc.text((sol.estado || "Pendiente").toUpperCase(), 410, 113);
-
-    doc.setFont("helvetica", "normal");
-    doc.setTextColor(30, 41, 59);
-    doc.text(sol.periodo || "—", 410, 130);
-
-    if (sol.descripcion) {
-      doc.setFont("helvetica", "bold");
-      doc.setFontSize(8);
-      doc.setTextColor(100, 116, 139);
-      doc.text("Justificación:", 52, 147);
-      doc.setFont("helvetica", "normal");
-      doc.text(sol.descripcion.length > 75 ? sol.descripcion.slice(0, 75) + "..." : sol.descripcion, 115, 147);
-    }
-
-    // Table rows
-    const columns = [
-      { header: "N.º", dataKey: "index" },
-      { header: "Código", dataKey: "code" },
-      { header: "Descripción del Insumo", dataKey: "name" },
-      { header: "Cant. Sol.", dataKey: "requested" },
-      { header: "Cant. Ent.", dataKey: "delivered" },
-      { header: "Precio Unit.", dataKey: "price" },
-      { header: "Importe", dataKey: "subtotal" }
-    ];
-
-    const rows = items.map((item, idx) => {
+    const itemsRows = items.map((item, idx) => {
       const prod = products?.find(p => p.codigo === item.productoCodigo);
       const price = item.loteId && prod 
         ? prod.lotes?.find((l: Lote) => l.id === item.loteId)?.precio || prod.lotes?.[0]?.precio || 0
@@ -799,116 +627,155 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
       const qty = item.cantidadEntregada;
       const sub = qty * price;
       total += sub;
+      
+      return `
+        <tr class="border-b border-slate-200 text-slate-700">
+          <td class="py-3 px-4 text-slate-500 text-center">${idx + 1}</td>
+          <td class="py-3 px-4 font-black text-teal-800">${item.productoCodigo}</td>
+          <td class="py-3 px-4 font-medium text-slate-800">${item.productoNombre}</td>
+          <td class="py-3 px-4 text-center font-bold text-slate-600">${item.cantidadSolicitada}</td>
+          <td class="py-3 px-4 text-center font-extrabold text-slate-800">${qty}</td>
+          <td class="py-3 px-4 text-right font-semibold text-slate-600">RD$ ${price.toFixed(2)}</td>
+          <td class="py-3 px-4 text-right font-bold text-teal-900">RD$ ${sub.toFixed(2)}</td>
+        </tr>
+      `;
+    }).join("");
 
-      return {
-        index: idx + 1,
-        code: item.productoCodigo,
-        name: item.productoNombre,
-        requested: item.cantidadSolicitada,
-        delivered: qty,
-        price: `RD$ ${price.toFixed(2)}`,
-        subtotal: `RD$ ${sub.toFixed(2)}`
-      };
-    });
-
-    // Total row
-    rows.push({
-      index: "",
-      code: "",
-      name: "TOTAL NETO",
-      requested: "",
-      delivered: "",
-      price: "",
-      subtotal: `RD$ ${total.toFixed(2)}`
-    } as any);
-
-    autoTable(doc, {
-      columns: columns,
-      body: rows,
-      startY: 165,
-      theme: "striped",
-      headStyles: {
-        fillColor: [15, 118, 110], // Teal 700
-        textColor: 255,
-        fontSize: 8.5,
-        fontStyle: "bold"
-      },
-      styles: {
-        fontSize: 8,
-        cellPadding: 5,
-        overflow: "linebreak",
-        valign: "middle"
-      },
-      columnStyles: {
-        index: { cellWidth: 25, halign: "center" },
-        code: { cellWidth: 60, fontStyle: "bold", textColor: [15, 118, 110] },
-        name: { cellWidth: 200 },
-        requested: { cellWidth: 50, halign: "center" },
-        delivered: { cellWidth: 50, halign: "center", fontStyle: "bold" },
-        price: { cellWidth: 65, halign: "right" },
-        subtotal: { cellWidth: 65, halign: "right", fontStyle: "bold" }
-      },
-      margin: { left: 40, right: 40 },
-      willDrawCell: (data) => {
-        if (data.row.index === rows.length - 1) {
-          data.cell.styles.fontStyle = "bold";
-          data.cell.styles.fillColor = [248, 250, 252];
-          if (data.column.index === 2 || data.column.index === 6) {
-            data.cell.styles.textColor = [15, 118, 110];
-          }
-        }
-      }
-    });
-
-    let finalY = (doc as any).lastAutoTable?.finalY || 400;
-
-    // Observations
-    if (sol.observaciones && finalY < 680) {
-      doc.setFillColor(248, 250, 252);
-      doc.roundedRect(40, finalY + 15, 515, 35, 3, 3, "F");
-      doc.setDrawColor(15, 118, 110);
-      doc.setLineWidth(1.5);
-      doc.line(40, finalY + 15, 40, finalY + 50);
-
-      doc.setFont("helvetica", "bold");
-      doc.setFontSize(8);
-      doc.setTextColor(15, 118, 110);
-      doc.text("Observaciones Generales de Entrega:", 50, finalY + 28);
-
-      doc.setFont("helvetica", "italic");
-      doc.setTextColor(71, 85, 105);
-      doc.text(sol.observaciones.length > 90 ? sol.observaciones.slice(0, 90) + "..." : sol.observaciones, 50, finalY + 42);
-      finalY += 50;
+    const printWindow = window.open("", "_blank");
+    if (!printWindow) {
+      alert("Por favor permita las ventanas emergentes (popups) para exportar el documento.");
+      return;
     }
 
-    // Dual Signatures
-    const sigY = Math.min(finalY + 55, 730);
-    doc.setDrawColor(203, 213, 225);
-    doc.setLineWidth(1);
-    doc.line(70, sigY, 230, sigY);
-    doc.line(365, sigY, 525, sigY);
+    printWindow.document.write(`
+      <html>
+        <head>
+          <title>Orden de Servicio - ${sol.numeroSolicitud}</title>
+          <script src="https://cdn.tailwindcss.com"></script>
+          <style>
+            @media print {
+              body { margin: 0; padding: 20px; -webkit-print-color-adjust: exact; }
+              .no-print { display: none; }
+              @page { size: letter; margin: 15mm; }
+            }
+          </style>
+        </head>
+        <body class="bg-white text-slate-700 font-sans p-8">
+          <div class="max-w-4xl mx-auto space-y-8">
+            <!-- Header Letterhead -->
+            <div class="flex justify-between items-start border-b-2 border-teal-600 pb-5">
+              <div>
+                <h1 class="text-2xl font-black text-teal-800 uppercase tracking-tight">CONTROL DE STOCK</h1>
+                <p class="text-sm font-bold text-slate-500 uppercase tracking-widest mt-1">Órden de Servicio y Suministro</p>
+                <p class="text-xs font-semibold text-slate-400 mt-2">Dr. José Manuel Rodríguez &bull; Suministros Hospitalarios</p>
+              </div>
+              <div class="text-right">
+                <span class="text-lg font-black text-teal-800 bg-teal-50 border border-teal-200 px-4 py-2 rounded-2xl inline-block shadow-sm">
+                  ${sol.numeroSolicitud}
+                </span>
+                <p class="text-xs text-slate-400 font-semibold mt-2">Fecha: ${new Date(sol.fecha + "T00:00:00").toLocaleDateString("es-DO")} a las ${sol.hora}</p>
+              </div>
+            </div>
 
-    doc.setFont("helvetica", "bold");
-    doc.setFontSize(8.5);
-    doc.setTextColor(30, 41, 59);
-    doc.text("Entregado por (Almacén)", 150, sigY + 12, { align: "center" });
-    doc.text(`Recibido por (${sol.departamento || "Solicitante"})`, 445, sigY + 12, { align: "center" });
+            <!-- Meta details grid -->
+            <div class="grid grid-cols-2 gap-6 bg-slate-50 p-6 rounded-2xl border border-slate-200">
+              <div>
+                <p class="text-[10px] font-black uppercase text-slate-400 tracking-wider">Departamento Solicitante</p>
+                <p class="text-sm font-black text-slate-800 mt-1">${sol.departamento}</p>
+              </div>
+              <div>
+                <p class="text-[10px] font-black uppercase text-slate-400 tracking-wider">Usuario Solicitante</p>
+                <p class="text-sm font-bold text-slate-700 mt-1">${sol.usuarioCreador}</p>
+              </div>
+              <div>
+                <p class="text-[10px] font-black uppercase text-slate-400 tracking-wider">Período Mensual</p>
+                <p class="text-sm font-bold text-slate-700 mt-1">${sol.periodo}</p>
+              </div>
+              <div>
+                <p class="text-[10px] font-black uppercase text-slate-400 tracking-wider">Estado de la Orden</p>
+                <p class="text-sm font-extrabold text-teal-800 mt-1 uppercase">${sol.estado}</p>
+              </div>
+              <div class="col-span-2 border-t border-slate-200 pt-3 mt-1">
+                <p class="text-[10px] font-black uppercase text-slate-400 tracking-wider">Descripción / Justificación</p>
+                <p class="text-xs text-slate-600 mt-1 font-medium leading-relaxed">${sol.descripcion}</p>
+              </div>
+            </div>
 
-    doc.setFont("helvetica", "normal");
-    doc.setFontSize(7.5);
-    doc.setTextColor(148, 163, 184);
-    doc.text("Firma y Sello", 150, sigY + 23, { align: "center" });
-    doc.text("Firma y Sello", 445, sigY + 23, { align: "center" });
+            <!-- Table -->
+            <div>
+              <h3 class="text-xs font-black text-slate-500 uppercase tracking-wider mb-3">Listado de Insumos Despachados</h3>
+              <div class="border border-slate-200 rounded-2xl overflow-hidden shadow-sm">
+                <table class="w-full text-left text-xs border-collapse">
+                  <thead>
+                    <tr class="bg-teal-800 text-white font-black uppercase text-[10px] tracking-wider">
+                      <th class="py-3 px-4 text-center w-12">#</th>
+                      <th class="py-3 px-4 w-24">Código</th>
+                      <th class="py-3 px-4">Descripción del Insumo</th>
+                      <th class="py-3 px-4 text-center w-20">Cant. Sol.</th>
+                      <th class="py-3 px-4 text-center w-20">Cant. Ent.</th>
+                      <th class="py-3 px-4 text-right w-28">Precio Unit.</th>
+                      <th class="py-3 px-4 text-right w-32">Importe</th>
+                    </tr>
+                  </thead>
+                  <tbody class="divide-y divide-slate-100">
+                    ${itemsRows}
+                  </tbody>
+                </table>
+              </div>
+            </div>
 
-    // Page footer
-    doc.setFontSize(7.5);
-    doc.setTextColor(148, 163, 184);
-    doc.text(`Orden de Servicio • Generado el ${new Date().toLocaleDateString("es-DO")}`, 40, 780);
-    doc.text("Página 1 de 1", 520, 780);
+            <!-- Total Box -->
+            <div class="flex justify-end">
+              <div class="w-80 space-y-2 text-xs border border-slate-200 rounded-2xl p-4 bg-slate-50">
+                <div class="flex justify-between text-slate-500 font-semibold">
+                  <span>Subtotal:</span>
+                  <span>RD$ ${total.toFixed(2)}</span>
+                </div>
+                <div class="flex justify-between text-teal-800 font-black text-sm border-t border-slate-200 pt-2">
+                  <span>TOTAL NETO:</span>
+                  <span>RD$ ${total.toFixed(2)}</span>
+                </div>
+              </div>
+            </div>
 
-    doc.save(`Orden_${sol.numeroSolicitud}_${(sol.departamento || "General").replace(/[^a-zA-Z0-9]/g, "_")}.pdf`);
+            <!-- Observations -->
+            ${sol.observaciones ? `
+              <div class="bg-slate-50 border-l-4 border-teal-600 rounded-r-xl p-4 text-xs">
+                <p class="font-black text-teal-800 uppercase tracking-wider text-[10px]">Observaciones Generales de Entrega</p>
+                <p class="text-slate-600 mt-1 italic font-medium leading-relaxed">${sol.observaciones}</p>
+              </div>
+            ` : ""}
+
+            <!-- Signatures -->
+            <div class="grid grid-cols-2 gap-12 pt-16">
+              <div class="text-center">
+                <div class="w-2/3 border-t border-slate-300 mx-auto mb-2"></div>
+                <p class="text-xs font-black text-slate-800">Entregado por (Almacén)</p>
+                <p class="text-[10px] text-slate-400 font-bold mt-1">Firma y Sello</p>
+              </div>
+              <div class="text-center">
+                <div class="w-2/3 border-t border-slate-300 mx-auto mb-2"></div>
+                <p class="text-xs font-black text-slate-800">Recibido por (${sol.departamento})</p>
+                <p class="text-[10px] text-slate-400 font-bold mt-1">Firma y Sello</p>
+              </div>
+            </div>
+          </div>
+
+          <!-- Auto-print instruction -->
+          <script>
+            window.onload = function() {
+              setTimeout(function() {
+                window.print();
+              }, 500);
+            };
+          </script>
+        </body>
+      </html>
+    `);
+
+    printWindow.document.close();
     playSound("positive");
-    showToast("Orden exportada a PDF correctamente.");
+    showToast("Preparando orden para exportación a PDF...");
   };
 
   const handleOpenStatusModal = (sol: Solicitud) => {
@@ -1145,7 +1012,7 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
       };
 
       const updatedHistory = [...selectedSolicitud.historialCambios, nuevoCambio];
-      const docRef = doc(db, "solicitudes", selectedSolicitud.id);
+      const docRef = tenantDoc("solicitudes", selectedSolicitud.id);
 
       // Save delivery details inside the order
       await updateDoc(docRef, {
@@ -1157,8 +1024,8 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
 
       // Update inventory and log movements in batch
       const batch = writeBatch(db);
-      const productsCol = collection(db, "productos");
-      const movementsCol = collection(db, "movimientos");
+      const productsCol = tenantCollection("productos");
+      const movementsCol = tenantCollection("movimientos");
       const productsToUpdateMap = new Map<string, Producto>();
 
       for (const item of deliveryItems) {
@@ -1213,7 +1080,7 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
       await batch.commit();
 
       // Register in global history
-      const histCol = collection(db, "historial");
+      const histCol = tenantCollection("historial");
       const histData: Omit<RegistroHistorial, "id"> = {
         tipo: "Cambio de Estado",
         solicitudId: selectedSolicitud.id,
@@ -1260,12 +1127,12 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
       };
 
       const updatedHistory = [...sol.historialCambios, nuevoCambio];
-      const docRef = doc(db, "solicitudes", sol.id);
+      const docRef = tenantDoc("solicitudes", sol.id);
 
       // If nextStatus is "Entregada", we discount inventory automatically!
       const batch = writeBatch(db);
-      const productsCol = collection(db, "productos");
-      const movementsCol = collection(db, "movimientos");
+      const productsCol = tenantCollection("productos");
+      const movementsCol = tenantCollection("movimientos");
       const productsToUpdateMap = new Map<string, Producto>();
 
       if (nextStatus === "Entregada") {
@@ -1341,7 +1208,7 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
       await batch.commit();
 
       // Register in global history
-      const histCol = collection(db, "historial");
+      const histCol = tenantCollection("historial");
       const histData: Omit<RegistroHistorial, "id"> = {
         tipo: "Cambio de Estado",
         solicitudId: sol.id,
@@ -1367,9 +1234,12 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
   };
 
   const handleDeleteRequest = async (sol: Solicitud) => {
-    const isAnyer = currentUser.usuario.toLowerCase() === "anyer" || currentUser.nombre.toLowerCase() === "anyer";
+    const isAnyer =
+      currentUser.usuario.toLowerCase() === "anyer" ||
+      currentUser.nombre.toLowerCase() === "anyer" ||
+      (getActiveFarmaciaId() !== DEFAULT_FARMACIA_ID && currentUser.rol === "Administrador");
     if (!isAnyer) {
-      alert("No tiene permisos para eliminar órdenes. Esta función es de acceso exclusivo para el usuario Anyer.");
+      alert("No tiene permisos para eliminar órdenes. Esta función es exclusiva del Administrador Principal.");
       return;
     }
 
@@ -1432,14 +1302,14 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
       }
 
       // 1. Delete document
-      await deleteDoc(doc(db, "solicitudes", sol.id));
+      await deleteDoc(tenantDoc("solicitudes", sol.id));
 
       // 2. Register in global history
       const now = new Date();
       const localDate = now.toLocaleDateString("en-CA");
       const localTime = now.toLocaleTimeString("es-DO", { hour12: false }).slice(0, 5);
 
-      const histCol = collection(db, "historial");
+      const histCol = tenantCollection("historial");
       const histData: Omit<RegistroHistorial, "id"> = {
         tipo: "Eliminación",
         solicitudId: sol.id,
@@ -1492,10 +1362,18 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
     // 6. Creator Filter (Usuario solicitante)
     if (creatorFilter && !item.usuarioCreador.toLowerCase().includes(creatorFilter.toLowerCase())) return false;
 
-    // 7. Role & Department permissions: Almacén y Suministro see all, others only see their own department orders.
+    // 7. Role & Department permissions: each department can only see their own requests under strict RBAC.
     const canSeeAll = currentUser.rol === "Administrador" || currentUser.departamento === "Almacén y Suministro" || currentUser.departamento === "Farmacia";
-    if (!canSeeAll && item.departamento !== currentDepartment) {
-      return false;
+    if (!canSeeAll) {
+      if (currentUser.departamento === "Laboratorio") {
+        if (item.departamento !== "Laboratorio" && item.catalogId !== "laboratorio") return false;
+        if (item.departamento === "Odontología") return false;
+      } else if (currentUser.departamento === "Odontología") {
+        if (item.departamento !== "Odontología" && item.catalogId !== "odontologia") return false;
+        if (item.departamento === "Laboratorio") return false;
+      } else {
+        if (item.departamento !== currentUser.departamento) return false;
+      }
     }
 
     // 8. Search by number or creator name
@@ -1870,8 +1748,10 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
                         </button>
                       </div>
 
-                      {/* Botón Eliminar Orden (exclusivo Anyer) */}
-                      {(currentUser.usuario.toLowerCase() === "anyer" || currentUser.nombre.toLowerCase() === "anyer") && (
+                      {/* Botón Eliminar Orden (exclusivo Anyer o Admin de sede cliente) */}
+                      {(currentUser.usuario.toLowerCase() === "anyer" ||
+                        currentUser.nombre.toLowerCase() === "anyer" ||
+                        (getActiveFarmaciaId() !== DEFAULT_FARMACIA_ID && currentUser.rol === "Administrador")) && (
                         <button
                           type="button"
                           onClick={() => handleDeleteRequest(sol)}
@@ -1979,23 +1859,21 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <div>
                   <label className="block text-xs font-black uppercase text-slate-500 tracking-wider mb-1.5">
-                    Departamento Solicitante *
+                    Departamento Solicitante
                   </label>
-                  {(currentUser.rol === "Administrador" || currentUser.departamento === "Almacén y Suministro") ? (
+                  {(currentUser.rol === "Administrador" || currentUser.departamento === "Farmacia") ? (
                     <select
-                      value={solicitudDept}
-                      onChange={(e) => setSolicitudDept(e.target.value)}
-                      className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2.5 text-sm outline-none focus:ring-2 focus:ring-teal-400 font-bold text-teal-900 cursor-pointer"
+                      value={department}
+                      onChange={(e) => setDepartment(e.target.value)}
+                      className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2.5 text-sm outline-none focus:ring-2 focus:ring-teal-400 font-extrabold text-teal-800"
                     >
-                      {dynamicDepts.map((dept) => (
-                        <option key={dept} value={dept}>
-                          {dept}
-                        </option>
+                      {DEPARTAMENTOS.map((d) => (
+                        <option key={d} value={d}>{d}</option>
                       ))}
                     </select>
                   ) : (
-                    <div className="w-full bg-teal-50/70 border border-teal-200/80 rounded-xl px-4 py-2.5 text-sm font-extrabold text-teal-900 h-[44px] flex items-center shadow-inner">
-                      {currentUser.departamento || "Laboratorio"}
+                    <div className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-2.5 text-sm font-extrabold text-teal-800 h-[44px] flex items-center shadow-inner">
+                      {currentUser.departamento || "Servicio General"}
                     </div>
                   )}
                 </div>
@@ -2046,13 +1924,13 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
                               <input
                                 type="number"
                                 min="1"
-                                value={item.cantidadSolicitada === 0 ? "" : item.cantidadSolicitada}
-                                onFocus={(e) => e.target.select()}
+                                value={item.cantidadSolicitada}
                                 onChange={(e) => {
-                                  const val = e.target.value === "" ? 0 : parseInt(e.target.value);
-                                  setSolicitudItems(prev => prev.map((it, i) => i === idx ? { ...it, cantidadSolicitada: isNaN(val) ? 0 : val, cantidadEntregada: isNaN(val) ? 0 : val } : it));
+                                  const val = parseInt(e.target.value);
+                                  if (!isNaN(val) && val > 0) {
+                                    setSolicitudItems(prev => prev.map((it, i) => i === idx ? { ...it, cantidadSolicitada: val, cantidadEntregada: val } : it));
+                                  }
                                 }}
-                                placeholder="0"
                                 className="w-16 bg-slate-50 border border-slate-200 rounded-md text-center py-1 text-xs font-black text-slate-700"
                               />
                             </td>
@@ -2226,7 +2104,6 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
                             min="1"
                             defaultValue="1"
                             id={`qty-catalog-${p.codigo}`}
-                            onFocus={(e) => e.target.select()}
                             className="w-12 bg-slate-50 border border-slate-200 rounded-lg text-center text-xs py-1.5 font-bold outline-none"
                           />
                           <button
@@ -2278,10 +2155,19 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
             if (!canSeeAll) {
               const sol = solicitudes.find(s => s.id === hist.solicitudId || s.numeroSolicitud === hist.numeroSolicitud);
               if (sol) {
-                if (sol.departamento !== currentDepartment) return false;
+                if (currentUser.departamento === "Laboratorio") {
+                  if (sol.departamento !== "Laboratorio" && sol.catalogId !== "laboratorio") return false;
+                  if (sol.departamento === "Odontología") return false;
+                } else if (currentUser.departamento === "Odontología") {
+                  if (sol.departamento !== "Odontología" && sol.catalogId !== "odontologia") return false;
+                  if (sol.departamento === "Laboratorio") return false;
+                } else {
+                  if (sol.departamento !== currentUser.departamento) return false;
+                }
               } else {
-                // Only allow history that clearly belongs to the user's department if no linked solicitud is available.
-                if (!hist.descripcionEvent.toLowerCase().includes(currentDepartment.toLowerCase())) return false;
+                // Safe check using description event keywords to avoid leaks
+                const otherDepts = ["Laboratorio", "Odontología"].filter(d => d !== currentUser.departamento);
+                if (otherDepts.some(d => hist.descripcionEvent.toLowerCase().includes(d.toLowerCase()))) return false;
               }
             }
 
@@ -2587,13 +2473,8 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
                                   <input
                                     type="number"
                                     min="0"
-                                    value={approvedVal === 0 ? "" : approvedVal}
-                                    onFocus={(e) => e.target.select()}
-                                    onChange={(e) => {
-                                      const val = e.target.value === "" ? 0 : Number(e.target.value);
-                                      handleUpdateApprovedQty(item.id, isNaN(val) ? 0 : val);
-                                    }}
-                                    placeholder="0"
+                                    value={approvedVal}
+                                    onChange={(e) => handleUpdateApprovedQty(item.id, Number(e.target.value))}
                                     className="w-20 text-center rounded-lg border border-slate-200 px-2 py-1.5 font-bold text-slate-800 bg-slate-50 focus:ring-1 focus:ring-teal-400"
                                   />
                                 ) : (
@@ -2605,13 +2486,8 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
                                   <input
                                     type="number"
                                     min="0"
-                                    value={deliveredVal === 0 ? "" : deliveredVal}
-                                    onFocus={(e) => e.target.select()}
-                                    onChange={(e) => {
-                                      const val = e.target.value === "" ? 0 : Number(e.target.value);
-                                      handleUpdateDeliveryQty(item.id, isNaN(val) ? 0 : val);
-                                    }}
-                                    placeholder="0"
+                                    value={deliveredVal}
+                                    onChange={(e) => handleUpdateDeliveryQty(item.id, Number(e.target.value))}
                                     className="w-20 text-center rounded-lg border border-slate-200 px-2 py-1.5 font-bold text-slate-800 bg-slate-50 focus:ring-1 focus:ring-teal-400"
                                   />
                                 ) : (

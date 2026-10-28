@@ -1,0 +1,94 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function isSignedIn() {
+      return request.auth != null && request.auth.token.email != null;
+    }
+
+    function isSuperAdmin() {
+      return isSignedIn() && (
+        request.auth.token.email == 'anyer@principal.controlstock.local' ||
+        request.auth.token.email == 'francisco@principal.controlstock.local' ||
+        request.auth.token.email == 'ivelyn@principal.controlstock.local' ||
+        request.auth.token.email == 'julianperezdiaz10@gmail.com'
+      );
+    }
+
+    function belongsToPrincipal() {
+      return isSignedIn() && (
+        request.auth.token.email.matches('^[^@]+@principal\\.controlstock\\.local$') ||
+        isSuperAdmin()
+      );
+    }
+
+    function belongsToFarmacia(farmaciaId) {
+      return isSignedIn() && (
+        request.auth.token.email.matches('^[^@]+@' + farmaciaId + '\\.controlstock\\.local$') ||
+        isSuperAdmin()
+      );
+    }
+
+    // 1. Sede Principal (Colecciones raíz originales: conserva todos tus datos actuales)
+    match /usuarios/{userId} {
+      allow get: if true;
+      allow list, write: if belongsToPrincipal();
+    }
+
+    match /productos/{docId} {
+      allow read, write: if belongsToPrincipal();
+    }
+
+    match /bloques/{docId} {
+      allow read, write: if belongsToPrincipal();
+    }
+
+    match /departamentos/{docId} {
+      allow read, write: if belongsToPrincipal();
+    }
+
+    match /catalogos/{docId} {
+      allow read, write: if belongsToPrincipal();
+    }
+
+    match /configuracion/{docId} {
+      allow read, write: if belongsToPrincipal();
+    }
+
+    match /movimientos/{docId} {
+      allow read, write: if belongsToPrincipal();
+    }
+
+    match /solicitudes/{docId} {
+      allow read, write: if belongsToPrincipal();
+    }
+
+    match /historial/{docId} {
+      allow read, write: if belongsToPrincipal();
+    }
+
+    match /chat_mensajes/{docId} {
+      allow read, write: if belongsToPrincipal();
+    }
+
+    // 2. Multi-Farmacia (Datos aislados por cliente comercial en /farmacias/{farmaciaId})
+    match /farmacias/{farmaciaId} {
+      allow get: if true;
+      allow list, write: if isSuperAdmin() || belongsToFarmacia(farmaciaId);
+
+      match /usuarios/{userId} {
+        allow get: if true;
+        allow list, write: if belongsToFarmacia(farmaciaId);
+      }
+
+      match /{subcollection}/{docId} {
+        allow read, write: if belongsToFarmacia(farmaciaId);
+      }
+    }
+
+    // Bloqueo por defecto para cualquier otra ruta
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

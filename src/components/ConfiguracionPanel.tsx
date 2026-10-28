@@ -1,17 +1,35 @@
 import React, { useState, useEffect, useRef } from "react";
-import { doc, setDoc, updateDoc, collection, deleteDoc, getDocs, writeBatch } from "firebase/firestore";
-import { db } from "../firebase";
-import { Usuario, ColoresConfig, Departamento, Catalogo, Producto, InstitucionConfig } from "../types";
+import { doc, setDoc, updateDoc, collection, deleteDoc, getDocs, getDoc, writeBatch, onSnapshot } from "firebase/firestore";
+import {
+  db,
+  tenantCollection,
+  tenantDoc,
+  getActiveFarmaciaId,
+  DEFAULT_FARMACIA_ID,
+  normalizeFarmaciaId,
+  provisionUserInFirebaseAuth,
+  FIRESTORE_SECURITY_RULES_TEXT
+} from "../firebase";
+import {
+  Usuario,
+  ColoresConfig,
+  Departamento,
+  Catalogo,
+  Producto,
+  FarmaciaTenant,
+  InstitucionInfo,
+  CampoVariableCliente,
+  ConceptoFactura,
+  DEFAULT_CONCEPTOS_FACTURA
+} from "../types";
+import { hashPassword } from "./Login";
 import { playSound } from "../utils/audio";
 import {
-  Settings,
   RefreshCw,
   Palette,
-  ShieldAlert,
   Check,
   Plus,
   Edit2,
-  Shield,
   ToggleLeft,
   ToggleRight,
   Trash2,
@@ -19,32 +37,37 @@ import {
   X,
   Layers,
   Building2,
-  Upload,
-  Image as ImageIcon,
-  FileText,
-  Globe,
+  Copy,
+  ShieldCheck,
+  CreditCard,
   Phone,
   Mail,
+  Globe,
   MapPin,
-  CreditCard,
-  AlertCircle,
-  Save
+  FileText,
+  Image as ImageIcon,
+  Upload,
+  Save,
+  UserCheck,
+  SlidersHorizontal,
+  Tag
 } from "lucide-react";
 
 interface ConfiguracionPanelProps {
   currentUser: Usuario;
   activePeriod: string;
   colores: ColoresConfig;
-  institucion: InstitucionConfig;
   onUpdatePeriod: (newPeriod: string) => void;
   onUpdateColores: (newColores: ColoresConfig) => void;
-  onUpdateInstitucion: (newInst: InstitucionConfig) => void;
   showToast: (message: string) => void;
   departamentos: Departamento[];
   catalogos: Catalogo[];
+  conceptos?: ConceptoFactura[];
+  onUpdateConceptos?: (list: ConceptoFactura[]) => void;
+  onUpdateInstitucion?: (info: InstitucionInfo) => void;
+  onSwitchFarmacia?: (farmaciaId: string, nombre?: string) => void;
 }
 
-// Predefined Themes for Quick Selection
 const PRESETS = [
   {
     name: "Verde Esmeralda (Original)",
@@ -115,48 +138,19 @@ export default function ConfiguracionPanel({
   currentUser,
   activePeriod,
   colores,
-  institucion,
   onUpdatePeriod,
   onUpdateColores,
-  onUpdateInstitucion,
   showToast,
   departamentos,
-  catalogos
+  catalogos,
+  conceptos = DEFAULT_CONCEPTOS_FACTURA,
+  onUpdateConceptos,
+  onUpdateInstitucion,
+  onSwitchFarmacia
 }: ConfiguracionPanelProps) {
   const [localColores, setLocalColores] = useState<ColoresConfig>({ ...colores });
   const [savingColores, setSavingColores] = useState(false);
   const [closingMonth, setClosingMonth] = useState(false);
-
-  // Institucion / Empresa State
-  const [localInstitucion, setLocalInstitucion] = useState<InstitucionConfig>({
-    nombre: institucion?.nombre || "Suministros Hospitalarios • Dr. José Manuel Rodríguez",
-    logo: institucion?.logo || "",
-    direccion: institucion?.direccion || "",
-    telefono: institucion?.telefono || "",
-    correo: institucion?.correo || "",
-    identificadorFiscal: institucion?.identificadorFiscal || "",
-    paginaWeb: institucion?.paginaWeb || "",
-    informacionAdicional: institucion?.informacionAdicional || ""
-  });
-  const [savingInstitucion, setSavingInstitucion] = useState(false);
-  const [logoError, setLogoError] = useState<string | null>(null);
-  const fileInputRef = useRef<HTMLInputElement>(null);
-
-  // Sync when prop updates
-  useEffect(() => {
-    if (institucion) {
-      setLocalInstitucion({
-        nombre: institucion.nombre || "Suministros Hospitalarios • Dr. José Manuel Rodríguez",
-        logo: institucion.logo || "",
-        direccion: institucion.direccion || "",
-        telefono: institucion.telefono || "",
-        correo: institucion.correo || "",
-        identificadorFiscal: institucion.identificadorFiscal || "",
-        paginaWeb: institucion.paginaWeb || "",
-        informacionAdicional: institucion.informacionAdicional || ""
-      });
-    }
-  }, [institucion]);
 
   // Departments management state
   const [newDeptName, setNewDeptName] = useState("");
@@ -174,112 +168,420 @@ export default function ConfiguracionPanel({
   const [creatingCat, setCreatingCat] = useState(false);
   const [updatingCat, setUpdatingCat] = useState(false);
 
-  const isAnyer = currentUser.usuario.toLowerCase() === "anyer";
+  // Conceptos de Facturación management state
+  const [newConceptoName, setNewConceptoName] = useState("");
+  const [newConceptoDesc, setNewConceptoDesc] = useState("");
+  const [editingConcepto, setEditingConcepto] = useState<ConceptoFactura | null>(null);
+  const [editConceptoName, setEditConceptoName] = useState("");
+  const [editConceptoDesc, setEditConceptoDesc] = useState("");
+  const [creatingConcepto, setCreatingConcepto] = useState(false);
+  const [updatingConcepto, setUpdatingConcepto] = useState(false);
+
+  const activeFarmaciaId = getActiveFarmaciaId();
+  const isSuperAdmin =
+    currentUser.usuario.toLowerCase() === "anyer" &&
+    activeFarmaciaId === DEFAULT_FARMACIA_ID;
+  const isAnyer =
+    currentUser.usuario.toLowerCase() === "anyer" ||
+    (activeFarmaciaId !== DEFAULT_FARMACIA_ID && currentUser.rol === "Administrador");
   const isLocalFileMode = typeof window !== "undefined" && window.location.protocol === "file:";
 
-  // Handle Logo Upload and Image Resizing/Validation
-  const handleLogoChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
+  // Multi-Pharmacy (Comercialización) & Institución / Empresa (Imagen 1) state
+  const [farmaciasList, setFarmaciasList] = useState<FarmaciaTenant[]>([]);
+  const [selectedClientMode, setSelectedClientMode] = useState<string>(activeFarmaciaId); // "principal", existing tenant id, or "__nuevo__"
+  const [instNombre, setInstNombre] = useState("Suministros Hospitalarios • Dr. José Manuel Rodríguez");
+  const [instRnc, setInstRnc] = useState("");
+  const [instTelefono, setInstTelefono] = useState("");
+  const [instCorreo, setInstCorreo] = useState("");
+  const [instWeb, setInstWeb] = useState("");
+  const [instDireccion, setInstDireccion] = useState("");
+  const [instPiePagina, setInstPiePagina] = useState("");
+  const [instLogoUrl, setInstLogoUrl] = useState("");
+  const [instCamposExtra, setInstCamposExtra] = useState<CampoVariableCliente[]>([]);
+  const [savingInstitucion, setSavingInstitucion] = useState(false);
 
-    const validTypes = ["image/jpeg", "image/png", "image/webp", "image/svg+xml"];
-    if (!validTypes.includes(file.type)) {
-      setLogoError("El archivo debe ser una imagen válida (PNG, JPG, WEBP o SVG).");
+  // Fields only used when selectedClientMode === "__nuevo__"
+  const [newFarmaciaCode, setNewFarmaciaCode] = useState("");
+  const [newFarmaciaAdminUser, setNewFarmaciaAdminUser] = useState("admin");
+  const [newFarmaciaAdminPass, setNewFarmaciaAdminPass] = useState("");
+
+  const [copiedRules, setCopiedRules] = useState(false);
+  const logoInputRef = useRef<HTMLInputElement>(null);
+
+  // Load farmacias directory for Super Admin
+  useEffect(() => {
+    if (isLocalFileMode || !isSuperAdmin) return;
+    const unsub = onSnapshot(
+      collection(db, "farmacias"),
+      (snap) => {
+        const list: FarmaciaTenant[] = [];
+        snap.forEach((d) => {
+          list.push({ ...(d.data() as FarmaciaTenant), id: d.id });
+        });
+        list.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+        setFarmaciasList(list);
+        localStorage.setItem("known_farmacias_directory", JSON.stringify(list));
+      },
+      (err) => {
+        console.warn("No se pudo escuchar colección farmacias:", err?.code);
+      }
+    );
+    return () => unsub();
+  }, [isLocalFileMode, isSuperAdmin]);
+
+  // Load Institutional Data for the currently selected client/sede
+  useEffect(() => {
+    if (selectedClientMode === "__nuevo__") {
+      setInstNombre("");
+      setInstRnc("");
+      setInstTelefono("");
+      setInstCorreo("");
+      setInstWeb("");
+      setInstDireccion("");
+      setInstPiePagina("Documento de control interno de abastecimiento médico. Válido sin tachaduras ni enmiendas.");
+      setInstLogoUrl("");
+      setInstCamposExtra([]);
+      setNewFarmaciaCode("");
+      setNewFarmaciaAdminUser("admin");
+      setNewFarmaciaAdminPass("");
       return;
     }
 
-    // Max 2.5 MB
-    if (file.size > 2.5 * 1024 * 1024) {
-      setLogoError("La imagen no debe superar los 2.5 MB.");
-      return;
-    }
+    const loadTargetInstitucion = async () => {
+      if (isLocalFileMode) {
+        const saved = localStorage.getItem("active_institucion_info");
+        if (saved) {
+          try {
+            const data = JSON.parse(saved) as InstitucionInfo;
+            populateInstFields(data);
+            return;
+          } catch {}
+        }
+        populateInstFields({
+          nombre: "Suministros Hospitalarios • Dr. José Manuel Rodríguez"
+        });
+        return;
+      }
 
-    setLogoError(null);
-    const reader = new FileReader();
-    reader.onload = (event) => {
-      const result = event.target?.result as string;
-      if (result) {
-        // Optimize dimensions if large to avoid overflowing document or storage limits
-        const img = new Image();
-        img.onload = () => {
-          const maxDim = 450;
-          let width = img.width;
-          let height = img.height;
-          if (width > maxDim || height > maxDim) {
-            if (width > height) {
-              height = Math.round((height * maxDim) / width);
-              width = maxDim;
-            } else {
-              width = Math.round((width * maxDim) / height);
-              height = maxDim;
+      try {
+        if (selectedClientMode !== DEFAULT_FARMACIA_ID) {
+          setNewFarmaciaCode(selectedClientMode);
+          const tenantMatch = farmaciasList.find((f) => f.id === selectedClientMode);
+          if (tenantMatch?.adminUsuario) {
+            setNewFarmaciaAdminUser(tenantMatch.adminUsuario);
+          } else {
+            const farmSnap = await getDoc(doc(db, "farmacias", selectedClientMode));
+            if (farmSnap.exists()) {
+              const fData = farmSnap.data() as FarmaciaTenant;
+              setNewFarmaciaAdminUser(fData.adminUsuario || "admin");
             }
           }
-          const canvas = document.createElement("canvas");
-          canvas.width = width;
-          canvas.height = height;
-          const ctx = canvas.getContext("2d");
-          if (ctx) {
-            ctx.drawImage(img, 0, 0, width, height);
-            const optimized = canvas.toDataURL("image/png", 0.92);
-            setLocalInstitucion((prev) => ({ ...prev, logo: optimized }));
-          } else {
-            setLocalInstitucion((prev) => ({ ...prev, logo: result }));
+          setNewFarmaciaAdminPass("");
+        }
+
+        const instSnap = await getDoc(tenantDoc("configuracion", "institucion", selectedClientMode));
+        if (instSnap.exists()) {
+          populateInstFields(instSnap.data() as InstitucionInfo);
+          return;
+        }
+        if (selectedClientMode !== DEFAULT_FARMACIA_ID) {
+          const tenantMatch = farmaciasList.find((f) => f.id === selectedClientMode);
+          if (tenantMatch) {
+            populateInstFields(tenantMatch);
+            return;
           }
-          playSound("action");
-        };
-        img.onerror = () => {
-          setLogoError("No se pudo procesar la imagen seleccionada.");
-        };
-        img.src = result;
+          const farmSnap = await getDoc(doc(db, "farmacias", selectedClientMode));
+          if (farmSnap.exists()) {
+            populateInstFields(farmSnap.data() as InstitucionInfo);
+            return;
+          }
+        }
+        populateInstFields({
+          nombre:
+            selectedClientMode === DEFAULT_FARMACIA_ID
+              ? "Suministros Hospitalarios • Dr. José Manuel Rodríguez"
+              : selectedClientMode
+        });
+      } catch (err) {
+        console.warn("Error cargando datos de la institución:", err);
       }
+    };
+
+    loadTargetInstitucion();
+  }, [selectedClientMode, isLocalFileMode]);
+
+  const populateInstFields = (data: InstitucionInfo) => {
+    setInstNombre(data.nombre || "");
+    setInstRnc(data.rnc || "");
+    setInstTelefono(data.telefono || "");
+    setInstCorreo(data.correo || "");
+    setInstWeb(data.paginaWeb || "");
+    setInstDireccion(data.direccion || "");
+    setInstPiePagina(data.piePagina || "");
+    setInstLogoUrl(data.logoUrl || "");
+    setInstCamposExtra(Array.isArray(data.camposExtra) ? data.camposExtra : []);
+  };
+
+  const handleLogoFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    if (file.size > 2.5 * 1024 * 1024) {
+      alert("El logotipo supera el tamaño máximo recomendado de 2.5 MB.");
+      return;
+    }
+
+    const reader = new FileReader();
+    reader.onload = () => {
+      const result = reader.result as string;
+      if (file.type === "image/svg+xml") {
+        setInstLogoUrl(result);
+        playSound("positive");
+        return;
+      }
+      // Resize raster image cleanly so it fits comfortably in Firestore and PDF/Word headers
+      const img = new Image();
+      img.onload = () => {
+        const maxDim = 360;
+        let w = img.width;
+        let h = img.height;
+        if (w > maxDim || h > maxDim) {
+          if (w > h) {
+            h = Math.round((h * maxDim) / w);
+            w = maxDim;
+          } else {
+            w = Math.round((w * maxDim) / h);
+            h = maxDim;
+          }
+        }
+        const canvas = document.createElement("canvas");
+        canvas.width = w;
+        canvas.height = h;
+        const ctx = canvas.getContext("2d");
+        if (ctx) {
+          ctx.clearRect(0, 0, w, h);
+          ctx.drawImage(img, 0, 0, w, h);
+          const dataUrl = canvas.toDataURL("image/png");
+          setInstLogoUrl(dataUrl);
+          playSound("positive");
+        } else {
+          setInstLogoUrl(result);
+        }
+      };
+      img.src = result;
     };
     reader.readAsDataURL(file);
   };
 
-  const handleRemoveLogo = () => {
-    setLocalInstitucion((prev) => ({ ...prev, logo: "" }));
-    setLogoError(null);
-    if (fileInputRef.current) fileInputRef.current.value = "";
+  const handleAddCampoExtra = () => {
+    setInstCamposExtra((prev) => [...prev, { etiqueta: "", valor: "" }]);
     playSound("click");
   };
 
-  // Save Institución data persistently
-  const handleSaveInstitucion = async (e?: React.FormEvent) => {
-    if (e) e.preventDefault();
-    setSavingInstitucion(true);
-    playSound("action");
+  const handleUpdateCampoExtra = (idx: number, field: "etiqueta" | "valor", val: string) => {
+    setInstCamposExtra((prev) =>
+      prev.map((item, i) => (i === idx ? { ...item, [field]: val } : item))
+    );
+  };
 
-    try {
-      const dataToSave: InstitucionConfig = {
-        nombre: localInstitucion.nombre.trim() || "Suministros Hospitalarios",
-        logo: localInstitucion.logo || "",
-        direccion: localInstitucion.direccion?.trim() || "",
-        telefono: localInstitucion.telefono?.trim() || "",
-        correo: localInstitucion.correo?.trim() || "",
-        identificadorFiscal: localInstitucion.identificadorFiscal?.trim() || "",
-        paginaWeb: localInstitucion.paginaWeb?.trim() || "",
-        informacionAdicional: localInstitucion.informacionAdicional?.trim() || "",
-        updatedAt: Date.now()
-      };
+  const handleRemoveCampoExtra = (idx: number) => {
+    setInstCamposExtra((prev) => prev.filter((_, i) => i !== idx));
+    playSound("click");
+  };
 
-      if (isLocalFileMode) {
-        localStorage.setItem("offline_institucion", JSON.stringify(dataToSave));
-        localStorage.setItem("institucion_config", JSON.stringify(dataToSave));
-        window.dispatchEvent(new Event("offline_institucion_update"));
-      } else {
-        const docRef = doc(db, "configuracion", "institucion");
-        await setDoc(docRef, dataToSave, { merge: true });
-        localStorage.setItem("institucion_config", JSON.stringify(dataToSave));
+  const handleSaveInstitucionOrCreateClient = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (savingInstitucion) return;
+
+    const cleanNombre = instNombre.trim();
+    if (!cleanNombre) {
+      alert("El Nombre de la Institución / Empresa (Razón Social) es obligatorio.");
+      return;
+    }
+
+    const cleanedExtras = instCamposExtra
+      .map((c) => ({ etiqueta: c.etiqueta.trim(), valor: c.valor.trim() }))
+      .filter((c) => c.etiqueta || c.valor);
+
+    const instPayload: InstitucionInfo = {
+      nombre: cleanNombre,
+      subtitulo: instDireccion.trim() ? `${cleanNombre} • ${instDireccion.trim()}` : cleanNombre,
+      rnc: instRnc.trim(),
+      telefono: instTelefono.trim(),
+      correo: instCorreo.trim(),
+      paginaWeb: instWeb.trim(),
+      direccion: instDireccion.trim(),
+      piePagina: instPiePagina.trim(),
+      logoUrl: instLogoUrl,
+      camposExtra: cleanedExtras,
+      updatedAt: Date.now()
+    };
+
+    // Case A: Creating a brand-new commercial pharmacy client
+    if (selectedClientMode === "__nuevo__") {
+      if (!isSuperAdmin) return;
+      const cleanCode = normalizeFarmaciaId(newFarmaciaCode);
+      const cleanAdmin = newFarmaciaAdminUser.trim() || "admin";
+      const cleanPass = newFarmaciaAdminPass;
+
+      if (!cleanCode || cleanCode === DEFAULT_FARMACIA_ID) {
+        alert("Ingrese un Código de Farmacia (ID) único válido y distinto de 'principal'.");
+        return;
+      }
+      if (!cleanPass) {
+        alert("Ingrese la contraseña inicial para el Administrador de esta farmacia cliente.");
+        return;
+      }
+      if (farmaciasList.some((f) => f.id === cleanCode)) {
+        alert(`Ya existe una farmacia registrada con el código "${cleanCode}".`);
+        return;
       }
 
-      onUpdateInstitucion(dataToSave);
+      setSavingInstitucion(true);
+      playSound("action");
+      try {
+        const passHash = await hashPassword(cleanPass);
+
+        // 1. Provision user in Firebase Authentication
+        await provisionUserInFirebaseAuth(cleanAdmin, passHash, cleanCode);
+
+        // 2. Save master tenant document with full institutional profile
+        const tenantData: FarmaciaTenant = {
+          ...instPayload,
+          id: cleanCode,
+          activa: true,
+          adminUsuario: cleanAdmin,
+          createdAt: Date.now()
+        };
+        await setDoc(doc(db, "farmacias", cleanCode), tenantData);
+
+        // 3. Save institutional config inside tenant's own configuracion/institucion
+        await setDoc(tenantDoc("configuracion", "institucion", cleanCode), instPayload);
+
+        // 4. Create initial admin user inside /farmacias/{cleanCode}/usuarios
+        const adminDocId = `user-${cleanAdmin.toLowerCase()}`;
+        const adminUserDoc: Usuario = {
+          id: adminDocId,
+          nombre: `Admin ${cleanNombre}`,
+          usuario: cleanAdmin,
+          contrasenaHash: passHash,
+          rol: "Administrador",
+          estado: "Activo",
+          updatedAt: Date.now(),
+          departamento: "Almacén y Suministro",
+          modulos: ["inventory", "carga_masiva", "solicitudes", "historial", "usuarios", "configuracion"],
+          farmaciaId: cleanCode
+        };
+        await setDoc(tenantDoc("usuarios", adminDocId, cleanCode), adminUserDoc);
+
+        // 5. Create default catalog for the new client pharmacy
+        await setDoc(tenantDoc("catalogos", "default-cat", cleanCode), {
+          id: "default-cat",
+          nombre: "Medicamentos e Insumos",
+          descripcion: `Catálogo principal de ${cleanNombre}`,
+          activo: true,
+          createdAt: Date.now()
+        });
+
+        setSelectedClientMode(cleanCode);
+        playSound("positive");
+        showToast(`Cliente "${cleanNombre}" (código: ${cleanCode}) registrado con todos sus datos institucionales.`);
+      } catch (err) {
+        console.error("Error registrando cliente:", err);
+        alert("Error al registrar la farmacia cliente. Verifica tu conexión y las reglas de Firestore.");
+      } finally {
+        setSavingInstitucion(false);
+      }
+      return;
+    }
+
+    // Case B: Updating existing institution (either current sede or a selected client pharmacy)
+    setSavingInstitucion(true);
+    playSound("action");
+    try {
+      const targetTenant = isSuperAdmin ? selectedClientMode : activeFarmaciaId;
+
+      if (isLocalFileMode) {
+        localStorage.setItem("active_institucion_info", JSON.stringify(instPayload));
+        onUpdateInstitucion?.(instPayload);
+      } else {
+        await setDoc(tenantDoc("configuracion", "institucion", targetTenant), instPayload, { merge: true });
+
+        if (targetTenant !== DEFAULT_FARMACIA_ID) {
+          const cleanAdmin = newFarmaciaAdminUser.trim() || "admin";
+          await setDoc(
+            doc(db, "farmacias", targetTenant),
+            {
+              ...instPayload,
+              id: targetTenant,
+              adminUsuario: cleanAdmin
+            },
+            { merge: true }
+          );
+
+          // Si el SuperAdmin escribió una nueva contraseña para el administrador de esta farmacia, actualizarla
+          if (isSuperAdmin && newFarmaciaAdminPass.trim()) {
+            const passHash = await hashPassword(newFarmaciaAdminPass.trim());
+            await provisionUserInFirebaseAuth(cleanAdmin, passHash, targetTenant);
+            const adminDocId = `user-${cleanAdmin.toLowerCase()}`;
+            const adminUserDoc: Usuario = {
+              id: adminDocId,
+              nombre: `Admin ${cleanNombre}`,
+              usuario: cleanAdmin,
+              contrasenaHash: passHash,
+              rol: "Administrador",
+              estado: "Activo",
+              updatedAt: Date.now(),
+              departamento: "Almacén y Suministro",
+              modulos: ["inventory", "carga_masiva", "solicitudes", "historial", "usuarios", "configuracion"],
+              farmaciaId: targetTenant
+            };
+            await setDoc(tenantDoc("usuarios", adminDocId, targetTenant), adminUserDoc, { merge: true });
+            setNewFarmaciaAdminPass("");
+          }
+        }
+
+        if (targetTenant === activeFarmaciaId) {
+          localStorage.setItem("active_institucion_info", JSON.stringify(instPayload));
+          onUpdateInstitucion?.(instPayload);
+        }
+      }
+
       playSound("positive");
-      showToast("Datos institucionales guardados correctamente.");
+      showToast(`Datos institucionales de "${cleanNombre}" guardados correctamente.`);
     } catch (err) {
-      console.error("Error al guardar institución:", err);
-      alert("Error al guardar la información institucional.");
+      console.error("Error guardando datos de la institución:", err);
+      alert("Error al guardar los datos de la institución.");
     } finally {
       setSavingInstitucion(false);
+    }
+  };
+
+  const handleToggleFarmaciaActiva = async (f: FarmaciaTenant) => {
+    if (!isSuperAdmin) return;
+    playSound("click");
+    try {
+      const nextActiva = !f.activa;
+      await updateDoc(doc(db, "farmacias", f.id), {
+        activa: nextActiva,
+        updatedAt: Date.now()
+      });
+      showToast(
+        `Farmacia "${f.nombre}" ${nextActiva ? "reactivada" : "suspendida temporalmente"}.`
+      );
+    } catch (err) {
+      console.error(err);
+      alert("No se pudo cambiar el estado de la farmacia.");
+    }
+  };
+
+  const handleCopyRules = async () => {
+    try {
+      await navigator.clipboard.writeText(FIRESTORE_SECURITY_RULES_TEXT);
+      setCopiedRules(true);
+      showToast("Reglas de Firestore copiadas al portapapeles.");
+      setTimeout(() => setCopiedRules(false), 2500);
+    } catch {
+      alert("No se pudo copiar automáticamente.");
     }
   };
 
@@ -306,7 +608,7 @@ export default function ConfiguracionPanel({
       };
 
       if (isLocalFileMode) {
-        let stored = localStorage.getItem("offline_departamentos");
+        const stored = localStorage.getItem("offline_departamentos");
         let list: Departamento[] = [];
         if (stored) {
           try { list = JSON.parse(stored); } catch (e) {}
@@ -315,7 +617,7 @@ export default function ConfiguracionPanel({
         localStorage.setItem("offline_departamentos", JSON.stringify(list));
         window.dispatchEvent(new Event("offline_departamentos_update"));
       } else {
-        const colRef = collection(db, "departamentos");
+        const colRef = tenantCollection("departamentos");
         await setDoc(doc(colRef, id), newDept);
       }
 
@@ -346,7 +648,7 @@ export default function ConfiguracionPanel({
 
     try {
       if (isLocalFileMode) {
-        let stored = localStorage.getItem("offline_departamentos");
+        const stored = localStorage.getItem("offline_departamentos");
         let list: Departamento[] = [];
         if (stored) {
           try { list = JSON.parse(stored); } catch (e) {}
@@ -355,7 +657,7 @@ export default function ConfiguracionPanel({
         localStorage.setItem("offline_departamentos", JSON.stringify(list));
         window.dispatchEvent(new Event("offline_departamentos_update"));
       } else {
-        const docRef = doc(db, "departamentos", editingDept.id);
+        const docRef = tenantDoc("departamentos", editingDept.id);
         await updateDoc(docRef, { nombre: name });
       }
 
@@ -375,7 +677,7 @@ export default function ConfiguracionPanel({
     try {
       const nextActive = !dept.activo;
       if (isLocalFileMode) {
-        let stored = localStorage.getItem("offline_departamentos");
+        const stored = localStorage.getItem("offline_departamentos");
         let list: Departamento[] = [];
         if (stored) {
           try { list = JSON.parse(stored); } catch (e) {}
@@ -384,7 +686,7 @@ export default function ConfiguracionPanel({
         localStorage.setItem("offline_departamentos", JSON.stringify(list));
         window.dispatchEvent(new Event("offline_departamentos_update"));
       } else {
-        const docRef = doc(db, "departamentos", dept.id);
+        const docRef = tenantDoc("departamentos", dept.id);
         await updateDoc(docRef, { activo: nextActive });
       }
       showToast(`Departamento "${dept.nombre}" ${nextActive ? "activado" : "desactivado"}.`);
@@ -419,7 +721,7 @@ export default function ConfiguracionPanel({
       };
 
       if (isLocalFileMode) {
-        let stored = localStorage.getItem("offline_catalogos");
+        const stored = localStorage.getItem("offline_catalogos");
         let list: Catalogo[] = [];
         if (stored) {
           try { list = JSON.parse(stored); } catch (e) {}
@@ -428,7 +730,7 @@ export default function ConfiguracionPanel({
         localStorage.setItem("offline_catalogos", JSON.stringify(list));
         window.dispatchEvent(new Event("offline_catalogos_update"));
       } else {
-        const colRef = collection(db, "catalogos");
+        const colRef = tenantCollection("catalogos");
         await setDoc(doc(colRef, id), newCat);
       }
 
@@ -461,7 +763,7 @@ export default function ConfiguracionPanel({
 
     try {
       if (isLocalFileMode) {
-        let stored = localStorage.getItem("offline_catalogos");
+        const stored = localStorage.getItem("offline_catalogos");
         let list: Catalogo[] = [];
         if (stored) {
           try { list = JSON.parse(stored); } catch (e) {}
@@ -470,7 +772,7 @@ export default function ConfiguracionPanel({
         localStorage.setItem("offline_catalogos", JSON.stringify(list));
         window.dispatchEvent(new Event("offline_catalogos_update"));
       } else {
-        const docRef = doc(db, "catalogos", editingCat.id);
+        const docRef = tenantDoc("catalogos", editingCat.id);
         await updateDoc(docRef, {
           nombre: name,
           descripcion: desc,
@@ -498,7 +800,7 @@ export default function ConfiguracionPanel({
     try {
       const nextActive = !cat.activo;
       if (isLocalFileMode) {
-        let stored = localStorage.getItem("offline_catalogos");
+        const stored = localStorage.getItem("offline_catalogos");
         let list: Catalogo[] = [];
         if (stored) {
           try { list = JSON.parse(stored); } catch (e) {}
@@ -507,7 +809,7 @@ export default function ConfiguracionPanel({
         localStorage.setItem("offline_catalogos", JSON.stringify(list));
         window.dispatchEvent(new Event("offline_catalogos_update"));
       } else {
-        const docRef = doc(db, "catalogos", cat.id);
+        const docRef = tenantDoc("catalogos", cat.id);
         await updateDoc(docRef, { activo: nextActive });
       }
 
@@ -530,7 +832,7 @@ export default function ConfiguracionPanel({
     playSound("action");
     try {
       if (isLocalFileMode) {
-        let stored = localStorage.getItem("offline_catalogos");
+        const stored = localStorage.getItem("offline_catalogos");
         let list: Catalogo[] = [];
         if (stored) {
           try { list = JSON.parse(stored); } catch (e) {}
@@ -539,7 +841,7 @@ export default function ConfiguracionPanel({
         localStorage.setItem("offline_catalogos", JSON.stringify(list));
         window.dispatchEvent(new Event("offline_catalogos_update"));
       } else {
-        const docRef = doc(db, "catalogos", cat.id);
+        const docRef = tenantDoc("catalogos", cat.id);
         await deleteDoc(docRef);
       }
 
@@ -548,6 +850,144 @@ export default function ConfiguracionPanel({
     } catch (err) {
       console.error("Error deleting catalog:", err);
       alert("Error al eliminar el catálogo.");
+    }
+  };
+
+  // --- Conceptos de Facturación Handlers ---
+  const persistConceptosList = async (nextList: ConceptoFactura[]) => {
+    if (onUpdateConceptos) {
+      onUpdateConceptos(nextList);
+    }
+    if (isLocalFileMode) {
+      localStorage.setItem("offline_conceptos_venta", JSON.stringify(nextList));
+      window.dispatchEvent(new Event("offline_conceptos_update"));
+    } else {
+      const docRef = tenantDoc("configuracion", "conceptos_venta");
+      await setDoc(docRef, { items: nextList, updatedAt: Date.now() }, { merge: true });
+    }
+  };
+
+  const handleCreateConcepto = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const name = newConceptoName.trim();
+    const desc = newConceptoDesc.trim();
+    if (!name) return;
+
+    const currentList = conceptos.length > 0 ? conceptos : DEFAULT_CONCEPTOS_FACTURA;
+    if (currentList.some((c) => c.nombre.toLowerCase() === name.toLowerCase())) {
+      alert("Ya existe un concepto de facturación con ese nombre.");
+      return;
+    }
+
+    setCreatingConcepto(true);
+    playSound("action");
+
+    try {
+      const id = `concepto-${name.toLowerCase().replace(/[^a-z0-9]/g, "-")}-${Date.now().toString(36)}`;
+      const newConcepto: ConceptoFactura = {
+        id,
+        nombre: name,
+        descripcion: desc,
+        activo: true,
+        createdAt: Date.now()
+      };
+
+      const nextList = [...currentList, newConcepto];
+      await persistConceptosList(nextList);
+
+      setNewConceptoName("");
+      setNewConceptoDesc("");
+      playSound("positive");
+      showToast(`Concepto "${name}" creado exitosamente.`);
+    } catch (err) {
+      console.error("Error creating concepto:", err);
+      alert("Error al crear el concepto de facturación.");
+    } finally {
+      setCreatingConcepto(false);
+    }
+  };
+
+  const handleEditConceptoSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!editingConcepto) return;
+    const name = editConceptoName.trim();
+    const desc = editConceptoDesc.trim();
+    if (!name) return;
+
+    const currentList = conceptos.length > 0 ? conceptos : DEFAULT_CONCEPTOS_FACTURA;
+    if (currentList.some((c) => c.id !== editingConcepto.id && c.nombre.toLowerCase() === name.toLowerCase())) {
+      alert("Ya existe otro concepto con ese nombre.");
+      return;
+    }
+
+    setUpdatingConcepto(true);
+    playSound("action");
+
+    try {
+      const nextList = currentList.map((c) =>
+        c.id === editingConcepto.id
+          ? { ...c, nombre: name, descripcion: desc, updatedAt: Date.now() }
+          : c
+      );
+      await persistConceptosList(nextList);
+
+      setEditingConcepto(null);
+      playSound("positive");
+      showToast("Concepto de facturación actualizado.");
+    } catch (err) {
+      console.error("Error updating concepto:", err);
+      alert("Error al actualizar el concepto.");
+    } finally {
+      setUpdatingConcepto(false);
+    }
+  };
+
+  const handleToggleConceptoActive = async (item: ConceptoFactura) => {
+    playSound("click");
+    try {
+      const currentList = conceptos.length > 0 ? conceptos : DEFAULT_CONCEPTOS_FACTURA;
+      const nextActive = !item.activo;
+      const activeRemaining = currentList.filter((c) => (c.id === item.id ? nextActive : c.activo));
+      if (activeRemaining.length === 0) {
+        alert("Debe mantener al menos un concepto de facturación activo.");
+        return;
+      }
+
+      const nextList = currentList.map((c) =>
+        c.id === item.id ? { ...c, activo: nextActive, updatedAt: Date.now() } : c
+      );
+      await persistConceptosList(nextList);
+
+      playSound("positive");
+      showToast(`Concepto "${item.nombre}" ${nextActive ? "activado" : "desactivado"}.`);
+    } catch (err) {
+      console.error("Error toggling concepto active status:", err);
+      alert("Error al cambiar el estado del concepto.");
+    }
+  };
+
+  const handleDeleteConcepto = async (item: ConceptoFactura) => {
+    const currentList = conceptos.length > 0 ? conceptos : DEFAULT_CONCEPTOS_FACTURA;
+    if (currentList.length <= 1) {
+      alert("Debe existir al menos un concepto de facturación en el sistema.");
+      return;
+    }
+
+    const confirmed = window.confirm(
+      `¿Está seguro de que desea eliminar el concepto "${item.nombre}"? Las facturas ya emitidas conservarán su concepto histórico.`
+    );
+    if (!confirmed) return;
+
+    playSound("action");
+    try {
+      const nextList = currentList.filter((c) => c.id !== item.id);
+      await persistConceptosList(nextList);
+
+      playSound("positive");
+      showToast(`Concepto "${item.nombre}" eliminado.`);
+    } catch (err) {
+      console.error("Error deleting concepto:", err);
+      alert("Error al eliminar el concepto.");
     }
   };
 
@@ -569,7 +1009,7 @@ export default function ConfiguracionPanel({
 
   const handleSaveColores = async () => {
     if (!isAnyer) {
-      alert("Solo el Usuario Anyer tiene permisos para modificar la configuración de colores.");
+      alert("Solo el Administrador tiene permisos para modificar la configuración de colores.");
       return;
     }
 
@@ -577,11 +1017,9 @@ export default function ConfiguracionPanel({
     playSound("action");
 
     try {
-      // Save in Firestore
-      const docRef = doc(db, "configuracion", "colores");
+      const docRef = tenantDoc("configuracion", "colores");
       await setDoc(docRef, { colores: localColores });
 
-      // Save in localStorage for instant retrieval on refresh
       localStorage.setItem("colores_config", JSON.stringify(localColores));
 
       onUpdateColores(localColores);
@@ -597,7 +1035,7 @@ export default function ConfiguracionPanel({
 
   const handleCerrarMes = async () => {
     if (!isAnyer) {
-      alert("Solo el Usuario Anyer tiene permisos para efectuar el cierre del mes.");
+      alert("Solo el Administrador tiene permisos para efectuar el cierre del mes.");
       return;
     }
 
@@ -609,8 +1047,7 @@ export default function ConfiguracionPanel({
     playSound("action");
 
     try {
-      // Fetch all products to uncheck 'verificado' and 'articuloAjustado'
-      const querySnapshot = await getDocs(collection(db, "productos"));
+      const querySnapshot = await getDocs(tenantCollection("productos"));
       const batch = writeBatch(db);
       let updatedCount = 0;
 
@@ -646,19 +1083,16 @@ export default function ConfiguracionPanel({
         await batch.commit();
       }
 
-      // Parse current period (e.g., "Julio 2026")
       const parts = activePeriod.split(" ");
       let monthIndex = MESES.indexOf(parts[0]);
       let year = parseInt(parts[1], 10);
 
       if (monthIndex === -1 || isNaN(year)) {
-        // Fallback to current calendar date if format is invalid
         const now = new Date();
         monthIndex = now.getMonth();
         year = now.getFullYear();
       }
 
-      // Increment period by 1 month
       monthIndex++;
       if (monthIndex > 11) {
         monthIndex = 0;
@@ -667,11 +1101,9 @@ export default function ConfiguracionPanel({
 
       const nextPeriod = `${MESES[monthIndex]} ${year}`;
 
-      // Update in Firestore
-      const docRef = doc(db, "configuracion", "periodo");
+      const docRef = tenantDoc("configuracion", "periodo");
       await setDoc(docRef, { periodoActual: nextPeriod });
 
-      // Save in localStorage
       localStorage.setItem("periodo_actual", nextPeriod);
 
       onUpdatePeriod(nextPeriod);
@@ -687,221 +1119,505 @@ export default function ConfiguracionPanel({
 
   return (
     <div className="space-y-6">
-      {/* Tarjeta de Datos de Institución / Empresa */}
+      {/* =====================================================================
+          TARJETA IMAGEN 1: INSTITUCIÓN / EMPRESA & COMERCIALIZACIÓN POR CLIENTE
+         ===================================================================== */}
       <div className="bg-white rounded-3xl p-6 sm:p-7 border border-slate-200 shadow-sm space-y-6 anim-card-in">
-        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-slate-100 pb-4">
+        {/* Cabecera Exacta de Imagen 1 */}
+        <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-4 border-b border-slate-100 pb-4">
           <div>
-            <h3 className="text-lg font-bold text-slate-900 flex items-center gap-2">
-              <Building2 className="w-5 h-5 text-teal-600" />
-              Institución / Empresa
+            <h3 className="text-lg font-extrabold text-slate-900 flex items-center gap-2.5">
+              <Building2 className="w-5 h-5 text-teal-600 shrink-0" />
+              <span>Institución / Empresa</span>
             </h3>
-            <p className="text-xs text-slate-500 mt-1">
+            <p className="text-slate-500 text-xs mt-1 font-medium">
               Administre la información institucional y el logotipo oficial que se incluirá en las facturas y comprobantes exportados en PDF y Word.
             </p>
           </div>
-          <span className="text-[10px] uppercase font-black tracking-wider bg-teal-50 text-teal-700 px-3 py-1 rounded-full border border-teal-200 self-start sm:self-auto">
-            Encabezados y Facturas
+          <span className="text-[10px] uppercase font-black tracking-wider bg-teal-50/80 text-teal-700 px-3.5 py-1.5 rounded-full border border-teal-200 self-start shrink-0">
+            ENCABEZADOS Y FACTURAS
           </span>
         </div>
 
-        <form onSubmit={handleSaveInstitucion} className="space-y-6">
-          <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
-            {/* Left Column: Form Fields (7 cols) */}
+        {/* Barra de Comercialización (Solo visible para SuperAdmin en sede principal) */}
+        {isSuperAdmin && (
+          <div className="bg-slate-50/90 border border-slate-200/80 rounded-2xl p-4 flex flex-col md:flex-row md:items-center justify-between gap-3">
+            <div className="space-y-0.5">
+              <span className="text-[10px] font-black uppercase tracking-wider text-teal-700 block">
+                Comercialización • Selector de Farmacia / Cliente
+              </span>
+              <p className="text-xs text-slate-500 font-medium">
+                Selecciona una farmacia para editar sus datos fiscales o registra un nuevo cliente comercial aislado.
+              </p>
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+              <select
+                value={selectedClientMode}
+                onChange={(e) => {
+                  setSelectedClientMode(e.target.value);
+                  playSound("click");
+                }}
+                className="bg-white border border-slate-200 rounded-xl px-3.5 py-2.5 text-xs font-bold text-slate-800 outline-none focus:ring-2 focus:ring-teal-400 cursor-pointer"
+              >
+                <option value="principal">🏥 Sede Principal (Dr. José Manuel Rodríguez)</option>
+                {farmaciasList.map((f) => (
+                  <option key={f.id} value={f.id}>
+                    🏪 {f.nombre} ({f.id}) {!f.activa ? "• [Suspendida]" : ""}
+                  </option>
+                ))}
+                <option value="__nuevo__">➕ Registrar Nueva Farmacia / Cliente...</option>
+              </select>
+
+              <button
+                type="button"
+                onClick={() => {
+                  setSelectedClientMode("__nuevo__");
+                  playSound("open");
+                }}
+                className={`px-3.5 py-2.5 rounded-xl text-xs font-extrabold uppercase tracking-wider flex items-center gap-1.5 transition cursor-pointer ${
+                  selectedClientMode === "__nuevo__"
+                    ? "bg-teal-700 text-white shadow-xs"
+                    : "bg-teal-50 text-teal-700 border border-teal-200 hover:bg-teal-100"
+                }`}
+              >
+                <Plus className="w-3.5 h-3.5" />
+                <span>Nuevo Cliente</span>
+              </button>
+
+              {selectedClientMode !== "principal" && selectedClientMode !== "__nuevo__" && onSwitchFarmacia && (
+                <button
+                  type="button"
+                  onClick={() => onSwitchFarmacia(selectedClientMode, instNombre || selectedClientMode)}
+                  className="px-3.5 py-2.5 rounded-xl text-xs font-extrabold uppercase tracking-wider flex items-center gap-1.5 bg-emerald-700 hover:bg-emerald-800 text-white shadow-xs transition cursor-pointer"
+                >
+                  <Building2 className="w-3.5 h-3.5" />
+                  <span>Entrar a esta Farmacia</span>
+                </button>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* Formulario Imagen 1 */}
+        <form onSubmit={handleSaveInstitucionOrCreateClient} className="space-y-6">
+          {/* Si se está creando o editando un cliente comercial, mostrar Código de Sede y Credenciales de su Admin */}
+          {isSuperAdmin && selectedClientMode !== "principal" && (
+            <div className="bg-teal-50/50 border border-teal-200/80 rounded-2xl p-4 space-y-3">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="flex items-center gap-2 text-xs font-black uppercase tracking-wider text-teal-800">
+                  <UserCheck className="w-4 h-4 text-teal-600" />
+                  <span>
+                    {selectedClientMode === "__nuevo__"
+                      ? "Credenciales de Acceso Aislado para el Nuevo Cliente"
+                      : `Credenciales del Usuario de Inicio • Sede: ${selectedClientMode}`}
+                  </span>
+                </div>
+                {selectedClientMode !== "__nuevo__" && (
+                  <span className="text-[11px] font-semibold text-teal-700">
+                    Para cambiar la clave del usuario administrador de esta farmacia, escribe una nueva abajo y pulsa Guardar.
+                  </span>
+                )}
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                <div>
+                  <label className="block text-[10px] font-black uppercase text-slate-600 tracking-wider mb-1">
+                    CÓDIGO DE FARMACIA / SEDE (ID) *
+                  </label>
+                  <input
+                    type="text"
+                    required
+                    disabled={selectedClientMode !== "__nuevo__"}
+                    value={selectedClientMode === "__nuevo__" ? newFarmaciaCode : selectedClientMode}
+                    onChange={(e) => setNewFarmaciaCode(e.target.value)}
+                    placeholder="Ej: farmacia-san-juan"
+                    className="w-full bg-white disabled:bg-slate-100 rounded-xl border border-slate-200 px-3.5 py-2.5 text-xs font-mono font-bold text-slate-800 outline-none focus:ring-2 focus:ring-teal-400"
+                  />
+                </div>
+                <div>
+                  <label className="block text-[10px] font-black uppercase text-slate-600 tracking-wider mb-1">
+                    USUARIO ADMINISTRADOR INICIAL *
+                  </label>
+                  <input
+                    type="text"
+                    required
+                    value={newFarmaciaAdminUser}
+                    onChange={(e) => setNewFarmaciaAdminUser(e.target.value)}
+                    placeholder="Ej: admin"
+                    className="w-full bg-white rounded-xl border border-slate-200 px-3.5 py-2.5 text-xs font-bold text-slate-800 outline-none focus:ring-2 focus:ring-teal-400"
+                  />
+                </div>
+                <div>
+                  <label className="block text-[10px] font-black uppercase text-slate-600 tracking-wider mb-1">
+                    {selectedClientMode === "__nuevo__"
+                      ? "CONTRASEÑA INICIAL DEL CLIENTE *"
+                      : "NUEVA CONTRASEÑA (OPCIONAL)"}
+                  </label>
+                  <input
+                    type="password"
+                    required={selectedClientMode === "__nuevo__"}
+                    value={newFarmaciaAdminPass}
+                    onChange={(e) => setNewFarmaciaAdminPass(e.target.value)}
+                    placeholder={
+                      selectedClientMode === "__nuevo__"
+                        ? "Contraseña de entrega"
+                        : "Dejar vacío para conservar actual"
+                    }
+                    className="w-full bg-white rounded-xl border border-slate-200 px-3.5 py-2.5 text-xs font-bold text-slate-800 outline-none focus:ring-2 focus:ring-teal-400"
+                  />
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Grid Principal de 2 Columnas (Diseño Exacto Imagen 1) */}
+          <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
+            {/* Columna Izquierda (7 cols): Campos Institucionales */}
             <div className="lg:col-span-7 space-y-4">
+              {/* NOMBRE DE LA INSTITUCIÓN / EMPRESA * */}
               <div>
-                <label className="block text-xs font-black uppercase text-slate-600 tracking-wider mb-1.5 flex items-center gap-1.5">
+                <label className="flex items-center gap-1.5 text-[11px] font-black uppercase text-slate-600 tracking-wider mb-1.5">
                   <Building2 className="w-3.5 h-3.5 text-teal-600" />
-                  Nombre de la Institución / Empresa <span className="text-rose-500">*</span>
+                  <span>NOMBRE DE LA INSTITUCIÓN / EMPRESA</span>
+                  <span className="text-rose-500">*</span>
                 </label>
                 <input
                   type="text"
                   required
-                  value={localInstitucion.nombre}
-                  onChange={(e) => setLocalInstitucion((prev) => ({ ...prev, nombre: e.target.value }))}
+                  value={instNombre}
+                  onChange={(e) => setInstNombre(e.target.value)}
                   placeholder="Ej: Suministros Hospitalarios • Dr. José Manuel Rodríguez"
-                  className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 bg-slate-50 focus:bg-white text-xs font-semibold text-slate-800 focus:outline-none focus:ring-2 focus:ring-teal-500/20 focus:border-teal-500 transition shadow-2xs"
+                  className="w-full bg-slate-50/70 rounded-xl border border-slate-200 px-4 py-3 text-xs font-bold text-slate-800 outline-none focus:bg-white focus:ring-2 focus:ring-teal-400 transition"
                 />
               </div>
 
+              {/* Fila: RNC / NIT / ID FISCAL + TELÉFONO */}
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <div>
-                  <label className="block text-xs font-black uppercase text-slate-600 tracking-wider mb-1.5 flex items-center gap-1.5">
+                  <label className="flex items-center gap-1.5 text-[11px] font-black uppercase text-slate-600 tracking-wider mb-1.5">
                     <CreditCard className="w-3.5 h-3.5 text-teal-600" />
-                    RNC / NIT / ID Fiscal
+                    <span>RNC / NIT / ID FISCAL</span>
                   </label>
                   <input
                     type="text"
-                    value={localInstitucion.identificadorFiscal || ""}
-                    onChange={(e) => setLocalInstitucion((prev) => ({ ...prev, identificadorFiscal: e.target.value }))}
+                    value={instRnc}
+                    onChange={(e) => setInstRnc(e.target.value)}
                     placeholder="Ej: 1-01-00000-0 o NIT"
-                    className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 bg-slate-50 focus:bg-white text-xs font-semibold text-slate-800 focus:outline-none focus:ring-2 focus:ring-teal-500/20 focus:border-teal-500 transition shadow-2xs"
+                    className="w-full bg-slate-50/70 rounded-xl border border-slate-200 px-4 py-3 text-xs font-semibold text-slate-800 outline-none focus:bg-white focus:ring-2 focus:ring-teal-400 transition"
                   />
                 </div>
 
                 <div>
-                  <label className="block text-xs font-black uppercase text-slate-600 tracking-wider mb-1.5 flex items-center gap-1.5">
+                  <label className="flex items-center gap-1.5 text-[11px] font-black uppercase text-slate-600 tracking-wider mb-1.5">
                     <Phone className="w-3.5 h-3.5 text-teal-600" />
-                    Teléfono
+                    <span>TELÉFONO</span>
                   </label>
                   <input
                     type="text"
-                    value={localInstitucion.telefono || ""}
-                    onChange={(e) => setLocalInstitucion((prev) => ({ ...prev, telefono: e.target.value }))}
+                    value={instTelefono}
+                    onChange={(e) => setInstTelefono(e.target.value)}
                     placeholder="Ej: (809) 555-0199"
-                    className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 bg-slate-50 focus:bg-white text-xs font-semibold text-slate-800 focus:outline-none focus:ring-2 focus:ring-teal-500/20 focus:border-teal-500 transition shadow-2xs"
+                    className="w-full bg-slate-50/70 rounded-xl border border-slate-200 px-4 py-3 text-xs font-semibold text-slate-800 outline-none focus:bg-white focus:ring-2 focus:ring-teal-400 transition"
                   />
                 </div>
               </div>
 
+              {/* Fila: CORREO ELECTRÓNICO + PÁGINA WEB */}
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <div>
-                  <label className="block text-xs font-black uppercase text-slate-600 tracking-wider mb-1.5 flex items-center gap-1.5">
+                  <label className="flex items-center gap-1.5 text-[11px] font-black uppercase text-slate-600 tracking-wider mb-1.5">
                     <Mail className="w-3.5 h-3.5 text-teal-600" />
-                    Correo Electrónico
+                    <span>CORREO ELECTRÓNICO</span>
                   </label>
                   <input
                     type="email"
-                    value={localInstitucion.correo || ""}
-                    onChange={(e) => setLocalInstitucion((prev) => ({ ...prev, correo: e.target.value }))}
+                    value={instCorreo}
+                    onChange={(e) => setInstCorreo(e.target.value)}
                     placeholder="Ej: suministros@hospital.gob.do"
-                    className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 bg-slate-50 focus:bg-white text-xs font-semibold text-slate-800 focus:outline-none focus:ring-2 focus:ring-teal-500/20 focus:border-teal-500 transition shadow-2xs"
+                    className="w-full bg-slate-50/70 rounded-xl border border-slate-200 px-4 py-3 text-xs font-semibold text-slate-800 outline-none focus:bg-white focus:ring-2 focus:ring-teal-400 transition"
                   />
                 </div>
 
                 <div>
-                  <label className="block text-xs font-black uppercase text-slate-600 tracking-wider mb-1.5 flex items-center gap-1.5">
+                  <label className="flex items-center gap-1.5 text-[11px] font-black uppercase text-slate-600 tracking-wider mb-1.5">
                     <Globe className="w-3.5 h-3.5 text-teal-600" />
-                    Página Web
+                    <span>PÁGINA WEB</span>
                   </label>
                   <input
                     type="text"
-                    value={localInstitucion.paginaWeb || ""}
-                    onChange={(e) => setLocalInstitucion((prev) => ({ ...prev, paginaWeb: e.target.value }))}
+                    value={instWeb}
+                    onChange={(e) => setInstWeb(e.target.value)}
                     placeholder="Ej: www.hospital.gob.do"
-                    className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 bg-slate-50 focus:bg-white text-xs font-semibold text-slate-800 focus:outline-none focus:ring-2 focus:ring-teal-500/20 focus:border-teal-500 transition shadow-2xs"
+                    className="w-full bg-slate-50/70 rounded-xl border border-slate-200 px-4 py-3 text-xs font-semibold text-slate-800 outline-none focus:bg-white focus:ring-2 focus:ring-teal-400 transition"
                   />
                 </div>
               </div>
 
+              {/* DIRECCIÓN FÍSICA / SEDE */}
               <div>
-                <label className="block text-xs font-black uppercase text-slate-600 tracking-wider mb-1.5 flex items-center gap-1.5">
+                <label className="flex items-center gap-1.5 text-[11px] font-black uppercase text-slate-600 tracking-wider mb-1.5">
                   <MapPin className="w-3.5 h-3.5 text-teal-600" />
-                  Dirección Física / Sede
+                  <span>DIRECCIÓN FÍSICA / SEDE</span>
                 </label>
                 <input
                   type="text"
-                  value={localInstitucion.direccion || ""}
-                  onChange={(e) => setLocalInstitucion((prev) => ({ ...prev, direccion: e.target.value }))}
+                  value={instDireccion}
+                  onChange={(e) => setInstDireccion(e.target.value)}
                   placeholder="Ej: Av. Principal Esq. Calle Central #10, Santo Domingo"
-                  className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 bg-slate-50 focus:bg-white text-xs font-semibold text-slate-800 focus:outline-none focus:ring-2 focus:ring-teal-500/20 focus:border-teal-500 transition shadow-2xs"
+                  className="w-full bg-slate-50/70 rounded-xl border border-slate-200 px-4 py-3 text-xs font-semibold text-slate-800 outline-none focus:bg-white focus:ring-2 focus:ring-teal-400 transition"
                 />
               </div>
 
+              {/* INFORMACIÓN ADICIONAL (PIE DE PÁGINA DE FACTURAS) */}
               <div>
-                <label className="block text-xs font-black uppercase text-slate-600 tracking-wider mb-1.5 flex items-center gap-1.5">
+                <label className="flex items-center gap-1.5 text-[11px] font-black uppercase text-slate-600 tracking-wider mb-1.5">
                   <FileText className="w-3.5 h-3.5 text-teal-600" />
-                  Información Adicional (Pie de página de facturas)
+                  <span>INFORMACIÓN ADICIONAL (PIE DE PÁGINA DE FACTURAS)</span>
                 </label>
                 <textarea
                   rows={2}
-                  value={localInstitucion.informacionAdicional || ""}
-                  onChange={(e) => setLocalInstitucion((prev) => ({ ...prev, informacionAdicional: e.target.value }))}
+                  value={instPiePagina}
+                  onChange={(e) => setInstPiePagina(e.target.value)}
                   placeholder="Ej: Documento de control interno de abastecimiento médico. Válido sin tachaduras ni enmiendas."
-                  className="w-full px-3.5 py-2 rounded-xl border border-slate-200 bg-slate-50 focus:bg-white text-xs font-semibold text-slate-800 focus:outline-none focus:ring-2 focus:ring-teal-500/20 focus:border-teal-500 transition shadow-2xs resize-none"
+                  className="w-full bg-slate-50/70 rounded-xl border border-slate-200 px-4 py-3 text-xs font-semibold text-slate-800 outline-none focus:bg-white focus:ring-2 focus:ring-teal-400 transition resize-none"
                 />
+              </div>
+
+              {/* DATOS VARIABLES PERSONALIZADOS POR CLIENTE */}
+              <div className="pt-2 space-y-2.5">
+                <div className="flex items-center justify-between">
+                  <span className="flex items-center gap-1.5 text-[11px] font-black uppercase text-slate-500 tracking-wider">
+                    <SlidersHorizontal className="w-3.5 h-3.5 text-teal-600" />
+                    <span>Datos Variables Adicionales por Cliente (Opcional)</span>
+                  </span>
+                  <button
+                    type="button"
+                    onClick={handleAddCampoExtra}
+                    className="text-[11px] font-extrabold text-teal-700 hover:text-teal-800 bg-teal-50 hover:bg-teal-100 border border-teal-200 px-2.5 py-1 rounded-lg flex items-center gap-1 transition cursor-pointer"
+                  >
+                    <Plus className="w-3.5 h-3.5" />
+                    <span>Añadir Campo</span>
+                  </button>
+                </div>
+
+                {instCamposExtra.map((campo, idx) => (
+                  <div key={idx} className="flex items-center gap-2">
+                    <input
+                      type="text"
+                      value={campo.etiqueta}
+                      onChange={(e) => handleUpdateCampoExtra(idx, "etiqueta", e.target.value)}
+                      placeholder="Etiqueta (Ej: Reg. Sanitario, Sucursal)"
+                      className="w-2/5 bg-slate-50 rounded-xl border border-slate-200 px-3 py-2 text-xs font-bold text-slate-700 outline-none focus:bg-white focus:ring-2 focus:ring-teal-400"
+                    />
+                    <input
+                      type="text"
+                      value={campo.valor}
+                      onChange={(e) => handleUpdateCampoExtra(idx, "valor", e.target.value)}
+                      placeholder="Valor del cliente"
+                      className="flex-1 bg-slate-50 rounded-xl border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-800 outline-none focus:bg-white focus:ring-2 focus:ring-teal-400"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => handleRemoveCampoExtra(idx)}
+                      className="p-2 text-slate-400 hover:text-rose-600 rounded-lg transition cursor-pointer"
+                      title="Eliminar campo"
+                    >
+                      <X className="w-4 h-4" />
+                    </button>
+                  </div>
+                ))}
               </div>
             </div>
 
-            {/* Right Column: Logo Upload & Visual Preview (5 cols) */}
-            <div className="lg:col-span-5 flex flex-col justify-between p-5 bg-slate-50 rounded-2xl border border-slate-200/80 space-y-4">
+            {/* Columna Derecha (5 cols): Tarjeta LOGOTIPO INSTITUCIONAL (Imagen 1) */}
+            <div className="lg:col-span-5 bg-slate-50/70 rounded-2xl p-5 border border-slate-200/80 space-y-4">
               <div>
-                <span className="block text-xs font-black uppercase text-slate-600 tracking-wider mb-1.5 flex items-center gap-1.5">
-                  <ImageIcon className="w-3.5 h-3.5 text-teal-600" />
-                  Logotipo Institucional
-                </span>
-                <p className="text-[11px] text-slate-500 mb-3">
+                <h4 className="flex items-center gap-1.5 text-xs font-black uppercase text-slate-700 tracking-wider">
+                  <ImageIcon className="w-4 h-4 text-teal-600" />
+                  <span>LOGOTIPO INSTITUCIONAL</span>
+                </h4>
+                <p className="text-[11px] text-slate-500 mt-1 leading-relaxed">
                   Se integrará en la cabecera superior de cada factura exportada en PDF y Word sin deformaciones.
                 </p>
+              </div>
 
-                {/* Logo Preview Area */}
-                <div className="relative min-h-[140px] max-h-[160px] w-full rounded-xl border-2 border-dashed border-slate-200 bg-white flex items-center justify-center p-3 overflow-hidden">
-                  {localInstitucion.logo ? (
+              <div
+                onClick={() => logoInputRef.current?.click()}
+                className="relative h-44 rounded-2xl border-2 border-dashed border-slate-200 bg-white flex flex-col items-center justify-center p-4 text-center cursor-pointer hover:border-teal-400 transition group overflow-hidden"
+              >
+                {instLogoUrl ? (
+                  <>
                     <img
-                      src={localInstitucion.logo}
-                      alt="Logo de la Institución"
-                      className="max-h-[130px] max-w-full object-contain rounded drop-shadow-2xs transition hover:scale-105"
+                      src={instLogoUrl}
+                      alt="Logotipo Institucional"
+                      className="max-h-36 max-w-full object-contain"
                     />
-                  ) : (
-                    <div className="flex flex-col items-center justify-center text-center p-3 text-slate-400">
-                      <ImageIcon className="w-10 h-10 mb-1 stroke-1 text-slate-300" />
-                      <span className="text-xs font-bold text-slate-600">Sin logotipo asignado</span>
-                      <span className="text-[10px] text-slate-400">Haga clic abajo para cargar el logo</span>
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setInstLogoUrl("");
+                        playSound("negative");
+                      }}
+                      className="absolute top-2.5 right-2.5 bg-slate-900/70 hover:bg-rose-600 text-white rounded-full p-1.5 transition shadow-xs"
+                      title="Quitar logotipo"
+                    >
+                      <X className="w-3.5 h-3.5" />
+                    </button>
+                  </>
+                ) : (
+                  <div className="flex flex-col items-center justify-center space-y-1.5">
+                    <div className="w-11 h-11 rounded-xl bg-slate-50 border border-slate-200 flex items-center justify-center text-slate-300 group-hover:text-teal-500 transition">
+                      <ImageIcon className="w-6 h-6" />
                     </div>
-                  )}
-                </div>
-
-                {logoError && (
-                  <div className="mt-2 text-xs font-bold text-rose-600 flex items-center gap-1.5 bg-rose-50 p-2 rounded-lg border border-rose-200">
-                    <AlertCircle className="w-3.5 h-3.5 shrink-0" />
-                    <span>{logoError}</span>
+                    <p className="text-xs font-bold text-slate-600">Sin logotipo asignado</p>
+                    <p className="text-[11px] text-slate-400">Haga clic abajo para cargar el logo</p>
                   </div>
                 )}
               </div>
 
-              {/* Upload & Remove buttons */}
-              <div className="space-y-2 pt-2 border-t border-slate-200/60">
-                <input
-                  type="file"
-                  ref={fileInputRef}
-                  onChange={handleLogoChange}
-                  accept="image/png, image/jpeg, image/webp, image/svg+xml"
-                  className="hidden"
-                  id="institucion-logo-upload"
-                />
+              <input
+                ref={logoInputRef}
+                type="file"
+                accept="image/png,image/jpeg,image/svg+xml,image/webp"
+                onChange={handleLogoFileChange}
+                className="hidden"
+              />
 
-                <div className="flex items-center gap-2">
-                  <label
-                    htmlFor="institucion-logo-upload"
-                    className="flex-1 inline-flex items-center justify-center gap-2 px-3 py-2 bg-white hover:bg-slate-50 border border-slate-200 text-teal-700 hover:border-teal-300 text-xs font-bold rounded-xl transition cursor-pointer active:scale-95 shadow-2xs"
-                  >
-                    <Upload className="w-3.5 h-3.5" />
-                    <span>{localInstitucion.logo ? "Reemplazar Logo" : "Subir Logotipo"}</span>
-                  </label>
-
-                  {localInstitucion.logo && (
-                    <button
-                      type="button"
-                      onClick={handleRemoveLogo}
-                      className="px-3 py-2 bg-rose-50 hover:bg-rose-100 border border-rose-200 text-rose-600 text-xs font-bold rounded-xl transition cursor-pointer active:scale-95 shadow-2xs"
-                      title="Quitar logotipo"
-                    >
-                      <Trash2 className="w-3.5 h-3.5" />
-                    </button>
-                  )}
-                </div>
-                <span className="block text-[10px] text-slate-400 text-center">
+              <div className="pt-1 space-y-2 text-center">
+                <button
+                  type="button"
+                  onClick={() => logoInputRef.current?.click()}
+                  className="w-full bg-white hover:bg-teal-50/50 text-teal-700 border border-slate-200 hover:border-teal-300 font-extrabold text-xs py-2.5 px-4 rounded-xl transition flex items-center justify-center gap-2 shadow-2xs cursor-pointer"
+                >
+                  <Upload className="w-4 h-4" />
+                  <span>Subir Logotipo</span>
+                </button>
+                <p className="text-[10px] text-slate-400 font-medium">
                   Formatos recomendados: PNG o SVG con fondo transparente (máx. 2.5 MB).
-                </span>
+                </p>
               </div>
             </div>
           </div>
 
-          {/* Action Bar */}
-          <div className="flex items-center justify-end gap-3 pt-4 border-t border-slate-100">
+          {/* Botón Inferior Derecho (Exacto a Imagen 1) */}
+          <div className="pt-4 border-t border-slate-100 flex justify-end">
             <button
               type="submit"
               disabled={savingInstitucion}
-              className="inline-flex items-center gap-2 px-6 py-2.5 bg-teal-600 hover:bg-teal-700 disabled:opacity-50 text-white text-xs font-black uppercase tracking-wider rounded-xl transition shadow-md shadow-teal-700/20 active:scale-95 cursor-pointer"
+              className="w-full sm:w-auto px-6 py-3.5 bg-teal-700 hover:bg-teal-800 disabled:bg-slate-300 text-white font-extrabold text-xs uppercase tracking-wider rounded-xl transition active:scale-95 shadow-sm flex items-center justify-center gap-2 cursor-pointer"
             >
-              {savingInstitucion ? (
-                <RefreshCw className="w-4 h-4 animate-spin" />
-              ) : (
-                <Save className="w-4 h-4" />
-              )}
-              <span>{savingInstitucion ? "Guardando..." : "Guardar Datos de la Institución"}</span>
+              <Save className="w-4 h-4" />
+              <span>
+                {savingInstitucion
+                  ? "Guardando..."
+                  : selectedClientMode === "__nuevo__"
+                  ? "REGISTRAR CLIENTE Y GUARDAR INSTITUCIÓN"
+                  : "GUARDAR DATOS DE LA INSTITUCIÓN"}
+              </span>
             </button>
           </div>
         </form>
+
+        {/* Listado Resumen de Farmacias Comercializadas (Solo para SuperAdmin) */}
+        {isSuperAdmin && farmaciasList.length > 0 && (
+          <div className="pt-4 border-t border-slate-100 space-y-3">
+            <h4 className="text-xs font-black uppercase text-slate-400 tracking-wider">
+              Clientes / Farmacias Registradas ({farmaciasList.length})
+            </h4>
+            <div className="overflow-x-auto border border-slate-200 rounded-2xl bg-slate-50">
+              <table className="min-w-[680px] w-full text-left border-collapse">
+                <thead>
+                  <tr className="bg-slate-100 border-b border-slate-200 text-[11px] font-bold text-slate-500 uppercase tracking-wider">
+                    <th className="px-4 py-3">Código Sede</th>
+                    <th className="px-4 py-3">Institución / Razón Social</th>
+                    <th className="px-4 py-3">RNC / Teléfono</th>
+                    <th className="px-4 py-3">Admin</th>
+                    <th className="px-4 py-3">Estado</th>
+                    <th className="px-4 py-3 text-right">Acciones</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-200 text-xs bg-white">
+                  {farmaciasList.map((f) => (
+                    <tr key={f.id} className="hover:bg-slate-50/70 transition">
+                      <td className="px-4 py-3 font-mono font-bold text-teal-700">{f.id}</td>
+                      <td className="px-4 py-3">
+                        <p className="font-bold text-slate-800">{f.nombre}</p>
+                        {f.direccion && <p className="text-[10px] text-slate-400">{f.direccion}</p>}
+                      </td>
+                      <td className="px-4 py-3 text-slate-600">
+                        {f.rnc && <span className="block font-mono text-[11px]">RNC: {f.rnc}</span>}
+                        {f.telefono && <span className="block text-[11px] text-slate-500">{f.telefono}</span>}
+                        {!f.rnc && !f.telefono && <span className="text-slate-300">—</span>}
+                      </td>
+                      <td className="px-4 py-3 font-mono text-slate-600">{f.adminUsuario}</td>
+                      <td className="px-4 py-3">
+                        <button
+                          type="button"
+                          onClick={() => handleToggleFarmaciaActiva(f)}
+                          className={`inline-flex items-center gap-1.5 text-xs font-black px-3 py-1 rounded-full transition cursor-pointer ${
+                            f.activa
+                              ? "bg-emerald-50 text-emerald-700 border border-emerald-200"
+                              : "bg-rose-50 text-rose-700 border border-rose-200"
+                          }`}
+                        >
+                          {f.activa ? (
+                            <>
+                              <ToggleRight className="w-4 h-4 text-emerald-600" />
+                              Activa
+                            </>
+                          ) : (
+                            <>
+                              <ToggleLeft className="w-4 h-4 text-rose-500" />
+                              Suspendida
+                            </>
+                          )}
+                        </button>
+                      </td>
+                      <td className="px-4 py-3 text-right">
+                        <div className="flex items-center justify-end gap-2">
+                          {onSwitchFarmacia && (
+                            <button
+                              type="button"
+                              onClick={() => onSwitchFarmacia(f.id, f.nombre)}
+                              className="inline-flex items-center gap-1 px-3 py-1.5 text-xs font-bold rounded-lg bg-emerald-700 text-white hover:bg-emerald-800 transition cursor-pointer shadow-2xs"
+                            >
+                              <Building2 className="w-3.5 h-3.5" />
+                              <span>Entrar a Sede</span>
+                            </button>
+                          )}
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setSelectedClientMode(f.id);
+                              playSound("click");
+                            }}
+                            className="inline-flex items-center gap-1 px-3 py-1.5 text-xs font-bold rounded-lg border border-teal-200 bg-teal-50 text-teal-700 hover:bg-teal-100 transition cursor-pointer"
+                          >
+                            <Edit2 className="w-3.5 h-3.5" />
+                            <span>Editar Ficha</span>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              navigator.clipboard.writeText(
+                                `Acceso Control de Stock\nInstitución: ${f.nombre}\nCódigo de Farmacia: ${f.id}\nUsuario: ${f.adminUsuario}`
+                              );
+                              showToast(`Datos de acceso de "${f.nombre}" copiados.`);
+                            }}
+                            className="inline-flex items-center gap-1 px-3 py-1.5 text-xs font-bold rounded-lg border border-slate-200 hover:bg-slate-50 transition cursor-pointer text-slate-700"
+                          >
+                            <Copy className="w-3.5 h-3.5" />
+                            <span>Copiar</span>
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
       </div>
 
       {/* Tarjeta de Gestión de Departamentos */}
@@ -916,7 +1632,6 @@ export default function ConfiguracionPanel({
           </span>
         </div>
 
-        {/* Formulario para Crear Departamento */}
         <form onSubmit={handleCreateDept} className="grid grid-cols-1 sm:grid-cols-3 gap-4 items-end bg-slate-50 p-4 rounded-2xl border border-slate-200/60">
           <div className="sm:col-span-2 space-y-1.5">
             <label className="block text-xs font-black uppercase text-slate-500 tracking-wider">
@@ -941,7 +1656,6 @@ export default function ConfiguracionPanel({
           </button>
         </form>
 
-        {/* Listado de Departamentos */}
         <div className="space-y-3">
           <h4 className="text-xs font-black uppercase text-slate-400 tracking-wider">
             Listado de Departamentos Registrados
@@ -1053,7 +1767,6 @@ export default function ConfiguracionPanel({
           </span>
         </div>
 
-        {/* Formulario para Crear Catálogo */}
         <form onSubmit={handleCreateCatalog} className="grid grid-cols-1 md:grid-cols-3 gap-4 items-end bg-slate-50 p-4 rounded-2xl border border-slate-200/60">
           <div className="space-y-1.5 md:col-span-1">
             <label className="block text-xs font-black uppercase text-slate-500 tracking-wider">
@@ -1090,7 +1803,6 @@ export default function ConfiguracionPanel({
           </button>
         </form>
 
-        {/* Listado de Catálogos */}
         <div className="space-y-3">
           <h4 className="text-xs font-black uppercase text-slate-400 tracking-wider">
             Listado de Catálogos del Sistema
@@ -1219,6 +1931,176 @@ export default function ConfiguracionPanel({
         </div>
       </div>
 
+      {/* Gestión de Conceptos de Facturación (Módulo de Venta) */}
+      <div className="bg-white rounded-3xl p-6 border border-slate-200 shadow-sm space-y-6">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-slate-100 pb-4">
+          <div>
+            <h3 className="text-lg font-bold text-slate-900 flex items-center gap-2">
+              <Tag className="w-5 h-5 text-teal-600" />
+              Conceptos de Facturación (Módulo de Venta)
+            </h3>
+            <p className="text-xs text-slate-500 mt-1">
+              Administre, agregue, edite o elimine los conceptos de operación disponibles en la lista desplegable de facturación (ej. Venta, Compra, Transferencia, Donación).
+            </p>
+          </div>
+        </div>
+
+        {/* Formulario para agregar nuevo concepto */}
+        <form onSubmit={handleCreateConcepto} className="grid grid-cols-1 sm:grid-cols-12 gap-3 items-end">
+          <div className="sm:col-span-4">
+            <label className="block text-[10px] font-black text-slate-400 uppercase mb-1">
+              Nombre del Concepto *
+            </label>
+            <input
+              type="text"
+              required
+              placeholder="Ej: Venta, Compra, Transferencia, Donación..."
+              value={newConceptoName}
+              onChange={(e) => setNewConceptoName(e.target.value)}
+              className="w-full rounded-xl border border-slate-200 bg-slate-50 px-4 py-2.5 text-sm font-semibold text-slate-800 outline-none focus:bg-white focus:border-teal-500 transition"
+            />
+          </div>
+          <div className="sm:col-span-5">
+            <label className="block text-[10px] font-black text-slate-400 uppercase mb-1">
+              Descripción (Opcional)
+            </label>
+            <input
+              type="text"
+              placeholder="Ej: Despacho por donación o transferencia entre sedes"
+              value={newConceptoDesc}
+              onChange={(e) => setNewConceptoDesc(e.target.value)}
+              className="w-full rounded-xl border border-slate-200 bg-slate-50 px-4 py-2.5 text-sm font-semibold text-slate-800 outline-none focus:bg-white focus:border-teal-500 transition"
+            />
+          </div>
+          <div className="sm:col-span-3">
+            <button
+              type="submit"
+              disabled={creatingConcepto || !newConceptoName.trim()}
+              className="w-full px-5 py-2.5 bg-teal-700 hover:bg-teal-600 disabled:bg-slate-300 text-white font-black text-xs uppercase tracking-wider rounded-xl transition active:scale-95 flex items-center justify-center gap-1.5 cursor-pointer bg-custom-buttons"
+            >
+              <Plus className="w-4 h-4" />
+              Agregar Concepto
+            </button>
+          </div>
+        </form>
+
+        {/* Lista de Conceptos */}
+        <div className="border border-slate-200 rounded-2xl overflow-hidden">
+          <div className="overflow-x-auto">
+            <table className="w-full text-left border-collapse">
+              <thead>
+                <tr className="bg-slate-50 border-b border-slate-200 text-[10px] font-black uppercase text-slate-500 tracking-wider">
+                  <th className="px-4 py-3">Concepto</th>
+                  <th className="px-4 py-3">Descripción</th>
+                  <th className="px-4 py-3 text-center">Estado</th>
+                  <th className="px-4 py-3 text-right">Acciones</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100 text-sm">
+                {(conceptos.length > 0 ? conceptos : DEFAULT_CONCEPTOS_FACTURA).map((conc) => {
+                  const isEditing = editingConcepto?.id === conc.id;
+
+                  return (
+                    <tr key={conc.id} className="hover:bg-slate-50/80 transition">
+                      <td className="px-4 py-3 font-bold text-slate-800">
+                        {isEditing ? (
+                          <input
+                            type="text"
+                            value={editConceptoName}
+                            onChange={(e) => setEditConceptoName(e.target.value)}
+                            className="w-full rounded-lg border border-teal-500 bg-white px-3 py-1.5 text-sm font-bold text-slate-900 outline-none"
+                            autoFocus
+                          />
+                        ) : (
+                          <span>{conc.nombre}</span>
+                        )}
+                      </td>
+                      <td className="px-4 py-3 text-xs text-slate-500">
+                        {isEditing ? (
+                          <input
+                            type="text"
+                            value={editConceptoDesc}
+                            onChange={(e) => setEditConceptoDesc(e.target.value)}
+                            placeholder="Descripción..."
+                            className="w-full rounded-lg border border-teal-500 bg-white px-3 py-1.5 text-xs font-semibold text-slate-800 outline-none"
+                          />
+                        ) : (
+                          conc.descripcion || <span className="italic text-slate-400">Sin descripción</span>
+                        )}
+                      </td>
+                      <td className="px-4 py-3 text-center">
+                        <button
+                          onClick={() => handleToggleConceptoActive(conc)}
+                          className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-bold transition cursor-pointer ${
+                            conc.activo
+                              ? "bg-emerald-50 text-emerald-700 border border-emerald-200 hover:bg-emerald-100"
+                              : "bg-rose-50 text-rose-700 border border-rose-200 hover:bg-rose-100"
+                          }`}
+                        >
+                          {conc.activo ? (
+                            <>
+                              <ToggleRight className="w-4 h-4 text-emerald-600" />
+                              Activo
+                            </>
+                          ) : (
+                            <>
+                              <ToggleLeft className="w-4 h-4 text-rose-500" />
+                              Inactivo
+                            </>
+                          )}
+                        </button>
+                      </td>
+                      <td className="px-4 py-3 text-right">
+                        {isEditing ? (
+                          <div className="flex gap-2 justify-end" onClick={(e) => e.stopPropagation()}>
+                            <button
+                              onClick={handleEditConceptoSubmit}
+                              disabled={updatingConcepto}
+                              className="px-3 py-1.5 bg-teal-600 text-white font-bold text-xs rounded-lg hover:bg-teal-700 transition cursor-pointer"
+                            >
+                              Guardar
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => setEditingConcepto(null)}
+                              className="px-3 py-1.5 bg-slate-100 text-slate-600 border border-slate-200 font-bold text-xs rounded-lg hover:bg-slate-200 transition cursor-pointer"
+                            >
+                              Cancelar
+                            </button>
+                          </div>
+                        ) : (
+                          <div className="flex items-center gap-2 justify-end">
+                            <button
+                              onClick={() => {
+                                setEditingConcepto(conc);
+                                setEditConceptoName(conc.nombre);
+                                setEditConceptoDesc(conc.descripcion || "");
+                                playSound("click");
+                              }}
+                              className="inline-flex items-center gap-1 px-3 py-1.5 text-xs font-bold rounded-lg border border-slate-200 hover:bg-slate-50 transition active:scale-95 cursor-pointer text-slate-700"
+                            >
+                              <Edit2 className="w-3.5 h-3.5" />
+                              <span>Editar</span>
+                            </button>
+                            <button
+                              onClick={() => handleDeleteConcepto(conc)}
+                              className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-bold rounded-lg border border-red-200 bg-red-50 text-red-700 hover:bg-red-100 transition active:scale-95 cursor-pointer"
+                              title="Eliminar Concepto"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
+                        )}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
       {isAnyer && (
         <div className="anim-card-in space-y-6">
           {/* Tarjeta de Cierre de Mes */}
@@ -1255,7 +2137,6 @@ export default function ConfiguracionPanel({
               Personalización de la Identidad Visual
             </h3>
 
-            {/* Presets de Temas */}
             <div className="space-y-3">
               <h4 className="text-xs font-black uppercase text-slate-400 tracking-wider">Temas Prediseñados</h4>
               <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-3">
@@ -1292,11 +2173,9 @@ export default function ConfiguracionPanel({
               </div>
             </div>
 
-            {/* Configuración Manual */}
             <div className="space-y-3 border-t border-slate-100 pt-5">
               <h4 className="text-xs font-black uppercase text-slate-400 tracking-wider">Ajuste de Colores Detallado</h4>
               <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-4">
-                {/* Color Principal */}
                 <div className="flex items-center gap-3 bg-slate-50 rounded-xl p-3 border border-slate-200/50">
                   <input
                     type="color"
@@ -1310,7 +2189,6 @@ export default function ConfiguracionPanel({
                   </div>
                 </div>
 
-                {/* Color Menú Lateral */}
                 <div className="flex items-center gap-3 bg-slate-50 rounded-xl p-3 border border-slate-200/50">
                   <input
                     type="color"
@@ -1324,7 +2202,6 @@ export default function ConfiguracionPanel({
                   </div>
                 </div>
 
-                {/* Color Botones */}
                 <div className="flex items-center gap-3 bg-slate-50 rounded-xl p-3 border border-slate-200/50">
                   <input
                     type="color"
@@ -1338,7 +2215,6 @@ export default function ConfiguracionPanel({
                   </div>
                 </div>
 
-                {/* Color Encabezados */}
                 <div className="flex items-center gap-3 bg-slate-50 rounded-xl p-3 border border-slate-200/50">
                   <input
                     type="color"
@@ -1352,7 +2228,6 @@ export default function ConfiguracionPanel({
                   </div>
                 </div>
 
-                {/* Color Tarjetas */}
                 <div className="flex items-center gap-3 bg-slate-50 rounded-xl p-3 border border-slate-200/50">
                   <input
                     type="color"
@@ -1366,7 +2241,6 @@ export default function ConfiguracionPanel({
                   </div>
                 </div>
 
-                {/* Color Tablas */}
                 <div className="flex items-center gap-3 bg-slate-50 rounded-xl p-3 border border-slate-200/50">
                   <input
                     type="color"
@@ -1392,6 +2266,42 @@ export default function ConfiguracionPanel({
               </button>
             </div>
           </div>
+
+          {isSuperAdmin && (
+            <div className="bg-white rounded-3xl p-6 border border-slate-200 shadow-sm space-y-4">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-slate-100 pb-3">
+                <div>
+                  <h3 className="text-lg font-bold text-slate-900 flex items-center gap-2">
+                    <ShieldCheck className="w-5 h-5 text-teal-600" />
+                    Reglas de Seguridad de Cloud Firestore (Producción)
+                  </h3>
+                  <p className="text-xs text-slate-500 mt-1">
+                    Copia estas reglas y pégalas en Firebase Console → Firestore Database → Reglas para proteger tus datos y aislar cada farmacia cliente.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={handleCopyRules}
+                  className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl bg-teal-700 hover:bg-teal-800 text-white font-black text-xs uppercase tracking-wider transition cursor-pointer shrink-0 shadow-xs"
+                >
+                  {copiedRules ? (
+                    <>
+                      <Check className="w-4 h-4 text-emerald-300" />
+                      <span>¡Reglas Copiadas!</span>
+                    </>
+                  ) : (
+                    <>
+                      <Copy className="w-4 h-4" />
+                      <span>Copiar Reglas</span>
+                    </>
+                  )}
+                </button>
+              </div>
+              <pre className="bg-slate-900 text-emerald-300 p-4 rounded-2xl overflow-x-auto font-mono text-[11px] leading-relaxed max-h-64 select-all">
+                {FIRESTORE_SECURITY_RULES_TEXT}
+              </pre>
+            </div>
+          )}
         </div>
       )}
     </div>

@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from "react";
-import { collection, addDoc, query, orderBy, limit, onSnapshot, serverTimestamp, doc, deleteDoc } from "firebase/firestore";
-import { db } from "../firebase";
+import { addDoc, query, orderBy, limit, onSnapshot, serverTimestamp, deleteDoc } from "firebase/firestore";
+import { tenantCollection, tenantDoc } from "../firebase";
 import { Usuario } from "../types";
 import { playSound } from "../utils/audio";
 import { 
@@ -58,7 +58,8 @@ export default function ChatLateral({ currentUser }: ChatLateralProps) {
 
   const isAnyer = 
     currentUser?.usuario?.trim().toLowerCase() === "anyer" || 
-    currentUser?.nombre?.trim().toLowerCase() === "anyer";
+    currentUser?.nombre?.trim().toLowerCase() === "anyer" ||
+    currentUser?.rol === "Administrador";
 
   const isLocalFileMode = typeof window !== "undefined" && window.location.protocol === "file:";
 
@@ -86,7 +87,7 @@ export default function ChatLateral({ currentUser }: ChatLateralProps) {
     }
 
     try {
-      await deleteDoc(doc(db, "chat_mensajes", msgToDelete));
+      await deleteDoc(tenantDoc("chat_mensajes", msgToDelete));
       playSound("negative");
     } catch (err) {
       console.error("Error deleting message:", err);
@@ -135,7 +136,7 @@ export default function ChatLateral({ currentUser }: ChatLateralProps) {
       };
     }
 
-    const messagesCol = collection(db, "chat_mensajes");
+    const messagesCol = tenantCollection("chat_mensajes");
     const q = query(messagesCol, orderBy("timestamp", "desc"), limit(limitAmount));
 
     const unsubscribe = onSnapshot(q, (snapshot) => {
@@ -253,7 +254,7 @@ export default function ChatLateral({ currentUser }: ChatLateralProps) {
     }
 
     try {
-      await addDoc(collection(db, "chat_mensajes"), {
+      await addDoc(tenantCollection("chat_mensajes"), {
         texto: text,
         usuarioNombre: currentUser.nombre,
         usuarioId: currentUser.id,

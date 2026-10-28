@@ -1,9 +1,11 @@
 import React, { useState, useEffect } from "react";
 import { Usuario, Departamento, Catalogo } from "../types";
+import { getActiveFarmaciaId, DEFAULT_FARMACIA_ID } from "../firebase";
 import { UserPlus, User, Users, Trash2, Key, Pen, ShieldAlert, X, CheckCircle } from "lucide-react";
 
 export const MODULOS_DISPONIBLES = [
   { id: "inventory", nombre: "Suministros (Inventario)" },
+  { id: "venta", nombre: "Venta (Facturación)" },
   { id: "carga_masiva", nombre: "Carga Masiva" },
   { id: "solicitudes", nombre: "Órdenes / Solicitudes" },
   { id: "historial", nombre: "Historial Movs" },
@@ -63,7 +65,9 @@ export default function UserPanel({
 
   const [newPasswordText, setNewPasswordText] = useState("");
 
-  const isAnyer = currentUser?.usuario.toLowerCase() === "anyer";
+  const isAnyer =
+    currentUser?.usuario.toLowerCase() === "anyer" ||
+    (getActiveFarmaciaId() !== DEFAULT_FARMACIA_ID && currentUser?.rol === "Administrador");
 
   // Auto-fill modules defaults based on selected role for new user
   useEffect(() => {
@@ -108,11 +112,13 @@ export default function UserPanel({
       return;
     }
     setShowAddModal(true);
-    setNewName("");
-    setNewUsername("");
-    setNewPassword("");
-    setNewDepartment("");
-    setNewCatalogos([]);
+    // Auto-select first active department
+    const activeDepts = departamentos.filter((d) => d.activo);
+    if (activeDepts.length > 0) {
+      setNewDepartment(activeDepts[0].nombre);
+    } else {
+      setNewDepartment("");
+    }
     // Default modules
     if (newRole === "Administrador") {
       setNewModulos(["inventory", "carga_masiva", "solicitudes", "historial", "usuarios", "configuracion"]);
@@ -128,7 +134,7 @@ export default function UserPanel({
     const uName = newName.trim();
     const uUser = newUsername.trim();
     const uPass = newPassword;
-    const uDept = newDepartment.trim();
+    const uDept = newDepartment || departamentos.filter((d) => d.activo)[0]?.nombre;
 
     if (!uName || !uUser || !uPass) {
       alert("Por favor complete todos los campos obligatorios.");
@@ -136,7 +142,7 @@ export default function UserPanel({
     }
 
     if (!uDept) {
-      alert("Por favor seleccione un departamento para el nuevo usuario.");
+      alert("No hay ningún departamento activo disponible en el sistema para asignar.");
       return;
     }
 

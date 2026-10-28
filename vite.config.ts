@@ -8,7 +8,7 @@ export default defineConfig(() => {
   const isSingle = process.env.BUILD_SINGLE === 'true';
 
   return {
-    base: './',  
+    base: './',
     plugins: [
       react(), 
       tailwindcss(),

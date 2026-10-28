@@ -8,8 +8,6 @@ export interface Lote {
   loteFisico?: string; // Ubicación física
   fechaFisica?: string; // Fecha de vencimiento física
   articuloAjustado?: boolean; // Indica si se completó el ajuste
-  factura?: string; // Número de factura opcional
-  proveedor?: string; // Proveedor o laboratorio de origen
 }
 
 export interface Catalogo {
@@ -36,31 +34,22 @@ export interface Movimiento {
   id: string;
   productoCodigo: string;
   productoNombre: string;
+  descripcion?: string;
   lote: string;
+  loteFisico?: string;
   cantidad: number;
+  cantidadF?: number;
+  fechaVencimiento?: string;
+  fechaFisica?: string;
   precio: number;
   tipoMovimiento: "Entrada" | "Salida" | "Ajuste";
   usuario: string; // Nombre (usuario)
   fecha: string; // ISO string
   timestamp: number;
   catalogId?: string;
-  factura?: string; // Número de factura para agrupar entradas
-  entradaId?: string; // Identificador del lote de entrada
-  estado?: string; // Estado de la transacción
-  proveedor?: string; // Proveedor o laboratorio de origen
-  institucionSnapshot?: InstitucionConfig; // Datos institucionales al momento del registro
-}
-
-export interface InstitucionConfig {
-  nombre: string;
-  logo?: string; // Data URL o URL de la imagen
-  direccion?: string;
-  telefono?: string;
-  correo?: string;
-  identificadorFiscal?: string; // RNC / NIT / RFC / CIF
-  paginaWeb?: string;
-  informacionAdicional?: string;
-  updatedAt?: number;
+  numeroFactura?: string;
+  fechaEntrada?: string; // YYYY-MM-DD
+  proveedor?: string;
 }
 
 export interface Usuario {
@@ -74,17 +63,132 @@ export interface Usuario {
   departamento: string;
   modulos?: string[];
   catalogos?: string[]; // IDs de catálogos habilitados
+  farmaciaId?: string;
+  authUid?: string;
+}
+
+export interface CampoVariableCliente {
+  etiqueta: string;
+  valor: string;
+}
+
+export interface InstitucionInfo {
+  nombre: string; // Razón social / Nombre de la Institución / Empresa
+  subtitulo?: string;
+  rnc?: string; // RNC / NIT / ID Fiscal
+  telefono?: string;
+  correo?: string;
+  paginaWeb?: string;
+  direccion?: string;
+  piePagina?: string; // Información adicional (Pie de página de facturas)
+  logoUrl?: string; // Base64 o URL del logotipo institucional
+  camposExtra?: CampoVariableCliente[];
+  updatedAt?: number;
+}
+
+export interface FarmaciaTenant extends InstitucionInfo {
+  id: string; // código único ej: "principal", "farmacia-central"
+  activa: boolean;
+  adminUsuario: string;
+  createdAt: number;
+}
+
+export interface ConceptoFactura {
+  id: string;
+  nombre: string;
+  descripcion?: string;
+  activo: boolean;
+  createdAt: number;
+}
+
+export const DEFAULT_CONCEPTOS_FACTURA: ConceptoFactura[] = [
+  {
+    id: "conc-venta",
+    nombre: "Venta",
+    descripcion: "Facturación general de medicamentos, insumos y artículos",
+    activo: true,
+    createdAt: 1700000000000
+  },
+  {
+    id: "conc-compra",
+    nombre: "Compra",
+    descripcion: "Operación por concepto de compra o adquisición",
+    activo: true,
+    createdAt: 1700000001000
+  },
+  {
+    id: "conc-transferencia",
+    nombre: "Transferencia",
+    descripcion: "Traslado o transferencia de suministros entre áreas o sedes",
+    activo: true,
+    createdAt: 1700000002000
+  },
+  {
+    id: "conc-donacion",
+    nombre: "Donación",
+    descripcion: "Entrega o despacho en calidad de donación institucional",
+    activo: true,
+    createdAt: 1700000003000
+  },
+  {
+    id: "conc-consumo",
+    nombre: "Consumo Interno",
+    descripcion: "Despacho para uso interno del centro o departamento",
+    activo: true,
+    createdAt: 1700000004000
+  }
+];
+
+export interface VentaItem {
+  id: string;
+  productoCodigo: string;
+  productoNombre: string;
+  descripcion?: string;
+  loteId: string;
+  numeroLote: string;
+  fechaVencimiento: string;
+  cantidad: number;
+  precioUnitario: number;
+  subtotal: number;
+  aplicaItbis?: boolean;
+  itbisMonto?: number;
+  totalItem?: number;
+}
+
+export interface FacturaVenta {
+  id: string;
+  numeroFactura: string;
+  fecha: string; // YYYY-MM-DD
+  hora: string; // HH:MM
+  timestamp: number;
+  concepto: string; // Compra, Transferencia, Donación, Venta, etc.
+  clienteNombre?: string; // Opcional
+  clienteContacto?: string; // Opcional
+  observaciones?: string;
+  catalogId: string;
+  catalogNombre?: string;
+  usuarioResponsable: string;
+  items: VentaItem[];
+  totalUnidades: number;
+  subtotalMonto?: number;
+  aplicaItbis?: boolean;
+  itbisMonto?: number;
+  totalMonto: number;
 }
 
 export function getEnabledModules(user: Usuario | null | undefined): string[] {
   if (!user) return [];
   if (user.modulos && Array.isArray(user.modulos)) {
+    // Asegurar que el módulo "venta" esté habilitado para Administradores y usuarios con inventario/solicitudes
+    if (!user.modulos.includes("venta") && (user.rol === "Administrador" || user.modulos.includes("inventory") || user.modulos.includes("solicitudes"))) {
+      return ["venta", ...user.modulos];
+    }
     return user.modulos;
   }
   if (user.rol === "Administrador") {
-    return ["inventory", "carga_masiva", "solicitudes", "historial", "usuarios", "configuracion"];
+    return ["inventory", "venta", "carga_masiva", "solicitudes", "historial", "usuarios", "configuracion"];
   }
-  return ["solicitudes", "historial"];
+  return ["venta", "solicitudes", "historial"];
 }
 
 export interface Departamento {
@@ -158,25 +262,4 @@ export interface ConfiguracionDoc {
   id: string;
   colores?: ColoresConfig;
   periodoActual?: string;
-  institucion?: InstitucionConfig;
 }
-
-export interface CargaMasivaRecord {
-  id: string;
-  fecha: string;
-  timestamp: number;
-  usuario: string;
-  activeCatalogId: string;
-  totalItems: number;
-  importedItems: number;
-  nombreArchivo?: string;
-  lotesCreados: Array<{ productoCodigo: string; loteId: string; cantidad: number }>;
-  lotesModificados?: Array<{ productoCodigo: string; loteId: string; cantidadAgregada: number; cantidadPrevia?: number }>;
-  productosCreados: string[];
-  movimientosCreados: string[];
-  snapshotProductos?: Producto[];
-  revertida?: boolean;
-  fechaReversion?: string;
-  usuarioReversion?: string;
-}
-

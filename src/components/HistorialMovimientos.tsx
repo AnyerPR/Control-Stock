@@ -1,8 +1,9 @@
 import { useState, useEffect, useMemo } from "react";
-import { collection, query, orderBy, limit, getDocs } from "firebase/firestore";
-import { db } from "../firebase";
-import { Movimiento, Usuario, InstitucionConfig } from "../types";
+import { query, orderBy, limit, getDocs } from "firebase/firestore";
+import { tenantCollection } from "../firebase";
+import { Movimiento, Usuario } from "../types";
 import { playSound } from "../utils/audio";
+import { exportInvoiceToPDF, exportInvoiceToWord } from "../utils/exportUtils";
 import {
   Calendar,
   Search,
@@ -12,53 +13,39 @@ import {
   ChevronRight,
   User,
   FileText,
+  List,
   ChevronDown,
   ChevronUp,
-  Package,
-  Layers,
-  List,
-  CheckCircle2,
-  DollarSign,
-  FileDown
+  FileDown,
+  Building2,
+  Package
 } from "lucide-react";
 import MarqueeText from "./MarqueeText";
-import { exportFacturaToPDF, exportFacturaToWord, FacturaExportData } from "../utils/exportUtils";
 
 interface HistorialMovimientosProps {
   activeCatalogId: string;
   currentUser: Usuario | null;
-  institucionConfig?: InstitucionConfig | null;
 }
 
-export interface FacturaGroup {
-  facturaId: string; // Clave única de agrupación
-  facturaDisplay: string; // Nombre visible de la factura
-  isHistoricalLegacy: boolean;
-  entradaId?: string;
-  fecha: string;
-  timestamp: number;
+interface FacturaGroup {
+  numeroFactura: string;
+  fechaEntrada: string;
+  proveedor: string;
   usuario: string;
+  timestamp: number;
   items: Movimiento[];
-  totalCantidad: number;
-  totalCosto: number;
-  estado: string;
-  proveedor?: string;
-  institucionSnapshot?: InstitucionConfig;
+  totalUnidades: number;
+  totalMonto: number;
 }
 
-export default function HistorialMovimientos({
-  activeCatalogId,
-  currentUser,
-  institucionConfig
-}: HistorialMovimientosProps) {
+export default function HistorialMovimientos({ activeCatalogId, currentUser }: HistorialMovimientosProps) {
   const [allMovements, setAllMovements] = useState<Movimiento[]>([]);
   const [loading, setLoading] = useState(true);
-  const [viewMode, setViewMode] = useState<"facturas" | "detallado">("facturas");
+  const [viewMode, setViewMode] = useState<"facturas" | "detalle">("facturas");
   const [filterType, setFilterType] = useState<string>("todos");
   const [searchTerm, setSearchTerm] = useState("");
   const [currentPage, setCurrentPage] = useState(1);
-  const [expandedFacturas, setExpandedFacturas] = useState<Record<string, boolean>>({});
-  const [selectedFacturaModal, setSelectedFacturaModal] = useState<FacturaGroup | null>(null);
+  const [expandedInvoices, setExpandedInvoices] = useState<Record<string, boolean>>({});
   const pageSize = 10;
 
   const isLocalFileMode = typeof window !== "undefined" && window.location.protocol === "file:";
@@ -66,7 +53,7 @@ export default function HistorialMovimientos({
   const fetchMovements = async () => {
     setLoading(true);
     if (isLocalFileMode) {
-      let stored = localStorage.getItem("offline_movimientos");
+      const stored = localStorage.getItem("offline_movimientos");
       let list: Movimiento[] = [];
       if (stored) {
         try {
@@ -81,7 +68,7 @@ export default function HistorialMovimientos({
     }
 
     try {
-      const colRef = collection(db, "movimientos");
+      const colRef = tenantCollection("movimientos");
       const q = query(colRef, orderBy("timestamp", "desc"), limit(2000));
       const snapshot = await getDocs(q);
       const list: Movimiento[] = [];
@@ -111,51 +98,28 @@ export default function HistorialMovimientos({
     setCurrentPage(1);
   }, [filterType, searchTerm, viewMode]);
 
-  const handleRefresh = () => {
-    playSound("action");
-    fetchMovements();
-    setCurrentPage(1);
-  };
-
-  // Toggle invoice accordion
-  const toggleFacturaExpand = (facturaId: string) => {
-    playSound("click");
-    setExpandedFacturas((prev) => ({
-      ...prev,
-      [facturaId]: !prev[facturaId]
-    }));
-  };
-
-  // Base permission filtering
-  const allowedMovements = useMemo(() => {
+  const catalogAccessibleMovements = useMemo(() => {
     return allMovements.filter((mov) => {
-      // 0. Filter by catalog ID
       const movCatalogId = mov.catalogId || "default-cat";
       if (movCatalogId !== activeCatalogId) {
         return false;
       }
 
-      // 0b. Strict access control by department permissions for movement history
       if (currentUser) {
         const canSeeAll =
           currentUser.rol === "Administrador" ||
           currentUser.departamento === "Almacén y Suministro" ||
           currentUser.departamento === "Farmacia";
         if (!canSeeAll) {
+          if (currentUser.departamento === "Laboratorio" && movCatalogId !== "laboratorio") {
+            return false;
+          }
+          if (currentUser.departamento === "Odontología" && movCatalogId !== "odontologia") {
+            return false;
+          }
           const userCats = currentUser.catalogos || [];
-          if (userCats.length > 0) {
-            if (!userCats.includes(movCatalogId)) {
-              return false;
-            }
-          } else {
-            const departmentCatalogIdMap: Record<string, string> = {
-              Laboratorio: "laboratorio",
-              Odontología: "odontologia"
-            };
-            const expectedCatalogId = departmentCatalogIdMap[currentUser.departamento];
-            if (expectedCatalogId && movCatalogId !== expectedCatalogId) {
-              return false;
-            }
+          if (userCats.length > 0 && !userCats.includes(movCatalogId)) {
+            return false;
           }
         }
       }
@@ -163,169 +127,118 @@ export default function HistorialMovimientos({
     });
   }, [allMovements, activeCatalogId, currentUser]);
 
-  // Grouped invoices for entries
-  const facturaGroups = useMemo(() => {
-    const entryMovements = allowedMovements.filter((m) => m.tipoMovimiento === "Entrada");
+  // Group "Entrada" movements by numeroFactura
+  const groupedInvoices = useMemo(() => {
     const map = new Map<string, FacturaGroup>();
 
-    entryMovements.forEach((mov) => {
-      const hasFactura = Boolean(mov.factura && mov.factura.trim());
-      // Clave de agrupación
-      let groupKey = "";
-      let displayName = "";
+    catalogAccessibleMovements
+      .filter((m) => m.tipoMovimiento === "Entrada")
+      .forEach((mov) => {
+        const key = (mov.numeroFactura || "").trim() || `ENTRADA-${(mov.fecha || "").slice(0, 10) || "DIRECTA"}`;
+        const existing = map.get(key);
+        const qty = Number(mov.cantidad || 0);
+        const subtotal = qty * Number(mov.precio || 0);
 
-      if (hasFactura) {
-        const facClean = mov.factura!.trim().toUpperCase();
-        groupKey = `FAC_${facClean}`;
-        displayName = facClean;
-      } else if (mov.entradaId && mov.entradaId.trim()) {
-        groupKey = `ENT_${mov.entradaId.trim()}`;
-        displayName = `Entrada ${mov.entradaId.trim()}`;
-      } else {
-        // Registro histórico previo sin factura: agrupar por fecha y usuario
-        const dateKey = mov.fecha ? mov.fecha.split("T")[0] : "Historico";
-        groupKey = `LEGACY_${dateKey}_${mov.usuario || "sistema"}`;
-        const dateFormatted = mov.fecha ? new Date(mov.fecha).toLocaleDateString("es-DO") : "Fecha no disp.";
-        displayName = `Entrada Histórica (${dateFormatted})`;
-      }
-
-      if (!map.has(groupKey)) {
-        map.set(groupKey, {
-          facturaId: groupKey,
-          facturaDisplay: displayName,
-          isHistoricalLegacy: !hasFactura,
-          entradaId: mov.entradaId,
-          fecha: mov.fecha,
-          timestamp: mov.timestamp || 0,
-          usuario: mov.usuario || "Sistema",
-          items: [],
-          totalCantidad: 0,
-          totalCosto: 0,
-          estado: mov.estado || "Completada",
-          proveedor: mov.proveedor,
-          institucionSnapshot: mov.institucionSnapshot
-        });
-      }
-
-      const grp = map.get(groupKey)!;
-      grp.items.push(mov);
-      grp.totalCantidad += Number(mov.cantidad || 0);
-      grp.totalCosto += Number(mov.cantidad || 0) * Number(mov.precio || 0);
-      if (mov.proveedor && !grp.proveedor) {
-        grp.proveedor = mov.proveedor;
-      }
-      if (mov.institucionSnapshot && !grp.institucionSnapshot) {
-        grp.institucionSnapshot = mov.institucionSnapshot;
-      }
-      if (mov.timestamp && mov.timestamp > grp.timestamp) {
-        grp.timestamp = mov.timestamp;
-        grp.fecha = mov.fecha;
-      }
-    });
+        if (existing) {
+          existing.items.push(mov);
+          existing.totalUnidades += qty;
+          existing.totalMonto += subtotal;
+          if (mov.timestamp > existing.timestamp) {
+            existing.timestamp = mov.timestamp;
+          }
+        } else {
+          map.set(key, {
+            numeroFactura: (mov.numeroFactura || "").trim() || key,
+            fechaEntrada: mov.fechaEntrada || (mov.fecha ? mov.fecha.slice(0, 10) : ""),
+            proveedor: mov.proveedor || "Entrada de Inventario",
+            usuario: mov.usuario || "Sistema",
+            timestamp: mov.timestamp || Date.now(),
+            items: [mov],
+            totalUnidades: qty,
+            totalMonto: subtotal
+          });
+        }
+      });
 
     return Array.from(map.values()).sort((a, b) => b.timestamp - a.timestamp);
-  }, [allowedMovements]);
+  }, [catalogAccessibleMovements]);
 
-  // Filtered invoices by search term
-  const filteredFacturas = useMemo(() => {
-    if (!searchTerm.trim()) return facturaGroups;
-    const term = searchTerm.toLowerCase();
-    return facturaGroups.filter((g) => {
-      const matchHeader =
-        g.facturaDisplay.toLowerCase().includes(term) ||
-        g.usuario.toLowerCase().includes(term) ||
-        (g.proveedor && g.proveedor.toLowerCase().includes(term)) ||
-        (g.entradaId && g.entradaId.toLowerCase().includes(term));
-      if (matchHeader) return true;
-      // Search inside items
-      return g.items.some(
+  const filteredInvoices = useMemo(() => {
+    if (!searchTerm.trim()) return groupedInvoices;
+    const search = searchTerm.toLowerCase().trim();
+    return groupedInvoices.filter((inv) => {
+      if (inv.numeroFactura.toLowerCase().includes(search)) return true;
+      if ((inv.proveedor || "").toLowerCase().includes(search)) return true;
+      if ((inv.usuario || "").toLowerCase().includes(search)) return true;
+      return inv.items.some(
         (it) =>
-          it.productoCodigo.toLowerCase().includes(term) ||
-          it.productoNombre.toLowerCase().includes(term) ||
-          it.lote.toLowerCase().includes(term)
+          it.productoCodigo.toLowerCase().includes(search) ||
+          it.productoNombre.toLowerCase().includes(search) ||
+          it.lote.toLowerCase().includes(search)
       );
     });
-  }, [facturaGroups, searchTerm]);
+  }, [groupedInvoices, searchTerm]);
 
-  // Handle Export of Invoice to PDF or Word
-  const handleExportFactura = (group: FacturaGroup, format: "pdf" | "word") => {
-    playSound("action");
-    // Priority: snapshot saved with invoice, or current institutional config
-    const inst = group.institucionSnapshot || institucionConfig || null;
-
-    const exportData: FacturaExportData = {
-      facturaId: group.facturaId,
-      facturaDisplay: group.facturaDisplay,
-      isHistoricalLegacy: group.isHistoricalLegacy,
-      fecha: group.fecha,
-      usuario: group.usuario,
-      proveedor: group.proveedor,
-      estado: group.estado,
-      items: group.items.map((it) => ({
-        productoCodigo: it.productoCodigo,
-        productoNombre: it.productoNombre,
-        lote: it.lote,
-        cantidad: Number(it.cantidad || 0),
-        precio: Number(it.precio || 0)
-      })),
-      totalCantidad: group.totalCantidad,
-      totalCosto: group.totalCosto,
-      institucion: inst
-    };
-
-    if (format === "pdf") {
-      exportFacturaToPDF(exportData);
-    } else {
-      exportFacturaToWord(exportData);
-    }
-  };
-
-  // Filtered detailed movements
-  const filteredDetailedMovements = useMemo(() => {
-    return allowedMovements.filter((mov) => {
-      // Filter by type
+  const filteredMovements = useMemo(() => {
+    return catalogAccessibleMovements.filter((mov) => {
       if (filterType !== "todos" && mov.tipoMovimiento !== filterType) {
         return false;
       }
-      // Filter by search query
       if (!searchTerm.trim()) return true;
-      const search = searchTerm.toLowerCase();
+      const search = searchTerm.toLowerCase().trim();
       return (
+        (mov.numeroFactura || "").toLowerCase().includes(search) ||
+        (mov.proveedor || "").toLowerCase().includes(search) ||
         mov.productoCodigo.toLowerCase().includes(search) ||
         mov.productoNombre.toLowerCase().includes(search) ||
         mov.lote.toLowerCase().includes(search) ||
-        mov.usuario.toLowerCase().includes(search) ||
-        (mov.factura && mov.factura.toLowerCase().includes(search))
+        mov.usuario.toLowerCase().includes(search)
       );
     });
-  }, [allowedMovements, filterType, searchTerm]);
+  }, [catalogAccessibleMovements, filterType, searchTerm]);
 
-  // Pagination
-  const displayedFacturas = filteredFacturas.slice((currentPage - 1) * pageSize, currentPage * pageSize);
-  const displayedDetailed = filteredDetailedMovements.slice((currentPage - 1) * pageSize, currentPage * pageSize);
+  const displayedMovements = filteredMovements.slice(
+    (currentPage - 1) * pageSize,
+    currentPage * pageSize
+  );
 
-  const totalPages =
-    viewMode === "facturas"
-      ? Math.ceil(filteredFacturas.length / pageSize) || 1
-      : Math.ceil(filteredDetailedMovements.length / pageSize) || 1;
+  const displayedInvoices = filteredInvoices.slice(
+    (currentPage - 1) * pageSize,
+    currentPage * pageSize
+  );
 
   const handleNextPage = () => {
-    if (currentPage >= totalPages) return;
+    const totalCount = viewMode === "facturas" ? filteredInvoices.length : filteredMovements.length;
+    if (currentPage * pageSize >= totalCount) return;
     playSound("click");
     setCurrentPage((prev) => prev + 1);
   };
 
   const handlePrevPage = () => {
-    if (currentPage <= 1) return;
+    if (currentPage === 1) return;
     playSound("click");
     setCurrentPage((prev) => prev - 1);
+  };
+
+  const handleRefresh = () => {
+    playSound("action");
+    fetchMovements();
+    setCurrentPage(1);
+  };
+
+  const toggleInvoiceExpand = (numeroFactura: string) => {
+    playSound("click");
+    setExpandedInvoices((prev) => ({
+      ...prev,
+      [numeroFactura]: !prev[numeroFactura]
+    }));
   };
 
   const formatDateTime = (dateStr: string) => {
     if (!dateStr) return "—";
     const date = new Date(dateStr);
     return isNaN(date.getTime())
-      ? "—"
+      ? dateStr
       : date.toLocaleString("es-DO", {
           day: "2-digit",
           month: "2-digit",
@@ -333,6 +246,15 @@ export default function HistorialMovimientos({
           hour: "2-digit",
           minute: "2-digit"
         });
+  };
+
+  const formatShortDate = (dateStr: string) => {
+    if (!dateStr) return "—";
+    const parts = dateStr.slice(0, 10).split("-");
+    if (parts.length === 3) {
+      return `${parts[2]}/${parts[1]}/${parts[0]}`;
+    }
+    return dateStr;
   };
 
   const getMovementBadgeClass = (type: string) => {
@@ -350,102 +272,107 @@ export default function HistorialMovimientos({
 
   return (
     <div className="space-y-6">
-      {/* Header and Controls Card */}
-      <div className="bg-white rounded-3xl p-6 border border-slate-200 shadow-sm">
-        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-6">
+      {/* Cabecera estilo Imagen 2 */}
+      <div className="bg-white rounded-3xl p-6 border border-slate-200 shadow-sm space-y-5">
+        <div className="flex items-start justify-between gap-4">
           <div>
-            <h3 className="text-lg font-bold text-slate-900 flex items-center gap-2">
-              <History className="w-5 h-5 text-teal-600" />
-              Historial de Movimientos y Facturas de Entrada
+            <h3 className="text-lg font-extrabold text-slate-900 flex items-center gap-2.5">
+              <History className="w-5 h-5 text-teal-600 shrink-0" />
+              <span>Historial de Movimientos y Facturas de Entrada</span>
             </h3>
-            <p className="text-slate-500 text-xs mt-1">
+            <p className="text-slate-500 text-xs mt-1 font-medium">
               Consulta las entradas agrupadas por número de factura o el registro detallado de salidas y ajustes
             </p>
           </div>
-          <div className="flex items-center gap-2">
-            <button
-              onClick={handleRefresh}
-              className="p-2.5 border border-slate-200 hover:border-teal-400 bg-slate-50 hover:bg-slate-100 rounded-xl transition text-slate-600 hover:text-teal-600 active:scale-95 flex items-center justify-center shadow-sm cursor-pointer"
-              title="Actualizar historial"
-            >
-              <RefreshCw className="w-4 h-4" />
-            </button>
-          </div>
+          <button
+            onClick={handleRefresh}
+            className="p-2.5 border border-slate-200 hover:border-teal-400 bg-slate-50 hover:bg-slate-100 rounded-2xl transition text-slate-600 hover:text-teal-600 active:scale-95 flex items-center justify-center shadow-xs cursor-pointer shrink-0"
+            title="Actualizar historial"
+          >
+            <RefreshCw className="w-4 h-4" />
+          </button>
         </div>
 
-        {/* View Switcher Tabs */}
-        <div className="flex flex-wrap items-center justify-between gap-3 pb-4 mb-4 border-b border-slate-100">
-          <div className="inline-flex rounded-xl bg-slate-100 p-1 border border-slate-200">
+        {/* Selector de Pestañas Segmentado (Imagen 2) */}
+        <div className="space-y-3">
+          <div className="inline-flex flex-wrap items-center gap-1.5 bg-slate-100/90 p-1.5 rounded-2xl border border-slate-200/80">
             <button
               type="button"
               onClick={() => {
                 setViewMode("facturas");
                 playSound("click");
               }}
-              className={`flex items-center gap-2 px-4 py-2 rounded-lg text-xs font-black transition cursor-pointer ${
+              className={`inline-flex items-center gap-2 px-4 py-2.5 rounded-xl text-xs font-extrabold transition cursor-pointer ${
                 viewMode === "facturas"
-                  ? "bg-white text-teal-800 shadow-xs"
-                  : "text-slate-600 hover:text-slate-900"
+                  ? "bg-white text-teal-800 shadow-xs border border-slate-200/60"
+                  : "text-slate-600 hover:text-slate-800"
               }`}
             >
-              <FileText className="w-4 h-4 text-teal-600" />
+              <FileText className={`w-4 h-4 ${viewMode === "facturas" ? "text-teal-600" : "text-slate-400"}`} />
               <span>Entradas Agrupadas por Factura</span>
-              <span className="bg-teal-100 text-teal-800 text-[10px] font-mono px-2 py-0.5 rounded-full font-bold">
-                {facturaGroups.length}
+              <span
+                className={`px-2 py-0.5 rounded-full text-[11px] font-black ${
+                  viewMode === "facturas"
+                    ? "bg-teal-100 text-teal-800"
+                    : "bg-slate-200 text-slate-600"
+                }`}
+              >
+                {groupedInvoices.length}
               </span>
             </button>
+
             <button
               type="button"
               onClick={() => {
-                setViewMode("detallado");
+                setViewMode("detalle");
                 playSound("click");
               }}
-              className={`flex items-center gap-2 px-4 py-2 rounded-lg text-xs font-black transition cursor-pointer ${
-                viewMode === "detallado"
-                  ? "bg-white text-teal-800 shadow-xs"
-                  : "text-slate-600 hover:text-slate-900"
+              className={`inline-flex items-center gap-2 px-4 py-2.5 rounded-xl text-xs font-extrabold transition cursor-pointer ${
+                viewMode === "detalle"
+                  ? "bg-white text-teal-800 shadow-xs border border-slate-200/60"
+                  : "text-slate-600 hover:text-slate-800"
               }`}
             >
-              <List className="w-4 h-4 text-slate-500" />
+              <List className={`w-4 h-4 ${viewMode === "detalle" ? "text-teal-600" : "text-slate-400"}`} />
               <span>Todos los Movimientos (Detalle)</span>
-              <span className="bg-slate-200 text-slate-700 text-[10px] font-mono px-2 py-0.5 rounded-full font-bold">
-                {allowedMovements.length}
+              <span
+                className={`px-2 py-0.5 rounded-full text-[11px] font-black ${
+                  viewMode === "detalle"
+                    ? "bg-teal-100 text-teal-800"
+                    : "bg-slate-200 text-slate-600"
+                }`}
+              >
+                {catalogAccessibleMovements.length}
               </span>
             </button>
           </div>
 
-          <div className="text-xs text-slate-500 font-semibold">
-            {viewMode === "facturas" ? (
-              <span>Visualizando compras y entradas agrupadas por comprobante</span>
-            ) : (
-              <span>Auditoría línea por línea (Entradas, Salidas y Ajustes)</span>
-            )}
-          </div>
+          <p className="text-xs font-bold text-slate-500">
+            {viewMode === "facturas"
+              ? "Visualizando compras y entradas agrupadas por comprobante"
+              : "Visualizando el registro detallado de entradas, salidas y ajustes"}
+          </p>
         </div>
 
-        {/* Search & Filters */}
-        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-          <div className={`relative ${viewMode === "facturas" ? "col-span-3" : "col-span-2"}`}>
-            <Search className="w-4 h-4 absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400" />
+        {/* Barra de Búsqueda (Imagen 2) */}
+        <div className="pt-2 border-t border-slate-100 flex flex-col sm:flex-row gap-3">
+          <div className="relative flex-1">
+            <Search className="w-4 h-4 absolute left-4 top-1/2 -translate-y-1/2 text-slate-400" />
             <input
               type="text"
-              placeholder={
-                viewMode === "facturas"
-                  ? "Buscar por número de factura (ej. F100094), producto, lote o responsable..."
-                  : "Buscar por código, nombre, lote, factura o responsable..."
-              }
+              placeholder="Buscar por número de factura (ej. F100094), producto, lote o responsable..."
               value={searchTerm}
               onChange={(e) => setSearchTerm(e.target.value)}
-              className="w-full bg-slate-50 border border-slate-200 rounded-xl pl-10 pr-4 py-2.5 text-sm outline-none focus:ring-2 focus:ring-teal-400"
+              className="w-full bg-slate-50/80 border border-slate-200 rounded-2xl pl-11 pr-4 py-3 text-sm outline-none focus:ring-2 focus:ring-teal-400 text-slate-800 placeholder:text-slate-400 font-medium"
             />
           </div>
 
-          {viewMode === "detallado" && (
-            <div>
+          {viewMode === "detalle" && (
+            <div className="sm:w-56">
               <select
                 value={filterType}
                 onChange={(e) => setFilterType(e.target.value)}
-                className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2.5 text-sm outline-none focus:ring-2 focus:ring-teal-400 font-semibold text-slate-700"
+                className="w-full h-full bg-slate-50 border border-slate-200 rounded-2xl px-3.5 py-3 text-xs outline-none focus:ring-2 focus:ring-teal-400 font-bold text-slate-700"
               >
                 <option value="todos">Todos los movimientos</option>
                 <option value="Entrada">Solo Entradas</option>
@@ -457,240 +384,198 @@ export default function HistorialMovimientos({
         </div>
       </div>
 
-      {/* Main Content Area */}
+      {/* Contenido según Pestaña */}
       {viewMode === "facturas" ? (
-        /* VISTA DE ENTRADAS AGRUPADAS POR FACTURA */
         <div className="space-y-4">
           {loading ? (
-            <div className="bg-white rounded-3xl p-12 border border-slate-200 text-center shadow-sm">
+            <div className="bg-white rounded-3xl border border-slate-200 p-12 text-center shadow-sm">
               <div className="w-8 h-8 border-4 border-teal-600 border-t-transparent rounded-full animate-spin mx-auto mb-2"></div>
               <span className="text-xs text-slate-500 font-medium">Cargando facturas de entrada...</span>
             </div>
-          ) : filteredFacturas.length === 0 ? (
-            <div className="bg-white rounded-3xl p-12 border border-slate-200 text-center text-slate-400 shadow-sm">
-              <FileText className="w-10 h-10 mx-auto mb-2 text-slate-300" />
-              <p className="text-sm font-bold text-slate-600">No se encontraron facturas ni entradas registradas</p>
+          ) : filteredInvoices.length === 0 ? (
+            <div className="bg-white rounded-3xl border border-slate-200 p-12 text-center text-slate-400 shadow-sm">
+              <FileText className="w-10 h-10 mx-auto mb-2.5 text-slate-300" />
+              <p className="text-sm font-bold text-slate-600">No hay facturas de entrada registradas</p>
               <p className="text-xs text-slate-400 mt-1">
-                Utiliza el botón &quot;Registrar Producto&quot; para crear una nueva entrada con número de factura.
+                Las entradas registradas con número de factura aparecerán agrupadas aquí.
               </p>
             </div>
           ) : (
-            <div className="space-y-3.5">
-              {displayedFacturas.map((group) => {
-                const isExpanded = !!expandedFacturas[group.facturaId];
-                return (
+            displayedInvoices.map((inv) => {
+              const isExpanded = !!expandedInvoices[inv.numeroFactura];
+              return (
+                <div
+                  key={inv.numeroFactura}
+                  className="bg-white rounded-3xl border border-slate-200 shadow-sm overflow-hidden transition"
+                >
                   <div
-                    key={group.facturaId}
-                    className="bg-white rounded-2xl border border-slate-200 shadow-xs hover:border-slate-300 transition-all overflow-hidden"
+                    onClick={() => toggleInvoiceExpand(inv.numeroFactura)}
+                    className="p-5 flex flex-col sm:flex-row sm:items-center justify-between gap-4 cursor-pointer hover:bg-slate-50/70 transition"
                   >
-                    {/* Invoice Card Header */}
-                    <div
-                      onClick={() => toggleFacturaExpand(group.facturaId)}
-                      className="p-5 flex flex-col md:flex-row md:items-center justify-between gap-4 cursor-pointer hover:bg-slate-50/70 transition"
-                    >
-                      <div className="flex items-start sm:items-center gap-3.5 min-w-0">
-                        <div className="w-11 h-11 rounded-2xl bg-teal-50 border border-teal-100 flex items-center justify-center shrink-0 text-teal-700">
-                          <FileText className="w-5 h-5" />
-                        </div>
-                        <div className="min-w-0">
-                          <div className="flex flex-wrap items-center gap-2">
-                            <h4 className="text-base font-black text-slate-900 tracking-tight">
-                              {group.isHistoricalLegacy ? group.facturaDisplay : `Factura ${group.facturaDisplay}`}
-                            </h4>
-                            <span className="text-slate-400 font-normal text-xs">•</span>
-                            <span className="text-xs font-bold text-teal-800 bg-teal-50 border border-teal-200/60 px-2 py-0.5 rounded-md">
-                              Entrada de productos
-                            </span>
-                            <span className="inline-flex items-center gap-1 text-[11px] font-bold text-emerald-700 bg-emerald-50 border border-emerald-200/80 px-2.5 py-0.5 rounded-full">
-                              <CheckCircle2 className="w-3 h-3 text-emerald-600" />
-                              {group.estado || "Completada"}
-                            </span>
-                          </div>
-                          <div className="flex flex-wrap items-center gap-y-1 gap-x-4 text-xs text-slate-500 mt-1.5 font-medium">
-                            <div className="flex items-center gap-1.5">
-                              <Calendar className="w-3.5 h-3.5 text-slate-400 shrink-0" />
-                              <span>{formatDateTime(group.fecha)}</span>
-                            </div>
-                            <div className="flex items-center gap-1.5">
-                              <User className="w-3.5 h-3.5 text-slate-400 shrink-0" />
-                              <span className="font-semibold text-slate-700">{group.usuario}</span>
-                            </div>
-                            <div className="flex items-center gap-1.5">
-                              <Package className="w-3.5 h-3.5 text-slate-400 shrink-0" />
-                              <span>
-                                <strong className="text-slate-800 font-bold">{group.items.length}</strong> {group.items.length === 1 ? "producto" : "productos"} ({group.totalCantidad} unds.)
-                              </span>
-                            </div>
-                          </div>
-                        </div>
+                    <div className="flex items-start gap-3.5">
+                      <div className="w-11 h-11 rounded-2xl bg-teal-50 border border-teal-100 flex items-center justify-center text-teal-700 shrink-0">
+                        <FileText className="w-5 h-5" />
                       </div>
-
-                      {/* Right summary & expand action */}
-                      <div className="flex flex-wrap items-center justify-between md:justify-end gap-3 shrink-0 pt-2 md:pt-0 border-t md:border-t-0 border-slate-100">
-                        <div className="text-left md:text-right mr-1">
-                          <span className="block text-[10px] font-bold text-slate-400 uppercase tracking-wider">
-                            Total Factura
+                      <div>
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span className="text-sm font-black text-slate-900 font-mono">
+                            Factura: {inv.numeroFactura}
                           </span>
-                          <span className="text-sm font-black text-slate-900">
-                            {group.totalCosto > 0 ? `RD$ ${group.totalCosto.toLocaleString("es-DO", { minimumFractionDigits: 2 })}` : "—"}
+                          <span className="text-[10px] font-black uppercase tracking-wider px-2.5 py-0.5 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200">
+                            {inv.items.length} {inv.items.length === 1 ? "Producto" : "Productos"}
                           </span>
                         </div>
-
-                        {/* Quick export actions */}
-                        <div className="flex items-center gap-1.5">
-                          <button
-                            type="button"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              handleExportFactura(group, "pdf");
-                            }}
-                            className="p-2 rounded-xl bg-rose-50 hover:bg-rose-100 text-rose-600 border border-rose-200/80 transition active:scale-95 cursor-pointer"
-                            title="Descargar factura en PDF"
-                          >
-                            <FileDown className="w-4 h-4" />
-                          </button>
-                          <button
-                            type="button"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              handleExportFactura(group, "word");
-                            }}
-                            className="p-2 rounded-xl bg-blue-50 hover:bg-blue-100 text-blue-600 border border-blue-200/80 transition active:scale-95 cursor-pointer"
-                            title="Descargar factura en Microsoft Word (.docx)"
-                          >
-                            <FileText className="w-4 h-4" />
-                          </button>
+                        <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-slate-500 mt-1 font-medium">
+                          <span className="inline-flex items-center gap-1">
+                            <Calendar className="w-3.5 h-3.5 text-slate-400" />
+                            Fecha: <strong className="text-slate-700">{formatShortDate(inv.fechaEntrada)}</strong>
+                          </span>
+                          {inv.proveedor && (
+                            <span className="inline-flex items-center gap-1">
+                              <Building2 className="w-3.5 h-3.5 text-slate-400" />
+                              Proveedor: <strong className="text-slate-700">{inv.proveedor}</strong>
+                            </span>
+                          )}
+                          <span className="inline-flex items-center gap-1">
+                            <User className="w-3.5 h-3.5 text-slate-400" />
+                            {inv.usuario}
+                          </span>
                         </div>
-
-                        <button
-                          type="button"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            toggleFacturaExpand(group.facturaId);
-                          }}
-                          className="px-3 py-1.5 rounded-xl border border-slate-200 hover:border-teal-400 hover:bg-teal-50/50 text-xs font-bold text-teal-700 flex items-center gap-1.5 transition active:scale-95 cursor-pointer"
-                        >
-                          <span>{isExpanded ? "Ocultar Detalle" : "Ver Detalle"}</span>
-                          {isExpanded ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
-                        </button>
                       </div>
                     </div>
 
-                    {/* Expandable Invoice Details Accordion */}
-                    {isExpanded && (
-                      <div className="border-t border-slate-100 bg-slate-50/70 p-4 sm:p-6 anim-slide-down space-y-4">
-                        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-                          <div>
-                            <h5 className="text-xs font-black text-slate-700 uppercase tracking-wider flex items-center gap-1.5">
-                              <Layers className="w-3.5 h-3.5 text-teal-600" />
-                              Productos incluidos en esta factura ({group.items.length})
-                            </h5>
-                            {group.proveedor && (
-                              <p className="text-[11px] text-slate-500 font-semibold mt-0.5">
-                                Proveedor: <strong className="text-slate-700">{group.proveedor}</strong>
-                              </p>
-                            )}
-                          </div>
-
-                          {/* Detail Export Buttons */}
-                          <div className="flex items-center gap-2">
-                            <button
-                              type="button"
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                handleExportFactura(group, "pdf");
-                              }}
-                              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200 text-xs font-bold transition active:scale-95 shadow-2xs cursor-pointer"
-                              title="Exportar esta factura completa a documento PDF"
-                            >
-                              <FileDown className="w-3.5 h-3.5 text-rose-600" />
-                              <span>Exportar PDF</span>
-                            </button>
-                            <button
-                              type="button"
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                handleExportFactura(group, "word");
-                              }}
-                              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-blue-50 hover:bg-blue-100 text-blue-700 border border-blue-200 text-xs font-bold transition active:scale-95 shadow-2xs cursor-pointer"
-                              title="Exportar esta factura completa a Microsoft Word (.docx)"
-                            >
-                              <FileText className="w-3.5 h-3.5 text-blue-600" />
-                              <span>Exportar Word</span>
-                            </button>
-                          </div>
-                        </div>
-
-                        <div className="bg-white rounded-xl border border-slate-200 overflow-hidden shadow-2xs">
-                          <div className="overflow-x-auto">
-                            <table className="w-full text-left text-xs border-collapse">
-                              <thead>
-                                <tr className="bg-slate-100/80 text-[11px] font-bold text-slate-600 uppercase tracking-wider border-b border-slate-200">
-                                  <th className="py-2.5 px-4 text-center w-12">#</th>
-                                  <th className="py-2.5 px-4">Código</th>
-                                  <th className="py-2.5 px-4 min-w-[200px]">Medicamento / Insumo</th>
-                                  <th className="py-2.5 px-4">Lote</th>
-                                  <th className="py-2.5 px-4 text-right">Cantidad Ingresada</th>
-                                  <th className="py-2.5 px-4 text-right">Costo Unit. (RD$)</th>
-                                  <th className="py-2.5 px-4 text-right">Subtotal (RD$)</th>
-                                </tr>
-                              </thead>
-                              <tbody className="divide-y divide-slate-100">
-                                {group.items.map((it, idx) => {
-                                  const subtotal = Number(it.cantidad || 0) * Number(it.precio || 0);
-                                  return (
-                                    <tr key={it.id || idx} className="hover:bg-slate-50/80 transition">
-                                      <td className="py-2.5 px-4 text-center font-mono font-bold text-slate-400">
-                                        {idx + 1}
-                                      </td>
-                                      <td className="py-2.5 px-4 font-mono font-bold text-teal-700">
-                                        {it.productoCodigo}
-                                      </td>
-                                      <td className="py-2.5 px-4 font-semibold text-slate-800">
-                                        {it.productoNombre}
-                                      </td>
-                                      <td className="py-2.5 px-4 font-mono font-bold text-slate-700">
-                                        {it.lote}
-                                      </td>
-                                      <td className="py-2.5 px-4 text-right font-black text-slate-900">
-                                        +{it.cantidad}
-                                      </td>
-                                      <td className="py-2.5 px-4 text-right font-medium text-slate-600">
-                                        {it.precio != null && it.precio > 0 ? `RD$ ${it.precio.toFixed(2)}` : "—"}
-                                      </td>
-                                      <td className="py-2.5 px-4 text-right font-bold text-slate-800">
-                                        {subtotal > 0 ? `RD$ ${subtotal.toFixed(2)}` : "—"}
-                                      </td>
-                                    </tr>
-                                  );
-                                })}
-                              </tbody>
-                            </table>
-                          </div>
-                        </div>
+                    <div className="flex items-center justify-between sm:justify-end gap-3 border-t sm:border-t-0 pt-3 sm:pt-0 border-slate-100">
+                      <div className="text-left sm:text-right mr-2">
+                        <span className="block text-[10px] font-bold uppercase text-slate-400 tracking-wider">
+                          Total Entrada ({inv.totalUnidades} uds)
+                        </span>
+                        <span className="text-sm font-black text-teal-700">
+                          RD$ {inv.totalMonto.toFixed(2)}
+                        </span>
                       </div>
-                    )}
+
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          exportInvoiceToPDF(inv.numeroFactura, formatShortDate(inv.fechaEntrada), inv.proveedor, inv.items);
+                          playSound("action");
+                        }}
+                        className="px-3 py-2 rounded-xl bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200 text-xs font-extrabold flex items-center gap-1.5 transition cursor-pointer"
+                        title="Descargar Factura en PDF"
+                      >
+                        <FileDown className="w-3.5 h-3.5" />
+                        <span>PDF</span>
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          exportInvoiceToWord(inv.numeroFactura, formatShortDate(inv.fechaEntrada), inv.proveedor, inv.items);
+                          playSound("action");
+                        }}
+                        className="px-3 py-2 rounded-xl bg-blue-50 hover:bg-blue-100 text-blue-700 border border-blue-200 text-xs font-extrabold flex items-center gap-1.5 transition cursor-pointer"
+                        title="Descargar Factura en Word"
+                      >
+                        <FileDown className="w-3.5 h-3.5" />
+                        <span>Word</span>
+                      </button>
+
+                      <div className="p-1.5 text-slate-400">
+                        {isExpanded ? <ChevronUp className="w-5 h-5" /> : <ChevronDown className="w-5 h-5" />}
+                      </div>
+                    </div>
                   </div>
-                );
-              })}
+
+                  {isExpanded && (
+                    <div className="border-t border-slate-100 bg-slate-50/60 overflow-x-auto">
+                      <table className="min-w-[700px] w-full text-left border-collapse">
+                        <thead>
+                          <tr className="bg-slate-100/80 border-b border-slate-200 text-[10px] font-black text-slate-500 uppercase tracking-wider">
+                            <th className="px-5 py-3">Código</th>
+                            <th className="px-5 py-3">Medicamento / Insumo</th>
+                            <th className="px-5 py-3">Lote</th>
+                            <th className="px-5 py-3 text-right">Cantidad</th>
+                            <th className="px-5 py-3 text-right">Costo Unit.</th>
+                            <th className="px-5 py-3 text-right">Subtotal</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-slate-200/60 text-xs bg-white">
+                          {inv.items.map((item) => {
+                            const sub = Number(item.cantidad || 0) * Number(item.precio || 0);
+                            return (
+                              <tr key={item.id} className="hover:bg-slate-50/80">
+                                <td className="px-5 py-3 font-mono font-black text-teal-700">{item.productoCodigo}</td>
+                                <td className="px-5 py-3">
+                                  <p className="font-bold text-slate-800">{item.productoNombre}</p>
+                                  {item.descripcion && <p className="text-[11px] text-slate-400">{item.descripcion}</p>}
+                                </td>
+                                <td className="px-5 py-3 font-mono font-bold text-slate-700">
+                                  {item.lote}
+                                  {item.loteFisico && (
+                                    <span className="block text-[10px] text-amber-700 font-sans">
+                                      Ubic: {item.loteFisico}
+                                    </span>
+                                  )}
+                                </td>
+                                <td className="px-5 py-3 text-right font-black text-emerald-700">+{item.cantidad}</td>
+                                <td className="px-5 py-3 text-right font-semibold text-slate-600">
+                                  RD$ {Number(item.precio || 0).toFixed(2)}
+                                </td>
+                                <td className="px-5 py-3 text-right font-black text-slate-800">
+                                  RD$ {sub.toFixed(2)}
+                                </td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                </div>
+              );
+            })
+          )}
+
+          {filteredInvoices.length > pageSize && (
+            <div className="px-6 py-4 bg-white rounded-2xl border border-slate-200 flex items-center justify-between">
+              <span className="text-xs text-slate-500 font-semibold">
+                Mostrando {displayedInvoices.length} de {filteredInvoices.length} facturas • Página {currentPage}
+              </span>
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={handlePrevPage}
+                  disabled={currentPage === 1}
+                  className="p-2 border border-slate-200 rounded-xl bg-white hover:bg-slate-100 disabled:opacity-50"
+                >
+                  <ChevronLeft className="w-4 h-4" />
+                </button>
+                <button
+                  onClick={handleNextPage}
+                  disabled={currentPage * pageSize >= filteredInvoices.length}
+                  className="p-2 border border-slate-200 rounded-xl bg-white hover:bg-slate-100 disabled:opacity-50"
+                >
+                  <ChevronRight className="w-4 h-4" />
+                </button>
+              </div>
             </div>
           )}
         </div>
       ) : (
-        /* VISTA DETALLADA DE TODOS LOS MOVIMIENTOS (ENTRADAS, SALIDAS Y AJUSTES) */
         <div className="bg-white rounded-3xl border border-slate-200 shadow-sm overflow-hidden">
           <div className="overflow-x-auto">
             <table className="min-w-[850px] w-full text-left border-collapse">
               <thead>
                 <tr className="bg-slate-50 border-b border-slate-200 text-[11px] font-bold text-slate-500 uppercase tracking-wider">
-                  <th className="px-5 py-4">Tipo</th>
-                  <th className="px-5 py-4">Factura</th>
-                  <th className="px-5 py-4">Suministro</th>
-                  <th className="px-5 py-4">Lote</th>
-                  <th className="px-5 py-4 text-right">Cantidad</th>
-                  <th className="px-5 py-4 text-right">Costo / Precio</th>
-                  <th className="px-5 py-4">Responsable</th>
-                  <th className="px-5 py-4">Fecha y Hora</th>
+                  <th className="px-6 py-4">Tipo</th>
+                  <th className="px-6 py-4">Factura / Comp.</th>
+                  <th className="px-6 py-4">Suministro</th>
+                  <th className="px-6 py-4">Lote</th>
+                  <th className="px-6 py-4 text-right">Cantidad</th>
+                  <th className="px-6 py-4 text-right">Costo / Precio</th>
+                  <th className="px-6 py-4">Responsable</th>
+                  <th className="px-6 py-4">Fecha y Hora</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100 text-sm">
@@ -701,17 +586,17 @@ export default function HistorialMovimientos({
                       <span className="text-xs text-slate-500 font-medium">Cargando registros...</span>
                     </td>
                   </tr>
-                ) : filteredDetailedMovements.length === 0 ? (
+                ) : filteredMovements.length === 0 ? (
                   <tr>
                     <td colSpan={8} className="text-center py-12 text-slate-400">
-                      <History className="w-8 h-8 mx-auto mb-2 text-slate-300" />
+                      <Package className="w-8 h-8 mx-auto mb-2 text-slate-300" />
                       <p className="text-xs font-semibold">No se encontraron movimientos registrados</p>
                     </td>
                   </tr>
                 ) : (
-                  displayedDetailed.map((mov) => (
+                  displayedMovements.map((mov) => (
                     <tr key={mov.id} className="hover:bg-slate-50/50 transition">
-                      <td className="px-5 py-4">
+                      <td className="px-6 py-4">
                         <span
                           className={`inline-block px-2.5 py-1 rounded-full text-[10px] font-black uppercase tracking-wider ${getMovementBadgeClass(
                             mov.tipoMovimiento
@@ -720,17 +605,16 @@ export default function HistorialMovimientos({
                           {mov.tipoMovimiento}
                         </span>
                       </td>
-                      <td className="px-5 py-4">
-                        {mov.factura ? (
-                          <span className="inline-flex items-center gap-1 font-mono font-bold text-xs bg-slate-100 text-slate-800 px-2.5 py-1 rounded-md border border-slate-200">
-                            <FileText className="w-3 h-3 text-teal-600" />
-                            {mov.factura}
+                      <td className="px-6 py-4 font-mono text-xs font-bold text-slate-600">
+                        {mov.numeroFactura ? (
+                          <span className="bg-teal-50 text-teal-800 border border-teal-200 px-2 py-0.5 rounded-md">
+                            {mov.numeroFactura}
                           </span>
                         ) : (
-                          <span className="text-slate-400 text-xs">—</span>
+                          <span className="text-slate-300">—</span>
                         )}
                       </td>
-                      <td className="px-5 py-4">
+                      <td className="px-6 py-4">
                         <div className="min-w-0">
                           <span className="block text-[10px] font-black text-teal-700">{mov.productoCodigo}</span>
                           <MarqueeText
@@ -740,15 +624,15 @@ export default function HistorialMovimientos({
                           />
                         </div>
                       </td>
-                      <td className="px-5 py-4 font-mono font-bold text-slate-700">{mov.lote}</td>
-                      <td className="px-5 py-4 text-right font-bold text-slate-800">
+                      <td className="px-6 py-4 font-mono font-bold text-slate-700">{mov.lote}</td>
+                      <td className="px-6 py-4 text-right font-bold text-slate-800">
                         {mov.tipoMovimiento === "Salida" ? "-" : "+"}
                         {mov.cantidad}
                       </td>
-                      <td className="px-5 py-4 text-right font-semibold text-slate-500">
+                      <td className="px-6 py-4 text-right font-semibold text-slate-500">
                         {mov.precio != null && mov.precio > 0 ? `RD$ ${mov.precio.toFixed(2)}` : "—"}
                       </td>
-                      <td className="px-5 py-4">
+                      <td className="px-6 py-4">
                         <div className="text-xs font-semibold text-slate-600 flex items-center gap-1.5">
                           <User className="w-3.5 h-3.5 text-slate-400 shrink-0" />
                           <span className="truncate max-w-[140px]" title={mov.usuario}>
@@ -756,7 +640,7 @@ export default function HistorialMovimientos({
                           </span>
                         </div>
                       </td>
-                      <td className="px-5 py-4 text-xs text-slate-500 whitespace-nowrap">
+                      <td className="px-6 py-4 text-xs text-slate-500 whitespace-nowrap">
                         <div className="flex items-center gap-1.5">
                           <Calendar className="w-3.5 h-3.5 text-slate-400" />
                           <span>{formatDateTime(mov.fecha)}</span>
@@ -768,39 +652,30 @@ export default function HistorialMovimientos({
               </tbody>
             </table>
           </div>
+
+          <div className="px-6 py-4 bg-slate-50 border-t border-slate-200 flex flex-col sm:flex-row items-center justify-between gap-4">
+            <span className="text-xs text-slate-500 font-semibold">
+              Mostrando {displayedMovements.length} de {filteredMovements.length} registros • Página {currentPage}
+            </span>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={handlePrevPage}
+                disabled={currentPage === 1 || loading}
+                className="p-2 border border-slate-200 rounded-xl bg-white hover:bg-slate-100 disabled:opacity-50 disabled:cursor-not-allowed transition active:scale-95 text-slate-600 shrink-0"
+              >
+                <ChevronLeft className="w-4 h-4" />
+              </button>
+              <button
+                onClick={handleNextPage}
+                disabled={currentPage * pageSize >= filteredMovements.length || loading}
+                className="p-2 border border-slate-200 rounded-xl bg-white hover:bg-slate-100 disabled:opacity-50 disabled:cursor-not-allowed transition active:scale-95 text-slate-600 shrink-0"
+              >
+                <ChevronRight className="w-4 h-4" />
+              </button>
+            </div>
+          </div>
         </div>
       )}
-
-      {/* Pagination Footer */}
-      <div className="bg-white rounded-2xl border border-slate-200 px-6 py-4 flex flex-col sm:flex-row items-center justify-between gap-4 shadow-xs">
-        <span className="text-xs text-slate-500 font-semibold">
-          {viewMode === "facturas" ? (
-            <>
-              Mostrando {displayedFacturas.length} de {filteredFacturas.length} facturas • Página {currentPage} de {totalPages}
-            </>
-          ) : (
-            <>
-              Mostrando {displayedDetailed.length} de {filteredDetailedMovements.length} movimientos • Página {currentPage} de {totalPages}
-            </>
-          )}
-        </span>
-        <div className="flex items-center gap-2">
-          <button
-            onClick={handlePrevPage}
-            disabled={currentPage <= 1 || loading}
-            className="p-2 border border-slate-200 rounded-xl bg-white hover:bg-slate-100 disabled:opacity-50 disabled:cursor-not-allowed transition active:scale-95 text-slate-600 shrink-0 cursor-pointer"
-          >
-            <ChevronLeft className="w-4 h-4" />
-          </button>
-          <button
-            onClick={handleNextPage}
-            disabled={currentPage >= totalPages || loading}
-            className="p-2 border border-slate-200 rounded-xl bg-white hover:bg-slate-100 disabled:opacity-50 disabled:cursor-not-allowed transition active:scale-95 text-slate-600 shrink-0 cursor-pointer"
-          >
-            <ChevronRight className="w-4 h-4" />
-          </button>
-        </div>
-      </div>
     </div>
   );
 }

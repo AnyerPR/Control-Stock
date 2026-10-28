@@ -1,5 +1,5 @@
-import { collection, addDoc, serverTimestamp } from "firebase/firestore";
-import { db } from "../firebase";
+import { addDoc, serverTimestamp } from "firebase/firestore";
+import { tenantCollection } from "../firebase";
 
 export async function logSystemEvent(texto: string) {
   const isLocalFileMode = typeof window !== "undefined" && window.location.protocol === "file:";
@@ -34,7 +34,7 @@ export async function logSystemEvent(texto: string) {
   }
 
   try {
-    await addDoc(collection(db, "chat_mensajes"), {
+    await addDoc(tenantCollection("chat_mensajes"), {
       texto,
       usuarioNombre: "Sistema",
       usuarioId: "system-bot",

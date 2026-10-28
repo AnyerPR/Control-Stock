@@ -1,13 +1,32 @@
 import React, { useState, useEffect, useRef } from "react";
-import { collection, doc, query, onSnapshot, getDocs, getDoc, writeBatch, updateDoc, setDoc, deleteDoc } from "firebase/firestore";
-import { db } from "./firebase";
-import { Producto, Usuario, Lote, Movimiento, ColoresConfig, Departamento, getEnabledModules, CargaMasivaRecord, InstitucionConfig } from "./types";
+import { doc, onSnapshot, getDocs, getDoc, writeBatch, updateDoc, setDoc, deleteDoc } from "firebase/firestore";
+import { onAuthStateChanged, signOut } from "firebase/auth";
+import {
+  db,
+  auth,
+  tenantCollection,
+  tenantDoc,
+  getActiveFarmaciaId,
+  setActiveFarmaciaId,
+  DEFAULT_FARMACIA_ID,
+  provisionUserInFirebaseAuth
+} from "./firebase";
+import {
+  Producto,
+  Usuario,
+  Lote,
+  Movimiento,
+  ColoresConfig,
+  Departamento,
+  ConceptoFactura,
+  DEFAULT_CONCEPTOS_FACTURA,
+  getEnabledModules
+} from "./types";
 import { playSound, setMuteState } from "./utils/audio";
 import { hashPassword } from "./components/Login";
 
 // Componentes modulares
 import MarqueeText from "./components/MarqueeText";
-import { APP_LOGO } from "./logoData";
 import CargaMasiva from "./components/CargaMasiva";
 import HistorialMovimientos from "./components/HistorialMovimientos";
 import BlockPanel from "./components/BlockPanel";
@@ -16,16 +35,10 @@ import UserPanel from "./components/UserPanel";
 import Login from "./components/Login";
 import SolicitudesPanel from "./components/SolicitudesPanel";
 import ConfiguracionPanel from "./components/ConfiguracionPanel";
+import VentaPanel from "./components/VentaPanel";
 import ChatLateral from "./components/ChatLateral";
 import { logSystemEvent } from "./utils/chatHelper";
 import { exportToWord, exportToPDF } from "./utils/exportUtils";
-import {
-  normalizeSupplyName,
-  normalizeCompactName,
-  getInitialPrefix,
-  generateNextCodeConsecutive,
-  analyzeItemMatch
-} from "./utils/productMatching";
 
 // Suministros predefinidos para autosembrado (si la base de datos está vacía)
 import { bH as DEFAULT_PRODUCTS } from "./defaultProducts";
@@ -63,7 +76,8 @@ import {
   LoaderCircle,
   ClipboardList,
   Clock,
-  AlertCircle
+  AlertCircle,
+  Receipt
 } from "lucide-react";
 
 // Filtros del catálogo
@@ -83,15 +97,13 @@ const FILTROS_CATALOGO: Record<string, string> = {
 const BLOQUES = Array.from({ length: 26 }, (_, i) => String.fromCharCode(65 + i));
 
 export default function App() {
-  const [deferredPrompt, setDeferredPrompt] = useState<any>(null);
-  const [canInstall, setCanInstall] = useState(false);
   const [products, setProducts] = useState<Producto[]>([]);
   const [blocks, setBlocks] = useState<any[]>([]);
   const [users, setUsers] = useState<Usuario[]>([]);
   const [departamentos, setDepartamentos] = useState<Departamento[]>([]);
   const [catalogos, setCatalogos] = useState<any[]>([]);
+  const [conceptos, setConceptos] = useState<ConceptoFactura[]>(DEFAULT_CONCEPTOS_FACTURA);
   const [activeCatalogId, setActiveCatalogId] = useState<string>("default-cat");
-  const [cargasMasivasList, setCargasMasivasList] = useState<CargaMasivaRecord[]>([]);
   const [currentUser, setCurrentUser] = useState<Usuario | null>(() => {
     const saved = localStorage.getItem("current_user");
     if (saved) {
@@ -99,6 +111,19 @@ export default function App() {
     }
     return null;
   });
+  const [activeFarmaciaId, setActiveFarmaciaIdState] = useState<string>(() => getActiveFarmaciaId());
+  const [farmaciaMeta, setFarmaciaMeta] = useState<{ nombre: string; subtitulo: string }>(() => {
+    const saved = localStorage.getItem("active_farmacia_meta");
+    if (saved) {
+      try { return JSON.parse(saved); } catch {}
+    }
+    return {
+      nombre: "Control de Stock",
+      subtitulo: "Suministros Hospitalarios • Dr. José Manuel Rodríguez"
+    };
+  });
+  const [authReady, setAuthReady] = useState(false);
+  const [isFirebaseAuthed, setIsFirebaseAuthed] = useState(false);
 
   const [activeTab, setActiveTab] = useState<string>("inventory");
   const [catalogFilter, setCatalogFilter] = useState("todos");
@@ -140,8 +165,28 @@ export default function App() {
   const [newLotPhysExpDate, setNewLotPhysExpDate] = useState("");
   const [newLotPrice, setNewLotPrice] = useState("");
 
-  // Product Create Form
+  // Product / Invoice Entry Form (Imagen 3: Registro de Entrada de Productos)
   const [showProductAdd, setShowProductAdd] = useState(false);
+  const [invoiceNum, setInvoiceNum] = useState("");
+  const [invoiceDate, setInvoiceDate] = useState(() => new Date().toISOString().slice(0, 10));
+  const [invoiceSupplier, setInvoiceSupplier] = useState("");
+  const [pendingEntryItems, setPendingEntryItems] = useState<
+    Array<{
+      tempId: string;
+      codigo: string;
+      nombre: string;
+      descripcion: string;
+      numeroLote: string;
+      loteFisico: string;
+      cantidad: number;
+      cantidadF: number;
+      precio: number;
+      fechaVencimiento: string;
+      fechaFisica: string;
+    }>
+  >([]);
+  const [confirmingEntry, setConfirmingEntry] = useState(false);
+
   const [newProdCode, setNewProdCode] = useState("");
   const [newProdName, setNewProdName] = useState("");
   const [newProdDesc, setNewProdDesc] = useState("");
@@ -153,26 +198,7 @@ export default function App() {
   const [newProdLotPhysExpDate, setNewProdLotPhysExpDate] = useState("");
   const [newProdLotPrice, setNewProdLotPrice] = useState("");
 
-  // Pending Entry State (Entrada agrupada por factura)
-  const [entryFacturaNum, setEntryFacturaNum] = useState("");
-  const [entryFacturaDate, setEntryFacturaDate] = useState(() => new Date().toISOString().split("T")[0]);
-  const [entryProveedor, setEntryProveedor] = useState("");
-  const [pendingEntryItems, setPendingEntryItems] = useState<{
-    tempId: string;
-    codigo: string;
-    nombre: string;
-    descripcion: string;
-    lotNum: string;
-    lotLocation: string;
-    qty: number;
-    qtyF: number;
-    expDate: string;
-    physExpDate: string;
-    price: number;
-  }[]>([]);
-  const [isConfirmingEntry, setIsConfirmingEntry] = useState(false);
-
-  // Global Config (Cierre de mes, Colores e Institución)
+  // Global Config (Cierre de mes & Colores)
   const [activePeriod, setActivePeriod] = useState<string>("Julio 2026");
   const [colores, setColores] = useState<ColoresConfig>({
     primary: "#0d9488", // Teal 600
@@ -182,16 +208,6 @@ export default function App() {
     cards: "#ffffff",
     tables: "#f8fafc",
     elements: "#0d9488"
-  });
-  const [institucionConfig, setInstitucionConfig] = useState<InstitucionConfig>({
-    nombre: "Suministros Hospitalarios • Dr. José Manuel Rodríguez",
-    logo: "",
-    direccion: "",
-    telefono: "",
-    correo: "",
-    identificadorFiscal: "",
-    paginaWeb: "",
-    informacionAdicional: ""
   });
 
   const [loading, setLoading] = useState(true);
@@ -206,431 +222,6 @@ export default function App() {
   const nameSuggestionsRef = useRef<HTMLDivElement>(null);
 
   // Click outside export menu / name suggestions to close them
-  useEffect(() => {
-    // PWA beforeinstallprompt handling
-    const onBeforeInstallPrompt = (e: any) => {
-      try { e.preventDefault(); } catch (err) {}
-      setDeferredPrompt(e);
-      setCanInstall(true);
-    };
-    const onAppInstalled = () => {
-      setDeferredPrompt(null);
-      setCanInstall(false);
-      showToast("Aplicación instalada correctamente.");
-    };
-    window.addEventListener("beforeinstallprompt", onBeforeInstallPrompt as any);
-    window.addEventListener("appinstalled", onAppInstalled as any);
-    return () => {
-      window.removeEventListener("beforeinstallprompt", onBeforeInstallPrompt as any);
-      window.removeEventListener("appinstalled", onAppInstalled as any);
-    };
-  }, []);
-
-  const handleInstallClick = async () => {
-    if (!deferredPrompt) return;
-    try {
-      deferredPrompt.prompt();
-      const choice = await deferredPrompt.userChoice;
-      if (choice && choice.outcome === "accepted") {
-        showToast("Instalación iniciada.");
-      }
-    } catch (err) {
-      console.error("Install prompt failed:", err);
-    } finally {
-      setDeferredPrompt(null);
-      setCanInstall(false);
-    }
-  };
-
-  // Mass import handler: Never deletes existing products; matches by (nombre + descripcion); creates lotes or new products; logs batch record
-  const handleMassImport = async (
-    items: any[],
-    nombreArchivo?: string,
-    progressCb?: (done: number, total: number) => void
-  ) => {
-    const isLocalFileMode = typeof window !== "undefined" && window.location.protocol === "file:";
-
-    const initialCatalogProducts = products.filter(p => (p.catalogId || "default-cat") === activeCatalogId);
-    // Keep a pristine snapshot of products before this mass import
-    const snapshotBeforeCarga: Producto[] = JSON.parse(JSON.stringify(products));
-    const workingProducts = JSON.parse(JSON.stringify(products)) as Producto[];
-    const productosToSaveMap = new Map<string, Producto>();
-    const movimientosToSave: Movimiento[] = [];
-
-    const lotesCreados: Array<{ productoCodigo: string; loteId: string; cantidad: number }> = [];
-    const lotesModificados: Array<{ productoCodigo: string; loteId: string; cantidadAgregada: number; cantidadPrevia?: number }> = [];
-    const productosCreados: string[] = [];
-    const movimientosCreados: string[] = [];
-
-    const usuarioStr = currentUser ? `${currentUser.nombre} (${currentUser.usuario})` : "Carga Masiva";
-
-    for (let i = 0; i < items.length; i++) {
-      const it = items[i];
-      const itemNombre = String(it.nombre || "").trim();
-      const itemDesc = it.descripcion ? String(it.descripcion).trim() : "";
-      const itemQty = Number(it.cantidad || 0);
-      const itemPrice = Number(it.precio || 0);
-      const itemLote = it.lote ? String(it.lote).trim() : undefined;
-      const itemFechaVto = it.fechaVto ? String(it.fechaVto).trim() : "";
-      const explicitTargetCode = it.targetProductCode ? String(it.targetProductCode).trim() : undefined;
-
-      if (!itemNombre) continue;
-
-      let matchedExistingProd: Producto | null = null;
-      let targetCode = "";
-      const loteNum = itemLote && itemLote !== "" ? itemLote : `CM-${Date.now().toString().slice(-4)}-${Math.floor(Math.random() * 1000)}`;
-
-      if (explicitTargetCode) {
-        // Prioridad: Usar el código asignado por el usuario o detectado en la previsualización
-        matchedExistingProd = workingProducts.find(
-          (p) => (p.catalogId || "default-cat") === activeCatalogId && p.codigo.toUpperCase() === explicitTargetCode.toUpperCase()
-        ) || null;
-
-        if (matchedExistingProd) {
-          targetCode = matchedExistingProd.codigo;
-        } else {
-          targetCode = explicitTargetCode;
-        }
-      } else {
-        // Realizar análisis de coincidencia automático
-        const analysis = analyzeItemMatch(
-          itemNombre,
-          itemDesc,
-          initialCatalogProducts,
-          workingProducts,
-          activeCatalogId
-        );
-
-        if (analysis.matchedProduct) {
-          matchedExistingProd = analysis.matchedProduct;
-          targetCode = analysis.matchedProduct.codigo;
-        } else {
-          targetCode = analysis.projectedCode || generateNextCodeConsecutive(activeCatalogId, analysis.prefix, workingProducts);
-        }
-      }
-
-      if (matchedExistingProd) {
-        // 1. SI EXISTE: REUTILIZAR CÓDIGO EXISTENTE (No crear nuevo código)
-        const existingProd = matchedExistingProd;
-        targetCode = existingProd.codigo;
-
-        if ((!existingProd.descripcion || existingProd.descripcion.trim() === "") && itemDesc) {
-          existingProd.descripcion = itemDesc;
-        }
-
-        // Buscar si ya existe un lote con ese mismo número de lote
-        const existingLot = existingProd.lotes?.find(
-          (l) => l.numeroLote && normalizeSupplyName(l.numeroLote) === normalizeSupplyName(loteNum)
-        );
-
-        let loteId = "";
-        if (existingLot) {
-          loteId = existingLot.id;
-          const prevQty = Number(existingLot.cantidad || 0);
-          existingLot.cantidad = prevQty + itemQty;
-          existingLot.cantidadF = (Number(existingLot.cantidadF) || prevQty) + itemQty;
-          if (itemPrice > 0) existingLot.precio = itemPrice;
-          if (itemFechaVto) existingLot.fechaVencimiento = itemFechaVto;
-
-          lotesModificados.push({
-            productoCodigo: targetCode,
-            loteId,
-            cantidadAgregada: itemQty,
-            cantidadPrevia: prevQty
-          });
-        } else {
-          loteId = `lote-${targetCode}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
-          const newLot: Lote = {
-            id: loteId,
-            numeroLote: loteNum,
-            cantidad: itemQty,
-            cantidadF: itemQty,
-            fechaVencimiento: itemFechaVto,
-            precio: itemPrice,
-            loteFisico: "Almacén",
-            fechaFisica: itemFechaVto
-          };
-          existingProd.lotes = [...(existingProd.lotes || []), newLot];
-          lotesCreados.push({ productoCodigo: targetCode, loteId, cantidad: itemQty });
-        }
-
-        existingProd.updatedAt = Date.now();
-        productosToSaveMap.set(targetCode, existingProd);
-      } else {
-        // 2. SI NO EXISTE: USAR CÓDIGO NUEVO (O ASIGNADO)
-        const loteId = `lote-${targetCode}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
-        const newLot: Lote = {
-          id: loteId,
-          numeroLote: loteNum,
-          cantidad: itemQty,
-          cantidadF: itemQty,
-          fechaVencimiento: itemFechaVto,
-          precio: itemPrice,
-          loteFisico: "Almacén",
-          fechaFisica: itemFechaVto
-        };
-
-        const newProd: Producto = {
-          codigo: targetCode,
-          nombre: itemNombre,
-          descripcion: itemDesc,
-          lotes: [newLot],
-          updatedAt: Date.now(),
-          catalogId: activeCatalogId,
-          verificado: false
-        };
-
-        workingProducts.push(newProd);
-        productosToSaveMap.set(targetCode, newProd);
-        if (!productosCreados.includes(targetCode)) {
-          productosCreados.push(targetCode);
-        }
-        lotesCreados.push({ productoCodigo: targetCode, loteId, cantidad: itemQty });
-      }
-
-      // Record movement
-      const movId = `mov-${targetCode}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
-      const movRecord: Movimiento = {
-        id: movId,
-        productoCodigo: targetCode,
-        productoNombre: itemNombre,
-        lote: loteNum,
-        cantidad: itemQty,
-        precio: itemPrice,
-        tipoMovimiento: "Entrada",
-        usuario: usuarioStr,
-        fecha: new Date().toISOString(),
-        timestamp: Date.now(),
-        catalogId: activeCatalogId
-      };
-
-      movimientosToSave.push(movRecord);
-      movimientosCreados.push(movId);
-
-      if (progressCb) progressCb(i + 1, items.length);
-    }
-
-    // Create batch record
-    const cargaRecord: CargaMasivaRecord = {
-      id: `cm-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-      fecha: new Date().toLocaleString("es-ES"),
-      timestamp: Date.now(),
-      usuario: usuarioStr,
-      activeCatalogId,
-      totalItems: items.length,
-      importedItems: items.length,
-      nombreArchivo: nombreArchivo || "Carga_Masiva.xlsx",
-      lotesCreados,
-      lotesModificados,
-      productosCreados,
-      movimientosCreados,
-      snapshotProductos: snapshotBeforeCarga,
-      revertida: false
-    };
-
-    // Save to Firestore or LocalStorage
-    if (!isLocalFileMode) {
-      const batch = writeBatch(db);
-
-      for (const prod of productosToSaveMap.values()) {
-        batch.set(doc(db, "productos", prod.codigo.replace(/\//g, "_")), prod);
-      }
-
-      for (const mov of movimientosToSave) {
-        batch.set(doc(db, "movimientos", mov.id), mov);
-      }
-
-      batch.set(doc(db, "cargas_masivas", cargaRecord.id), cargaRecord);
-
-      await batch.commit();
-    } else {
-      localStorage.setItem("offline_productos", JSON.stringify(workingProducts));
-
-      let storedMovs = JSON.parse(localStorage.getItem("offline_movimientos") || "[]");
-      storedMovs = [...movimientosToSave, ...storedMovs];
-      localStorage.setItem("offline_movimientos", JSON.stringify(storedMovs));
-
-      let storedCMs = JSON.parse(localStorage.getItem("offline_cargas_masivas") || "[]");
-      storedCMs = [cargaRecord, ...storedCMs];
-      localStorage.setItem("offline_cargas_masivas", JSON.stringify(storedCMs));
-
-      window.dispatchEvent(new Event("offline_productos_update"));
-      window.dispatchEvent(new Event("offline_movimientos_update"));
-      window.dispatchEvent(new Event("offline_cargas_masivas_update"));
-    }
-
-    setProducts(workingProducts);
-    setCargasMasivasList((prev) => [cargaRecord, ...prev]);
-
-    logSystemEvent(
-      `📦 **Carga Masiva Exitosa**: Se cargaron **${items.length}** ítems (${productosCreados.length} productos nuevos, ${lotesCreados.length} lotes agregados) por el usuario ${cargaRecord.usuario}.`
-    );
-
-    return {
-      imported: items.length,
-      errors: [],
-      notFound: [],
-      duplicates: [],
-      finalProducts: workingProducts,
-      cargaRecordId: cargaRecord.id
-    };
-  };
-
-  // Revert Carga Masiva Handler
-  const handleRevertirCarga = async (cargaId: string): Promise<boolean> => {
-    const isLocalFileMode = typeof window !== "undefined" && window.location.protocol === "file:";
-
-    const record = cargasMasivasList.find((c) => c.id === cargaId);
-    if (!record) {
-      showToast("No se encontró la carga masiva seleccionada.");
-      return false;
-    }
-
-    if (record.revertida) {
-      showToast("Esta carga masiva ya fue revertida anteriormente.");
-      return false;
-    }
-
-    if (
-      !confirm(
-        `¿Estás seguro de que deseas revertir la carga masiva del ${record.fecha}?\nSe eliminarán los lotes agregados y los productos creados en esta carga sin afectar datos previos.`
-      )
-    ) {
-      return false;
-    }
-
-    try {
-      const lotesToRemove = new Set<string>((record.lotesCreados || []).map((l) => l.loteId));
-      const lotesModificadosMap = new Map<string, number>();
-      (record.lotesModificados || []).forEach((lm) => {
-        lotesModificadosMap.set(lm.loteId, lm.cantidadAgregada);
-      });
-
-      const newProdsCreated = new Set<string>(record.productosCreados || []);
-      const movsToRemove = new Set<string>(record.movimientosCreados || []);
-
-      const currentProductsList = JSON.parse(JSON.stringify(products)) as Producto[];
-      const productsToSave: Producto[] = [];
-      const productsToDelete: string[] = [];
-
-      // If we have a snapshot and it was the latest action, we can cross-reference safely
-      const affectedCodes = new Set([
-        ...(record.productosCreados || []),
-        ...(record.lotesCreados || []).map((l) => l.productoCodigo),
-        ...(record.lotesModificados || []).map((l) => l.productoCodigo)
-      ]);
-
-      for (const code of affectedCodes) {
-        const prod = currentProductsList.find((p) => p.codigo === code);
-        if (!prod) continue;
-
-        // 1. Remove freshly created lots from this carga
-        let remainingLotes = (prod.lotes || []).filter((l) => !lotesToRemove.has(l.id));
-
-        // 2. Decrement quantity from modified lots
-        remainingLotes = remainingLotes.map((l) => {
-          if (lotesModificadosMap.has(l.id)) {
-            const addedQty = lotesModificadosMap.get(l.id) || 0;
-            const newQty = Math.max(0, (Number(l.cantidad) || 0) - addedQty);
-            const newQtyF = l.cantidadF !== undefined ? Math.max(0, (Number(l.cantidadF) || 0) - addedQty) : newQty;
-            return {
-              ...l,
-              cantidad: newQty,
-              cantidadF: newQtyF
-            };
-          }
-          return l;
-        });
-
-        // If product was newly created during this import and now has no remaining lots
-        if (newProdsCreated.has(code) && remainingLotes.length === 0) {
-          productsToDelete.push(code);
-        } else {
-          productsToSave.push({
-            ...prod,
-            lotes: remainingLotes,
-            updatedAt: Date.now()
-          });
-        }
-      }
-
-      const updatedRecord: CargaMasivaRecord = {
-        ...record,
-        revertida: true,
-        fechaReversion: new Date().toISOString(),
-        usuarioReversion: currentUser ? `${currentUser.nombre} (${currentUser.usuario})` : "Administrador"
-      };
-
-      if (!isLocalFileMode) {
-        const batch = writeBatch(db);
-
-        for (const code of productsToDelete) {
-          batch.delete(doc(db, "productos", code.replace(/\//g, "_")));
-        }
-
-        for (const prod of productsToSave) {
-          batch.set(doc(db, "productos", prod.codigo.replace(/\//g, "_")), prod);
-        }
-
-        for (const movId of movsToRemove) {
-          batch.delete(doc(db, "movimientos", movId));
-        }
-
-        batch.set(doc(db, "cargas_masivas", record.id), updatedRecord);
-
-        await batch.commit();
-      } else {
-        const deleteSet = new Set(productsToDelete);
-        const saveMap = new Map(productsToSave.map((p) => [p.codigo, p]));
-
-        const offlineProds = currentProductsList
-          .filter((p) => !deleteSet.has(p.codigo))
-          .map((p) => saveMap.get(p.codigo) || p);
-
-        localStorage.setItem("offline_productos", JSON.stringify(offlineProds));
-
-        let offlineMovs = JSON.parse(localStorage.getItem("offline_movimientos") || "[]");
-        offlineMovs = offlineMovs.filter((m: any) => !movsToRemove.has(m.id));
-        localStorage.setItem("offline_movimientos", JSON.stringify(offlineMovs));
-
-        let offlineCMs = JSON.parse(localStorage.getItem("offline_cargas_masivas") || "[]");
-        offlineCMs = offlineCMs.map((c: any) => (c.id === record.id ? updatedRecord : c));
-        localStorage.setItem("offline_cargas_masivas", JSON.stringify(offlineCMs));
-
-        window.dispatchEvent(new Event("offline_productos_update"));
-        window.dispatchEvent(new Event("offline_movimientos_update"));
-        window.dispatchEvent(new Event("offline_cargas_masivas_update"));
-      }
-
-      const deleteSet = new Set(productsToDelete);
-      const saveMap = new Map(productsToSave.map((p) => [p.codigo, p]));
-
-      const updatedStateList = currentProductsList
-        .filter((p) => !deleteSet.has(p.codigo))
-        .map((p) => saveMap.get(p.codigo) || p);
-
-      setProducts(updatedStateList);
-
-      setCargasMasivasList((prev) =>
-        prev.map((c) => (c.id === record.id ? updatedRecord : c))
-      );
-
-      const userStr = currentUser ? `${currentUser.nombre} (${currentUser.usuario})` : "Administrador";
-      logSystemEvent(
-        `↺ **Reversión de Carga Masiva**: El usuario ${userStr} revirtió la carga del ${record.fecha}. Se eliminaron ${productsToDelete.length} productos y ${record.lotesCreados.length} lotes.`
-      );
-
-      showToast("Carga masiva revertida exitosamente.");
-      playSound("positive");
-      return true;
-    } catch (err) {
-      console.error("Error reverting carga masiva:", err);
-      showToast("Error al revertir la carga masiva.");
-      playSound("negative");
-      return false;
-    }
-  };
-
   useEffect(() => {
     function handleClickOutside(event: MouseEvent) {
       if (exportMenuRef.current && !exportMenuRef.current.contains(event.target as Node)) {
@@ -661,7 +252,11 @@ export default function App() {
   // Keep currentUser state in sync with users list from DB
   useEffect(() => {
     if (currentUser && users.length > 0) {
-      const dbUser = users.find((u) => u.id === currentUser.id);
+      const dbUser = users.find(
+        (u) =>
+          u.id === currentUser.id &&
+          (u.farmaciaId || DEFAULT_FARMACIA_ID) === (currentUser.farmaciaId || activeFarmaciaId)
+      );
       if (dbUser) {
         const dbModulos = dbUser.modulos || [];
         const currentModulos = currentUser.modulos || [];
@@ -678,25 +273,50 @@ export default function App() {
         }
       }
     }
-  }, [users, currentUser]);
+  }, [users, currentUser, activeFarmaciaId]);
 
-  // Catalog Auto-Migration
+  // Listen to Firebase Auth session state
   useEffect(() => {
+    const isLocalFileMode = typeof window !== "undefined" && window.location.protocol === "file:";
+    if (isLocalFileMode) {
+      setAuthReady(true);
+      setIsFirebaseAuthed(true);
+      return;
+    }
+
+    const unsubAuth = onAuthStateChanged(auth, (fbUser) => {
+      if (fbUser) {
+        setIsFirebaseAuthed(true);
+      } else {
+        setIsFirebaseAuthed(false);
+        // Clear any stale local session that isn't backed by Firebase Auth
+        setCurrentUser(null);
+        localStorage.removeItem("current_user");
+        setLoading(false);
+      }
+      setAuthReady(true);
+    });
+
+    return () => unsubAuth();
+  }, []);
+
+  // Catalog Auto-Migration (only after authenticated in principal tenant)
+  useEffect(() => {
+    const isLocalFileMode = typeof window !== "undefined" && window.location.protocol === "file:";
+    if (isLocalFileMode || !authReady || !isFirebaseAuthed || !currentUser) return;
+
     const runCatalogMigration = async () => {
       try {
-        const migrationRef = doc(db, "configuracion", "migracion_catalogos_v2");
+        const migrationRef = tenantDoc("configuracion", "migracion_catalogos_v2", activeFarmaciaId);
         const migrationSnap = await getDoc(migrationRef);
         
         // If already run, do nothing
         if (migrationSnap.exists() && migrationSnap.data()?.completada) {
-          console.log("Migration already completed in a previous session.");
           return;
         }
 
-        console.log("Starting catalog migration to 'Medicamentos e Insumos'...");
-
         // 1. Ensure the default catalog "Medicamentos e Insumos" exists and has ID "default-cat"
-        const defaultCatRef = doc(db, "catalogos", "default-cat");
+        const defaultCatRef = tenantDoc("catalogos", "default-cat", activeFarmaciaId);
         await setDoc(defaultCatRef, {
           id: "default-cat",
           nombre: "Medicamentos e Insumos",
@@ -705,31 +325,32 @@ export default function App() {
           createdAt: Date.now()
         }, { merge: true });
 
-        // Ensure "laboratorio" exists
-        const labRef = doc(db, "catalogos", "laboratorio");
-        await setDoc(labRef, {
-          id: "laboratorio",
-          nombre: "Laboratorio",
-          descripcion: "Catálogo de Laboratorio",
-          activo: true,
-          createdAt: Date.now()
-        }, { merge: true });
+        if (activeFarmaciaId === DEFAULT_FARMACIA_ID) {
+          // Ensure "laboratorio" exists in principal hospital
+          const labRef = tenantDoc("catalogos", "laboratorio", activeFarmaciaId);
+          await setDoc(labRef, {
+            id: "laboratorio",
+            nombre: "Laboratorio",
+            descripcion: "Catálogo de Laboratorio",
+            activo: true,
+            createdAt: Date.now()
+          }, { merge: true });
 
-        // Ensure "odontologia" exists
-        const odRef = doc(db, "catalogos", "odontologia");
-        await setDoc(odRef, {
-          id: "odontologia",
-          nombre: "Odontología",
-          descripcion: "Catálogo de Odontología",
-          activo: true,
-          createdAt: Date.now()
-        }, { merge: true });
+          // Ensure "odontologia" exists in principal hospital
+          const odRef = tenantDoc("catalogos", "odontologia", activeFarmaciaId);
+          await setDoc(odRef, {
+            id: "odontologia",
+            nombre: "Odontología",
+            descripcion: "Catálogo de Odontología",
+            activo: true,
+            createdAt: Date.now()
+          }, { merge: true });
+        }
 
         // Helper to update collection documents that are missing catalogId
         const migrateCollection = async (collectionName: string) => {
-          const colRef = collection(db, collectionName);
+          const colRef = tenantCollection(collectionName, activeFarmaciaId);
           const snapshot = await getDocs(colRef);
-          let count = 0;
           
           let batch = writeBatch(db);
           let batchCount = 0;
@@ -737,10 +358,9 @@ export default function App() {
           for (const docSnap of snapshot.docs) {
             const data = docSnap.data();
             if (!data.catalogId) {
-              const docRef = doc(db, collectionName, docSnap.id);
+              const docRef = tenantDoc(collectionName, docSnap.id, activeFarmaciaId);
               batch.update(docRef, { catalogId: "default-cat" });
               batchCount++;
-              count++;
 
               if (batchCount === 400) {
                 await batch.commit();
@@ -753,31 +373,25 @@ export default function App() {
           if (batchCount > 0) {
             await batch.commit();
           }
-
-          console.log(`Migrated ${count} documents in ${collectionName}`);
         };
 
-        // Migrate all relevant collections
         await migrateCollection("productos");
         await migrateCollection("movimientos");
         await migrateCollection("solicitudes");
         await migrateCollection("historial");
 
-        // Mark migration as completed
         await setDoc(migrationRef, {
           completada: true,
           timestamp: Date.now(),
           migratedCollections: ["productos", "movimientos", "solicitudes", "historial"]
         });
-
-        console.log("Catalog migration completed successfully!");
       } catch (err) {
         console.error("Error running catalog migration:", err);
       }
     };
 
     runCatalogMigration();
-  }, []);
+  }, [authReady, isFirebaseAuthed, currentUser, activeFarmaciaId]);
 
   // Real-time synchronization
   useEffect(() => {
@@ -800,11 +414,6 @@ export default function App() {
         };
         setColores(defaultColores);
         localStorage.setItem("offline_colores", JSON.stringify(defaultColores));
-      }
-
-      const storedInstitucion = localStorage.getItem("offline_institucion") || localStorage.getItem("institucion_config");
-      if (storedInstitucion) {
-        try { setInstitucionConfig(JSON.parse(storedInstitucion)); } catch (e) {}
       }
 
       const storedPeriod = localStorage.getItem("offline_periodoActual");
@@ -933,93 +542,115 @@ export default function App() {
         }
       };
 
-      const handleOfflineCMsUpdate = () => {
-        const stored = localStorage.getItem("offline_cargas_masivas");
-        if (stored) {
-          try { setCargasMasivasList(JSON.parse(stored)); } catch (e) {}
-        }
-      };
-
-      // Initial load offline cargas_masivas
-      const storedCM = localStorage.getItem("offline_cargas_masivas");
-      if (storedCM) {
-        try { setCargasMasivasList(JSON.parse(storedCM)); } catch (e) {}
+      const storedConceptos = localStorage.getItem("offline_conceptos_venta");
+      if (storedConceptos) {
+        try {
+          const parsed = JSON.parse(storedConceptos);
+          if (Array.isArray(parsed) && parsed.length > 0) {
+            setConceptos(parsed);
+          }
+        } catch (e) {}
+      } else {
+        setConceptos(DEFAULT_CONCEPTOS_FACTURA);
+        localStorage.setItem("offline_conceptos_venta", JSON.stringify(DEFAULT_CONCEPTOS_FACTURA));
       }
 
-      const handleOfflineInstUpdate = () => {
-        const stored = localStorage.getItem("offline_institucion") || localStorage.getItem("institucion_config");
+      const handleOfflineConceptosUpdate = () => {
+        const stored = localStorage.getItem("offline_conceptos_venta");
         if (stored) {
-          try { setInstitucionConfig(JSON.parse(stored)); } catch (e) {}
+          try { setConceptos(JSON.parse(stored)); } catch (e) {}
         }
       };
 
       window.addEventListener("offline_productos_update", handleOfflineProductsUpdate);
       window.addEventListener("offline_departamentos_update", handleOfflineDeptsUpdate);
       window.addEventListener("offline_catalogos_update", handleOfflineCatsUpdate);
-      window.addEventListener("offline_cargas_masivas_update", handleOfflineCMsUpdate);
-      window.addEventListener("offline_institucion_update", handleOfflineInstUpdate);
+      window.addEventListener("offline_conceptos_update", handleOfflineConceptosUpdate);
 
       setLoading(false);
       return () => {
         window.removeEventListener("offline_productos_update", handleOfflineProductsUpdate);
         window.removeEventListener("offline_departamentos_update", handleOfflineDeptsUpdate);
         window.removeEventListener("offline_catalogos_update", handleOfflineCatsUpdate);
-        window.removeEventListener("offline_cargas_masivas_update", handleOfflineCMsUpdate);
-        window.removeEventListener("offline_institucion_update", handleOfflineInstUpdate);
+        window.removeEventListener("offline_conceptos_update", handleOfflineConceptosUpdate);
       };
+    }
+
+    if (!authReady) {
+      setLoading(true);
+      return;
+    }
+
+    // Only subscribe to Firestore collections after Firebase Authentication is active
+    if (!isFirebaseAuthed || !currentUser) {
+      setLoading(false);
+      return;
     }
 
     setLoading(true);
 
     // 1. Sync configuration (Colores & Periodo)
     const unsubColores = onSnapshot(
-      doc(db, "configuracion", "colores"),
+      tenantDoc("configuracion", "colores", activeFarmaciaId),
       (docSnap) => {
         if (docSnap.exists() && docSnap.data().colores) {
           setColores(docSnap.data().colores);
         }
       },
-      (err) => console.warn("Colores sync fallback (offline/reconnecting):", err?.message || err)
+      (err) => console.error("Error listening to colores:", err)
     );
 
     const unsubPeriodo = onSnapshot(
-      doc(db, "configuracion", "periodo"),
+      tenantDoc("configuracion", "periodo", activeFarmaciaId),
       (docSnap) => {
         if (docSnap.exists() && docSnap.data().periodoActual) {
           setActivePeriod(docSnap.data().periodoActual);
         }
       },
-      (err) => console.warn("Periodo sync fallback (offline/reconnecting):", err?.message || err)
+      (err) => console.error("Error listening to periodo:", err)
     );
 
     const unsubInstitucion = onSnapshot(
-      doc(db, "configuracion", "institucion"),
+      tenantDoc("configuracion", "institucion", activeFarmaciaId),
       (docSnap) => {
         if (docSnap.exists()) {
-          const instData = docSnap.data() as InstitucionConfig;
-          setInstitucionConfig(instData);
-          localStorage.setItem("institucion_config", JSON.stringify(instData));
+          const data = docSnap.data();
+          localStorage.setItem("active_institucion_info", JSON.stringify(data));
+          if (data.nombre) {
+            const nextMeta = {
+              nombre: "Control de Stock",
+              subtitulo: data.nombre
+            };
+            setFarmaciaMeta(nextMeta);
+            localStorage.setItem("active_farmacia_meta", JSON.stringify(nextMeta));
+          }
         }
       },
-      (err) => console.warn("Institucion sync fallback (offline/reconnecting):", err?.message || err)
+      (err) => console.error("Error listening to institucion:", err)
     );
 
     // 2. Sync Products
     const unsubProducts = onSnapshot(
-      collection(db, "productos"),
+      tenantCollection("productos", activeFarmaciaId),
       async (snapshot) => {
         if (snapshot.empty) {
-          // Seeding database if empty
-          try {
-            const batch = writeBatch(db);
-            const colRef = collection(db, "productos");
-            DEFAULT_PRODUCTS.forEach((p) => {
-              const docRef = doc(colRef, p.codigo.replace(/\//g, "_"));
-              batch.set(docRef, { ...p, updatedAt: Date.now() });
-            });
-            await batch.commit();
-          } catch (err) {
-            console.error("Error seeding products database:", err);
+          // Only seed DEFAULT_PRODUCTS for the original principal hospital
+          if (activeFarmaciaId === DEFAULT_FARMACIA_ID) {
+            try {
+              const batch = writeBatch(db);
+              const colRef = tenantCollection("productos", activeFarmaciaId);
+              DEFAULT_PRODUCTS.forEach((p) => {
+                const docRef = doc(colRef, p.codigo.replace(/\//g, "_"));
+                batch.set(docRef, { ...p, updatedAt: Date.now() });
+              });
+              await batch.commit();
+            } catch (err) {
+              console.error("Error seeding products database:", err);
+              setLoading(false);
+            }
+          } else {
+            setProducts([]);
+            setLoading(false);
           }
         } else {
           const list: Producto[] = [];
@@ -1031,14 +662,14 @@ export default function App() {
         }
       },
       (err) => {
-        console.warn("Products sync fallback (offline/reconnecting):", err?.message || err);
+        console.error("Error listening to productos:", err);
         setLoading(false);
       }
     );
 
     // 3. Sync Blocks
     const unsubBlocks = onSnapshot(
-      collection(db, "bloques"),
+      tenantCollection("bloques", activeFarmaciaId),
       async (snapshot) => {
         const dbBlocks: Record<string, any> = {};
         snapshot.forEach((d) => {
@@ -1056,7 +687,7 @@ export default function App() {
         if (missing.length > 0) {
           try {
             const batch = writeBatch(db);
-            const colRef = collection(db, "bloques");
+            const colRef = tenantCollection("bloques", activeFarmaciaId);
             missing.forEach((id) => {
               batch.set(doc(colRef, id), { id, items: [], updatedAt: Date.now() });
             });
@@ -1067,26 +698,23 @@ export default function App() {
         }
         setBlocks(fullBlocks);
       },
-      (err) => console.warn("Blocks sync fallback (offline/reconnecting):", err?.message || err)
+      (err) => console.error("Error listening to bloques:", err)
     );
 
-    // 4. Sync Users
+    // 4. Sync Users & background Firebase Auth provisioning
     const unsubUsers = onSnapshot(
-      collection(db, "usuarios"),
+      tenantCollection("usuarios", activeFarmaciaId),
       async (snapshot) => {
         const list: Usuario[] = [];
         const batchUpdates: Promise<void>[] = [];
 
         snapshot.forEach((d) => {
           const u = d.data() as Usuario;
-          if (u.usuario?.toLowerCase() === "rossy" || u.nombre?.toLowerCase().includes("rossy")) {
-            if (u.departamento === "Odontología" || !u.departamento) {
-              u.departamento = "Laboratorio";
-              batchUpdates.push(setDoc(doc(db, "usuarios", d.id), { departamento: "Laboratorio" }, { merge: true }));
-            }
-          } else if (!u.departamento) {
+          if (!u.departamento) {
             u.departamento = "Almacén y Suministro";
-            batchUpdates.push(setDoc(doc(db, "usuarios", d.id), { departamento: "Almacén y Suministro" }, { merge: true }));
+            batchUpdates.push(
+              setDoc(tenantDoc("usuarios", d.id, activeFarmaciaId), { departamento: "Almacén y Suministro" }, { merge: true })
+            );
           }
           list.push(u);
         });
@@ -1095,62 +723,78 @@ export default function App() {
           Promise.all(batchUpdates).catch((err) => console.error("Error updating existing users department:", err));
         }
 
-        // Auto-create default users if empty
-        const defaultUsers = [
-          { nombre: "Anyer", usuario: "Anyer", pass: "303005", rol: "Administrador" as const },
-          { nombre: "Francisco", usuario: "Francisco", pass: "14147", rol: "Administrador" as const },
-          { nombre: "Ivelyn", usuario: "Ivelyn", pass: "6606", rol: "Administrador" as const }
-        ];
+        // Auto-create default users ONLY in the principal hospital
+        if (activeFarmaciaId === DEFAULT_FARMACIA_ID) {
+          const defaultUsers = [
+            { nombre: "Anyer", usuario: "Anyer", pass: "303005", rol: "Administrador" as const },
+            { nombre: "Francisco", usuario: "Francisco", pass: "14147", rol: "Administrador" as const },
+            { nombre: "Ivelyn", usuario: "Ivelyn", pass: "6606", rol: "Administrador" as const }
+          ];
 
-        let seeded = false;
-        for (const def of defaultUsers) {
-          if (!list.some((u) => u.usuario.toLowerCase() === def.usuario.toLowerCase())) {
-            try {
-              const hash = await hashPassword(def.pass);
-              const newUser: Usuario = {
-                id: `user-${def.usuario.toLowerCase()}`,
-                nombre: def.nombre,
-                usuario: def.usuario,
-                contrasenaHash: hash,
-                rol: def.rol,
-                estado: "Activo",
-                updatedAt: Date.now(),
-                departamento: "Almacén y Suministro"
-              };
-              await setDoc(doc(db, "usuarios", newUser.id), newUser);
-              list.push(newUser);
-              seeded = true;
-            } catch (err) {
-              console.error("Error seeding default users:", err);
+          for (const def of defaultUsers) {
+            if (!list.some((u) => u.usuario.toLowerCase() === def.usuario.toLowerCase())) {
+              try {
+                const hash = await hashPassword(def.pass);
+                const newUser: Usuario = {
+                  id: `user-${def.usuario.toLowerCase()}`,
+                  nombre: def.nombre,
+                  usuario: def.usuario,
+                  contrasenaHash: hash,
+                  rol: def.rol,
+                  estado: "Activo",
+                  updatedAt: Date.now(),
+                  departamento: "Almacén y Suministro",
+                  farmaciaId: activeFarmaciaId
+                };
+                await setDoc(tenantDoc("usuarios", newUser.id, activeFarmaciaId), newUser);
+                list.push(newUser);
+              } catch (err) {
+                console.error("Error seeding default users:", err);
+              }
             }
           }
         }
 
+        // Ensure all active users in this pharmacy are provisioned in Firebase Auth in the background
+        list.forEach((u) => {
+          if (u.usuario && u.contrasenaHash && u.estado === "Activo") {
+            provisionUserInFirebaseAuth(u.usuario, u.contrasenaHash, activeFarmaciaId).catch(() => {});
+          }
+        });
+
         setUsers(list);
       },
-      (err) => console.warn("Users sync fallback (offline/reconnecting):", err?.message || err)
+      (err) => console.error("Error listening to usuarios:", err)
     );
 
     // 5. Sync Departments
     const unsubDepts = onSnapshot(
-      collection(db, "departamentos"),
+      tenantCollection("departamentos", activeFarmaciaId),
       async (snapshot) => {
         if (snapshot.empty) {
           try {
             const batch = writeBatch(db);
-            const colRef = collection(db, "departamentos");
-            const defaultDepts = [
-              "Almacén y Suministro",
-              "Odontología",
-              "Laboratorio",
-              "Quirófano",
-              "Urgencias",
-              "Pediatría",
-              "Gineco-Obstetricia",
-              "Cirugía General",
-              "Consulta Externa",
-              "Farmacia Clínica"
-            ];
+            const colRef = tenantCollection("departamentos", activeFarmaciaId);
+            const defaultDepts =
+              activeFarmaciaId === DEFAULT_FARMACIA_ID
+                ? [
+                    "Almacén y Suministro",
+                    "Odontología",
+                    "Laboratorio",
+                    "Quirófano",
+                    "Urgencias",
+                    "Pediatría",
+                    "Gineco-Obstetricia",
+                    "Cirugía General",
+                    "Consulta Externa",
+                    "Farmacia Clínica"
+                  ]
+                : [
+                    "Almacén y Suministro",
+                    "Despacho / Mostrador",
+                    "Farmacia Clínica",
+                    "Administración"
+                  ];
             defaultDepts.forEach((name) => {
               const id = `dept-${name.toLowerCase().replace(/[^a-z0-9]/g, "-")}`;
               batch.set(doc(colRef, id), {
@@ -1171,12 +815,12 @@ export default function App() {
           setDepartamentos(list);
         }
       },
-      (err) => console.warn("Departments sync fallback (offline/reconnecting):", err?.message || err)
+      (err) => console.error("Error listening to departamentos:", err)
     );
 
     // 6. Sync Catalogos
     const unsubCatalogos = onSnapshot(
-      collection(db, "catalogos"),
+      tenantCollection("catalogos", activeFarmaciaId),
       (snapshot) => {
         const list: any[] = [];
         snapshot.forEach((d) => {
@@ -1204,7 +848,7 @@ export default function App() {
           }
         } else {
           // Seed default catalog if empty
-          const defaultCatRef = doc(db, "catalogos", "default-cat");
+          const defaultCatRef = tenantDoc("catalogos", "default-cat", activeFarmaciaId);
           setDoc(defaultCatRef, {
             id: "default-cat",
             nombre: "Medicamentos e Insumos",
@@ -1214,21 +858,25 @@ export default function App() {
           }).catch(err => console.error("Error seeding default catalog:", err));
         }
       },
-      (err) => console.warn("Catalogos sync fallback (offline/reconnecting):", err?.message || err)
+      (err) => console.error("Error listening to catalogos:", err)
     );
 
-    // 7. Sync Cargas Masivas
-    const unsubCargasMasivas = onSnapshot(
-      collection(db, "cargas_masivas"),
-      (snapshot) => {
-        const list: CargaMasivaRecord[] = [];
-        snapshot.forEach((d) => {
-          list.push({ id: d.id, ...d.data() } as CargaMasivaRecord);
-        });
-        list.sort((a, b) => b.timestamp - a.timestamp);
-        setCargasMasivasList(list);
+    // 7. Sync Conceptos de Facturación (Módulo de Venta)
+    const unsubConceptos = onSnapshot(
+      tenantDoc("configuracion", "conceptos_venta", activeFarmaciaId),
+      (docSnap) => {
+        if (docSnap.exists() && Array.isArray(docSnap.data().items) && docSnap.data().items.length > 0) {
+          setConceptos(docSnap.data().items);
+        } else {
+          setConceptos(DEFAULT_CONCEPTOS_FACTURA);
+          setDoc(
+            tenantDoc("configuracion", "conceptos_venta", activeFarmaciaId),
+            { items: DEFAULT_CONCEPTOS_FACTURA, updatedAt: Date.now() },
+            { merge: true }
+          ).catch(() => {});
+        }
       },
-      (err) => console.warn("Cargas masivas sync fallback (offline/reconnecting):", err?.message || err)
+      (err) => console.error("Error listening to conceptos_venta:", err)
     );
 
     return () => {
@@ -1240,9 +888,9 @@ export default function App() {
       unsubUsers();
       unsubDepts();
       unsubCatalogos();
-      unsubCargasMasivas();
+      unsubConceptos();
     };
-  }, [activePeriod]);
+  }, [activePeriod, authReady, isFirebaseAuthed, currentUser?.id, activeFarmaciaId]);
 
   // Auto-saving observers for offline mode
   useEffect(() => {
@@ -1298,14 +946,6 @@ export default function App() {
       localStorage.setItem("offline_periodoActual", activePeriod);
     }
   }, [activePeriod]);
-
-  useEffect(() => {
-    const isLocalFileMode = typeof window !== "undefined" && window.location.protocol === "file:";
-    if (isLocalFileMode && institucionConfig) {
-      localStorage.setItem("offline_institucion", JSON.stringify(institucionConfig));
-      localStorage.setItem("institucion_config", JSON.stringify(institucionConfig));
-    }
-  }, [institucionConfig]);
 
   // Synchronize active catalog when currentUser or catalogos changes
   useEffect(() => {
@@ -1388,19 +1028,17 @@ export default function App() {
     if (currentUser?.rol === "Administrador" || currentUser?.departamento === "Almacén y Suministro") {
       return activeCatalogos;
     }
+    if (currentUser?.departamento === "Laboratorio") {
+      return activeCatalogos.filter((c) => c.id === "laboratorio");
+    }
+    if (currentUser?.departamento === "Odontología") {
+      return activeCatalogos.filter((c) => c.id === "odontologia");
+    }
     const userCats = currentUser?.catalogos || [];
     if (userCats.length > 0) {
       return activeCatalogos.filter((c) => userCats.includes(c.id));
     }
-    const defaultCatalogMap: Record<string, string> = {
-      Laboratorio: "laboratorio",
-      Odontología: "odontologia"
-    };
-    const fallbackCatalogId = defaultCatalogMap[currentUser?.departamento || ""];
-    if (fallbackCatalogId) {
-      return activeCatalogos.filter((c) => c.id === fallbackCatalogId);
-    }
-    return [];
+    return activeCatalogos;
   };
 
   // Filter & Search Logic
@@ -1497,7 +1135,7 @@ export default function App() {
       if (isLocalFileMode) {
         setProducts(prev => prev.map(p => p.codigo === productCode ? updated : p));
       } else {
-        await updateDoc(doc(db, "productos", productCode.replace(/\//g, "_")), updated);
+        await updateDoc(tenantDoc("productos", productCode.replace(/\//g, "_"), activeFarmaciaId), updated);
       }
       playSound(finalVerificado ? "positive" : "negative");
       showToast(finalVerificado ? "Marcado como verificado" : "Marca de verificado removida");
@@ -1511,7 +1149,7 @@ export default function App() {
   const saveProductDoc = async (prod: Producto) => {
     const isLocalFileMode = typeof window !== "undefined" && window.location.protocol === "file:";
     try {
-      const ref = doc(db, "productos", prod.codigo.replace(/\//g, "_"));
+      const ref = tenantDoc("productos", prod.codigo.replace(/\//g, "_"), activeFarmaciaId);
       const allAdjusted = prod.lotes.length > 0 && prod.lotes.every((l) => !!l.articuloAjustado);
       const finalVerified = allAdjusted ? false : (prod.verificado || false);
 
@@ -1561,7 +1199,7 @@ export default function App() {
 
         logSystemEvent(`📦 **Movimiento de Inventario**: Se registró una **${mov.tipoMovimiento}** del producto **${mov.productoNombre}** (Lote: ${mov.lote}, Cantidad: ${mov.cantidad}) por el usuario ${mov.usuario}.`);
       } else {
-        await setDoc(doc(db, "movimientos", id), movData);
+        await setDoc(tenantDoc("movimientos", id, activeFarmaciaId), movData);
         logSystemEvent(`📦 **Movimiento de Inventario**: Se registró una **${mov.tipoMovimiento}** del producto **${mov.productoNombre}** (Lote: ${mov.lote}, Cantidad: ${mov.cantidad}) por el usuario ${mov.usuario}.`);
       }
     } catch (err) {
@@ -1613,12 +1251,14 @@ export default function App() {
         estado: data.estado,
         updatedAt: Date.now(),
         departamento: data.departamento,
+        farmaciaId: activeFarmaciaId,
         modulos: data.modulos || (data.rol === "Administrador" ? ["inventory", "carga_masiva", "solicitudes", "historial", "usuarios", "configuracion"] : ["solicitudes", "historial"])
       };
       if (isLocalFileMode) {
         setUsers(prev => [...prev, newUser]);
       } else {
-        await setDoc(doc(db, "usuarios", newUser.id), newUser);
+        await provisionUserInFirebaseAuth(data.usuario, hash, activeFarmaciaId);
+        await setDoc(tenantDoc("usuarios", newUser.id, activeFarmaciaId), newUser);
       }
       playSound("positive");
       showToast(`Usuario "${data.usuario}" registrado con éxito.`);
@@ -1634,7 +1274,7 @@ export default function App() {
       if (isLocalFileMode) {
         setUsers(prev => prev.map(u => u.id === id ? { ...u, ...data, updatedAt: Date.now() } : u));
       } else {
-        await updateDoc(doc(db, "usuarios", id), { ...data, updatedAt: Date.now() });
+        await updateDoc(tenantDoc("usuarios", id, activeFarmaciaId), { ...data, updatedAt: Date.now() });
       }
       playSound("positive");
       showToast("Usuario actualizado con éxito.");
@@ -1651,7 +1291,11 @@ export default function App() {
       if (isLocalFileMode) {
         setUsers(prev => prev.map(u => u.id === id ? { ...u, contrasenaHash: hash, updatedAt: Date.now() } : u));
       } else {
-        await updateDoc(doc(db, "usuarios", id), { contrasenaHash: hash, updatedAt: Date.now() });
+        const targetUser = users.find((u) => u.id === id);
+        if (targetUser) {
+          await provisionUserInFirebaseAuth(targetUser.usuario, hash, activeFarmaciaId);
+        }
+        await updateDoc(tenantDoc("usuarios", id, activeFarmaciaId), { contrasenaHash: hash, updatedAt: Date.now() });
       }
       playSound("positive");
       showToast("Contraseña actualizada con éxito.");
@@ -1667,7 +1311,7 @@ export default function App() {
       if (isLocalFileMode) {
         setUsers(prev => prev.filter(u => u.id !== id));
       } else {
-        await deleteDoc(doc(db, "usuarios", id));
+        await deleteDoc(tenantDoc("usuarios", id, activeFarmaciaId));
       }
       playSound("negative");
       showToast("Usuario eliminado del sistema.");
@@ -1706,7 +1350,7 @@ export default function App() {
     if (confirm(`¿Eliminar por completo "${prod.nombre}" y todos sus lotes registrados?`)) {
       try {
         const batch = writeBatch(db);
-        batch.delete(doc(db, "productos", selectedProductCode.replace(/\//g, "_")));
+        batch.delete(tenantDoc("productos", selectedProductCode.replace(/\//g, "_"), activeFarmaciaId));
         await batch.commit();
 
         setSelectedProductCode(null);
@@ -1735,43 +1379,14 @@ export default function App() {
 
   // Lot field editor inside Detail Modal
   const handleEditLotField = (lotId: string, field: keyof Lote, value: any) => {
-    let sanitizedValue = value;
-    if ((field === "numeroLote" || field === "loteFisico") && typeof sanitizedValue === "string") {
-      sanitizedValue = sanitizedValue.toUpperCase();
-    }
     setEditLotes((prev) =>
       prev.map((l) => {
         if (l.id === lotId) {
-          const updated = { ...l, [field]: sanitizedValue };
-
-          // Requirement 3: When selecting "Ajustado", copy corresponding fields from FÍSICO to SISTEMA
-          if (field === "articuloAjustado" && sanitizedValue === true) {
-            if (l.cantidadF !== undefined && l.cantidadF !== null) {
-              updated.cantidad = Number(l.cantidadF);
-            }
-            if (l.fechaFisica && l.fechaFisica.trim() !== "") {
-              updated.fechaVencimiento = l.fechaFisica;
-            }
-            if (l.loteFisico && l.loteFisico.trim() !== "") {
-              updated.numeroLote = l.loteFisico.toUpperCase();
-            }
-          }
-
-          // If currently adjusted, keep system fields synced when editing physical fields
-          if (updated.articuloAjustado) {
-            if (field === "cantidadF") {
-              updated.cantidad = Number(sanitizedValue);
-            } else if (field === "fechaFisica") {
-              updated.fechaVencimiento = String(sanitizedValue);
-            } else if (field === "loteFisico") {
-              updated.numeroLote = String(sanitizedValue).toUpperCase();
-            }
-          }
-
+          const updated = { ...l, [field]: value };
           if (coincidenLotesMap[lotId]) {
-            if (field === "cantidad") updated.cantidadF = Number(sanitizedValue);
-            else if (field === "fechaVencimiento") updated.fechaFisica = String(sanitizedValue);
-            else if (field === "numeroLote") updated.loteFisico = String(sanitizedValue);
+            if (field === "cantidad") updated.cantidadF = Number(value);
+            else if (field === "fechaVencimiento") updated.fechaFisica = String(value);
+            else if (field === "numeroLote") updated.loteFisico = String(value);
           }
           return updated;
         }
@@ -1934,190 +1549,130 @@ export default function App() {
     }
   };
 
-  const generateNextCode = (currentCatalogId: string, customPrefix?: string, customList?: Producto[]): string => {
-    const listToUse = customList || products;
-    const catalogProducts = listToUse.filter(p => (p.catalogId || "default-cat") === currentCatalogId);
+  const generateNextCode = (currentCatalogId: string, customPrefix?: string): string => {
+    const catalogProducts = products.filter(p => (p.catalogId || "default-cat") === currentCatalogId);
+    let prefix = customPrefix || "B";
 
-    if (customPrefix) {
-      const prefix = customPrefix.toUpperCase();
-      const numbers: number[] = [];
-      listToUse.forEach(p => {
-        const regex = new RegExp(`^${prefix.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&')}[^0-9]*(\\d+)`, "i");
-        const match = p.codigo.trim().match(regex);
-        if (match) numbers.push(parseInt(match[1], 10));
+    if (!customPrefix && catalogProducts.length > 0) {
+      const prefixCount: Record<string, number> = {};
+      catalogProducts.forEach(p => {
+        const match = p.codigo.match(/^([A-Z]+)/i);
+        if (match) {
+          const pref = match[1].toUpperCase();
+          prefixCount[pref] = (prefixCount[pref] || 0) + 1;
+        }
       });
-      const nextNum = numbers.length > 0 ? Math.max(...numbers) + 1 : 1;
-      let padLength = 3;
-      const samePrefix = listToUse.filter(p => p.codigo.trim().toUpperCase().startsWith(prefix));
-      if (samePrefix.length > 0) {
-        const digitMatch = samePrefix[0].codigo.match(/\d+/);
-        if (digitMatch && digitMatch[0].length >= 3) padLength = digitMatch[0].length;
+
+      let maxCount = 0;
+      let bestPrefix = "";
+      for (const pref in prefixCount) {
+        if (prefixCount[pref] > maxCount) {
+          maxCount = prefixCount[pref];
+          bestPrefix = pref;
+        }
       }
-      let finalCode = `${prefix}${String(nextNum).padStart(padLength, "0")}`;
-      let inc = 1;
-      while (listToUse.some(p => p.codigo.trim().toUpperCase() === finalCode.toUpperCase())) {
-        finalCode = `${prefix}${String(nextNum + inc).padStart(padLength, "0")}`;
-        inc++;
-      }
-      return finalCode;
-    }
-
-    if (catalogProducts.length === 0) {
-      return "P001";
-    }
-
-    // Analyze existing codes in current catalog
-    const prefixCount: Record<string, number> = {};
-    const numericCodes: number[] = [];
-
-    catalogProducts.forEach(p => {
-      const code = p.codigo.trim();
-      const matchWithPrefix = code.match(/^([A-Za-z\-_]+)(\d+)$/);
-      if (matchWithPrefix) {
-        const pref = matchWithPrefix[1].toUpperCase();
-        prefixCount[pref] = (prefixCount[pref] || 0) + 1;
-      } else if (/^\d+$/.test(code)) {
-        numericCodes.push(parseInt(code, 10));
-      }
-    });
-
-    // If most products use pure numeric codes (e.g. 1001, 1002)
-    if (numericCodes.length > 0 && numericCodes.length >= catalogProducts.length / 2) {
-      const maxNum = Math.max(...numericCodes);
-      const nextNum = maxNum + 1;
-      const sampleNumericStr = catalogProducts.find(p => /^\d+$/.test(p.codigo.trim()))?.codigo.trim() || "";
-      const padLength = sampleNumericStr.length || 3;
-      let finalCode = String(nextNum).padStart(padLength, "0");
-      let inc = 1;
-      while (listToUse.some(p => p.codigo === finalCode)) {
-        finalCode = String(nextNum + inc).padStart(padLength, "0");
-        inc++;
-      }
-      return finalCode;
-    }
-
-    // Find the most frequent letter prefix
-    let bestPrefix = "P";
-    let maxCount = 0;
-    for (const pref in prefixCount) {
-      if (prefixCount[pref] > maxCount) {
-        maxCount = prefixCount[pref];
-        bestPrefix = pref;
+      if (bestPrefix) {
+        prefix = bestPrefix;
       }
     }
 
     const numbers: number[] = [];
-    let sampleCode = "";
-    catalogProducts.forEach(p => {
-      const regex = new RegExp(`^${bestPrefix.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&')}[^0-9]*(\\d+)$`, "i");
-      const match = p.codigo.trim().match(regex);
+    products.forEach(p => {
+      const regex = new RegExp(`^${prefix}(\\d+)`, "i");
+      const match = p.codigo.match(regex);
       if (match) {
         numbers.push(parseInt(match[1], 10));
-        if (!sampleCode) sampleCode = p.codigo.trim();
       }
     });
 
-    const nextNum = numbers.length > 0 ? Math.max(...numbers) + 1 : 1;
-    let padLength = 3;
-    if (sampleCode) {
-      const digitMatch = sampleCode.match(/\d+/);
-      if (digitMatch && digitMatch[0].length >= 3) padLength = digitMatch[0].length;
+    let nextNum = 1;
+    if (numbers.length > 0) {
+      nextNum = Math.max(...numbers) + 1;
     }
 
-    let finalCode = `${bestPrefix}${String(nextNum).padStart(padLength, "0")}`;
-    let inc = 1;
-    while (listToUse.some(p => p.codigo.toUpperCase() === finalCode.toUpperCase())) {
-      finalCode = `${bestPrefix}${String(nextNum + inc).padStart(padLength, "0")}`;
-      inc++;
+    let padLength = 3;
+    const samePrefixProducts = products.filter(p => p.codigo.toUpperCase().startsWith(prefix));
+    if (samePrefixProducts.length > 0) {
+      const firstCode = samePrefixProducts[0].codigo;
+      const digitMatch = firstCode.match(/\d+/);
+      if (digitMatch) {
+        padLength = digitMatch[0].length;
+      }
+    }
+
+    const formattedNum = String(nextNum).padStart(padLength, "0");
+    const candidateCode = `${prefix}${formattedNum}`;
+
+    let finalCode = candidateCode;
+    let increment = 1;
+    while (products.some(p => p.codigo === finalCode)) {
+      finalCode = `${prefix}${String(nextNum + increment).padStart(padLength, "0")}`;
+      increment++;
     }
 
     return finalCode;
   };
 
-  // Staging: Add item to pending entry list
+  // Add a product to the temporary pending invoice list (Section 2 -> Section 3 of Image 3)
   const handleAddPendingEntryItem = () => {
     let code = newProdCode.trim().toUpperCase();
     const name = newProdName.trim();
     const desc = newProdDesc.trim();
-    const lotNum = newProdLotNum.trim().toUpperCase();
+    const lotNum = newProdLotNum.trim();
     const qty = Number(newProdLotQty);
     const qtyF = newProdLotQtyF.trim() !== "" ? Number(newProdLotQtyF) : qty;
     const exp = newProdLotExpDate;
-    const price = newProdLotPrice.trim() !== "" ? Number(newProdLotPrice) : 0;
+    const price = Number(newProdLotPrice);
 
-    if (!name) {
-      alert("Por favor ingrese el nombre del suministro / medicamento.");
-      return;
-    }
-    if (!lotNum) {
-      alert("Por favor ingrese el número de lote.");
-      return;
-    }
-    if (isNaN(qty) || qty <= 0) {
-      alert("Por favor ingrese una cantidad válida mayor a cero.");
-      return;
-    }
-    if (!exp) {
-      alert("Por favor seleccione la fecha de vencimiento del lote.");
-      return;
-    }
-    if (isNaN(price) || price < 0) {
-      alert("Por favor ingrese un costo de adquisición válido (puede ser 0).");
+    if (!name || !lotNum || isNaN(qty) || qty <= 0 || !exp || isNaN(price) || price < 0) {
+      alert("Completa los campos obligatorios del producto (*): Nombre, Lote, Cantidad (>0), Costo Unitario y Fecha de Vencimiento.");
       return;
     }
 
-    const cleanStr = (str?: string) =>
-      String(str || "")
-        .trim()
-        .toLowerCase()
-        .normalize("NFD")
-        .replace(/[\u0300-\u036f]/g, "")
-        .replace(/\s+/g, " ");
-
-    const getInitialPrefix = (nameStr: string): string => {
-      if (!nameStr) return "P";
-      const normalized = nameStr.normalize("NFD").replace(/[\u0300-\u036f]/g, "").trim();
-      const letterMatch = normalized.match(/[a-zA-Z]/);
-      if (letterMatch) {
-        return letterMatch[0].toUpperCase();
+    if (!code) {
+      // Check if an existing product matches by name or generate next code taking pending items into account
+      const existingByName = products.find(
+        (p) =>
+          (p.catalogId || "default-cat") === activeCatalogId &&
+          p.nombre.toLowerCase() === name.toLowerCase()
+      );
+      if (existingByName) {
+        code = existingByName.codigo;
+      } else {
+        let baseCode = generateNextCode(activeCatalogId);
+        let suffix = 1;
+        while (pendingEntryItems.some((it) => it.codigo === baseCode)) {
+          const match = baseCode.match(/^([A-Z]+)(\d+)$/i);
+          if (match) {
+            const pref = match[1];
+            const num = parseInt(match[2], 10) + suffix;
+            baseCode = `${pref}${String(num).padStart(match[2].length, "0")}`;
+          } else {
+            baseCode = `${baseCode}-${suffix}`;
+          }
+          suffix++;
+        }
+        code = baseCode;
       }
-      return "P";
-    };
-
-    // 1. Check if product already exists in active catalog (by code if typed, or by clean name)
-    const existingProd = products.find((p) => {
-      const catId = p.catalogId || "default-cat";
-      if (catId !== activeCatalogId) return false;
-      if (code && p.codigo.trim().toUpperCase() === code) return true;
-      return cleanStr(p.nombre) === cleanStr(name);
-    });
-
-    if (existingProd) {
-      code = existingProd.codigo;
-    } else if (!code) {
-      const initialPrefix = getInitialPrefix(name);
-      code = generateNextCode(activeCatalogId, initialPrefix, products);
     }
 
     const newItem = {
-      tempId: `pending-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
+      tempId: `pend-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
       codigo: code,
       nombre: name,
-      descripcion: desc || (existingProd ? existingProd.descripcion || "" : ""),
-      lotNum: lotNum,
-      lotLocation: newProdLotLocation.trim() || "Almacén",
-      qty: qty,
-      qtyF: qtyF,
-      expDate: exp,
-      physExpDate: newProdLotPhysExpDate || exp,
-      price: price
+      descripcion: desc,
+      numeroLote: lotNum,
+      loteFisico: newProdLotLocation.trim() || "Almacén",
+      cantidad: qty,
+      cantidadF: qtyF,
+      precio: price,
+      fechaVencimiento: exp,
+      fechaFisica: newProdLotPhysExpDate || exp
     };
 
     setPendingEntryItems((prev) => [...prev, newItem]);
-    playSound("action");
-    showToast(`"${name}" añadido a la lista temporal de la entrada.`);
 
-    // Reset product input fields, preserving invoice header
+    // Clear only product fields so user can keep adding more items under the same invoice
     setNewProdCode("");
     setNewProdName("");
     setNewProdDesc("");
@@ -2128,80 +1683,67 @@ export default function App() {
     setNewProdLotExpDate("");
     setNewProdLotPhysExpDate("");
     setNewProdLotPrice("");
+    playSound("action");
+    showToast(`"${name}" añadido a la lista de entrada.`);
   };
 
   const handleRemovePendingEntryItem = (tempId: string) => {
     setPendingEntryItems((prev) => prev.filter((it) => it.tempId !== tempId));
-    playSound("negative");
+    playSound("click");
   };
 
-  // Confirm and persist all pending entry items under this invoice
-  const handleConfirmEntrySubmit = async () => {
-    if (isConfirmingEntry) return;
+  // Confirm entire invoice entry (Section 3 Footer of Image 3)
+  const handleAddProductSubmit = async () => {
+    if (confirmingEntry) return;
+
+    const cleanInvoiceNum = invoiceNum.trim().toUpperCase();
+    const cleanInvoiceDate = invoiceDate || new Date().toISOString().slice(0, 10);
+    const cleanSupplier = invoiceSupplier.trim();
+
+    if (!cleanInvoiceNum) {
+      alert("Ingresa el N.º de Factura / Comprobante (*) en la sección 1 antes de confirmar la entrada.");
+      return;
+    }
 
     if (pendingEntryItems.length === 0) {
-      alert("No hay productos en la lista pendiente de entrada. Agrega al menos un producto antes de confirmar.");
+      alert('Agrega al menos un producto a la lista usando el botón "+ Añadir a la Lista de Entrada".');
       return;
     }
 
-    const factura = entryFacturaNum.trim().toUpperCase();
-    if (!factura) {
-      alert("Por favor especifica el número de factura para agrupar esta entrada (ej. F100094).");
-      return;
-    }
+    setConfirmingEntry(true);
+    playSound("action");
 
     try {
-      setIsConfirmingEntry(true);
-      const entradaId = `ENT-${Date.now()}`;
-      const entryTimestamp = Date.now();
-      const entryISODate = entryFacturaDate
-        ? new Date(`${entryFacturaDate}T12:00:00`).toISOString()
-        : new Date().toISOString();
-      const currentUserString = currentUser ? `${currentUser.nombre} (${currentUser.usuario})` : "Sistema";
-
-      let currentProducts = [...products];
+      // Group pending items by product code so multiple lots for the same product merge cleanly
+      const updatedProductsMap = new Map<string, Producto>();
 
       for (const item of pendingEntryItems) {
-        const cleanStr = (str?: string) =>
-          String(str || "")
-            .trim()
-            .toLowerCase()
-            .normalize("NFD")
-            .replace(/[\u0300-\u036f]/g, "")
-            .replace(/\s+/g, " ");
-
-        let existingProd = currentProducts.find((p) => {
-          const catId = p.catalogId || "default-cat";
-          if (catId !== activeCatalogId) return false;
-          if (item.codigo && p.codigo.trim().toUpperCase() === item.codigo) return true;
-          return cleanStr(p.nombre) === cleanStr(item.nombre);
-        });
+        const existingProd =
+          updatedProductsMap.get(item.codigo) ||
+          products.find((p) => p.codigo === item.codigo);
 
         const newLot: Lote = {
-          id: `lote-${item.codigo}-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
-          numeroLote: item.lotNum,
-          cantidad: item.qty,
-          cantidadF: item.qtyF,
-          fechaVencimiento: item.expDate,
-          precio: item.price,
-          loteFisico: item.lotLocation,
-          fechaFisica: item.physExpDate,
-          factura: factura,
-          proveedor: entryProveedor.trim() || undefined
+          id: `lote-${item.codigo}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+          numeroLote: item.numeroLote,
+          cantidad: item.cantidad,
+          cantidadF: item.cantidadF,
+          fechaVencimiento: item.fechaVencimiento,
+          precio: item.precio,
+          loteFisico: item.loteFisico || "Almacén",
+          fechaFisica: item.fechaFisica || item.fechaVencimiento
         };
 
         if (existingProd) {
-          const updatedProduct: Producto = {
+          const merged: Producto = {
             ...existingProd,
             nombre: item.nombre || existingProd.nombre,
             descripcion: item.descripcion || existingProd.descripcion || "",
             lotes: [...existingProd.lotes, newLot],
             updatedAt: Date.now()
           };
-          await saveProductDoc(updatedProduct);
-          currentProducts = currentProducts.map((p) => (p.codigo === updatedProduct.codigo ? updatedProduct : p));
+          updatedProductsMap.set(item.codigo, merged);
         } else {
-          const newProduct: Producto = {
+          const created: Producto = {
             codigo: item.codigo,
             nombre: item.nombre,
             descripcion: item.descripcion,
@@ -2209,69 +1751,54 @@ export default function App() {
             updatedAt: Date.now(),
             catalogId: activeCatalogId
           };
-          await saveProductDoc(newProduct);
-          currentProducts.push(newProduct);
+          updatedProductsMap.set(item.codigo, created);
         }
+      }
 
-        // Log movement entry associated with invoice
+      // Save all affected products
+      for (const prod of updatedProductsMap.values()) {
+        await saveProductDoc(prod);
+      }
+
+      // Log each item as an "Entrada" movement grouped under numeroFactura
+      for (const item of pendingEntryItems) {
         const movLog: Omit<Movimiento, "id"> = {
           productoCodigo: item.codigo,
           productoNombre: item.nombre,
-          lote: item.lotNum,
-          cantidad: item.qty,
-          precio: item.price,
+          descripcion: item.descripcion,
+          lote: item.numeroLote,
+          loteFisico: item.loteFisico,
+          cantidad: item.cantidad,
+          cantidadF: item.cantidadF,
+          fechaVencimiento: item.fechaVencimiento,
+          fechaFisica: item.fechaFisica,
+          precio: item.precio,
           tipoMovimiento: "Entrada",
-          usuario: currentUserString,
-          fecha: entryISODate,
-          timestamp: entryTimestamp,
+          usuario: currentUser ? `${currentUser.nombre} (${currentUser.usuario})` : "Sistema",
+          fecha: new Date().toISOString(),
+          timestamp: Date.now(),
           catalogId: activeCatalogId,
-          factura: factura,
-          entradaId: entradaId,
-          estado: "Completada",
-          proveedor: entryProveedor.trim() || undefined,
-          institucionSnapshot: institucionConfig
+          numeroFactura: cleanInvoiceNum,
+          fechaEntrada: cleanInvoiceDate,
+          proveedor: cleanSupplier
         };
         await saveMovementLog(movLog);
       }
 
-      showToast(`¡Entrada confirmada! Se registraron ${pendingEntryItems.length} productos bajo la Factura ${factura}.`);
-      playSound("action");
-
-      // Reset
+      const count = pendingEntryItems.length;
       setPendingEntryItems([]);
-      setEntryFacturaNum("");
-      setEntryProveedor("");
-      setNewProdCode("");
-      setNewProdName("");
-      setNewProdDesc("");
-      setNewProdLotNum("");
-      setNewProdLotQty("");
-      setNewProdLotQtyF("");
-      setNewProdLotLocation("");
-      setNewProdLotExpDate("");
-      setNewProdLotPhysExpDate("");
-      setNewProdLotPrice("");
+      setInvoiceNum("");
+      setInvoiceDate(new Date().toISOString().slice(0, 10));
+      setInvoiceSupplier("");
       setShowProductAdd(false);
+      playSound("positive");
+      showToast(`Entrada confirmada: ${count} producto(s) registrados bajo la factura ${cleanInvoiceNum}.`);
     } catch (err) {
-      console.error("Error al confirmar entrada:", err);
-      alert("Ocurrió un error al guardar los productos de la entrada.");
+      console.error("Error confirming invoice entry:", err);
+      alert("Ocurrió un error al confirmar la entrada de productos.");
     } finally {
-      setIsConfirmingEntry(false);
+      setConfirmingEntry(false);
     }
-  };
-
-  const handleCloseProductAdd = () => {
-    if (pendingEntryItems.length > 0) {
-      if (
-        !confirm(
-          `Tienes ${pendingEntryItems.length} productos en la lista pendiente de entrada. Si cierras la ventana, estos datos temporales se descartarán. ¿Deseas salir?`
-        )
-      ) {
-        return;
-      }
-    }
-    setPendingEntryItems([]);
-    setShowProductAdd(false);
   };
 
   // Block Selection
@@ -2302,7 +1829,7 @@ export default function App() {
     if (isLocalFileMode) {
       setBlocks(prev => prev.map(b => b.id === selectedBlock ? { ...b, items: updatedItems, updatedAt: Date.now() } : b));
     } else {
-      const docRef = doc(db, "bloques", selectedBlock);
+      const docRef = tenantDoc("bloques", selectedBlock, activeFarmaciaId);
       await updateDoc(docRef, { items: updatedItems, updatedAt: Date.now() });
     }
 
@@ -2321,7 +1848,7 @@ export default function App() {
     if (isLocalFileMode) {
       setBlocks(prev => prev.map(b => b.id === selectedBlock ? { ...b, items: updatedItems, updatedAt: Date.now() } : b));
     } else {
-      const docRef = doc(db, "bloques", selectedBlock);
+      const docRef = tenantDoc("bloques", selectedBlock, activeFarmaciaId);
       await updateDoc(docRef, { items: updatedItems, updatedAt: Date.now() });
     }
     playSound("negative");
@@ -2438,8 +1965,8 @@ export default function App() {
         setProducts(updatedProducts);
       } else {
         const batch = writeBatch(db);
-        const productsCol = collection(db, "productos");
-        const movementsCol = collection(db, "movimientos");
+        const productsCol = tenantCollection("productos", activeFarmaciaId);
+        const movementsCol = tenantCollection("movimientos", activeFarmaciaId);
 
         const productsToUpdateMap = new Map<string, Producto>();
 
@@ -2635,9 +2162,16 @@ export default function App() {
         <Login
           users={users}
           isInitializingUsers={loading}
-          onLoginSuccess={(user) => {
-            setCurrentUser(user);
-            localStorage.setItem("current_user", JSON.stringify(user));
+          onLoginSuccess={(user, farmaciaId, meta) => {
+            const cleanTenant = setActiveFarmaciaId(farmaciaId || user.farmaciaId || DEFAULT_FARMACIA_ID);
+            setActiveFarmaciaIdState(cleanTenant);
+            if (meta) {
+              setFarmaciaMeta(meta);
+              localStorage.setItem("active_farmacia_meta", JSON.stringify(meta));
+            }
+            setIsFirebaseAuthed(true);
+            setCurrentUser({ ...user, farmaciaId: cleanTenant });
+            localStorage.setItem("current_user", JSON.stringify({ ...user, farmaciaId: cleanTenant }));
             showToast(`¡Bienvenido, ${user.nombre}!`);
             playSound("positive");
           }}
@@ -2646,23 +2180,20 @@ export default function App() {
         <div className="bg-slate-100 text-slate-800 min-h-screen pb-24 font-sans selection:bg-teal-500 selection:text-white">
           <header className="sticky top-0 z-30 text-white shadow-md bg-custom-sidebar">
             <div className="px-6 pt-4 pb-3 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-              <div className="flex items-center gap-3">
-                <img src={APP_LOGO} alt="Logo" className="h-10 w-auto max-w-[50px] object-contain rounded-md shadow-sm" />
-                <div>
-                  <h1
-                    className="text-xl font-black leading-tight flex items-center gap-1.5 cursor-pointer"
-                    onClick={() => {
-                      setActiveTab(currentUser.rol === "Operador" ? "solicitudes" : "inventory");
-                      setShowBlocks(false);
-                      setSelectedBlock(null);
-                    }}
-                  >
-                    Control de Stock
-                  </h1>
-                  <p className="text-teal-100 text-xs font-semibold opacity-90">
-                    Suministros Hospitalarios • Dr. José Manuel Rodríguez
-                  </p>
-                </div>
+              <div>
+                <h1
+                  className="text-xl font-black leading-tight flex items-center gap-1.5 cursor-pointer"
+                  onClick={() => {
+                    setActiveTab(currentUser.rol === "Operador" ? "solicitudes" : "inventory");
+                    setShowBlocks(false);
+                    setSelectedBlock(null);
+                  }}
+                >
+                  {farmaciaMeta.nombre || "Control de Stock"}
+                </h1>
+                <p className="text-teal-100 text-xs font-semibold opacity-90">
+                  {farmaciaMeta.subtitulo || "Suministros Hospitalarios • Dr. José Manuel Rodríguez"}
+                </p>
               </div>
 
               {/* Selector Global de Catálogo */}
@@ -2706,15 +2237,32 @@ export default function App() {
                   {isMuted ? <VolumeX className="w-4.5 h-4.5 text-rose-300" /> : <Volume2 className="w-4.5 h-4.5 text-emerald-300" />}
                 </button>
 
-                {canInstall && (
-                  <button
-                    onClick={handleInstallClick}
-                    className="p-2.5 bg-white/10 hover:bg-white/20 active:scale-95 transition rounded-xl text-white shadow-sm flex items-center justify-center cursor-pointer"
-                    title="Instalar aplicación"
-                  >
-                    <FileDown className="w-4.5 h-4.5" />
-                  </button>
-                )}
+                {activeFarmaciaId !== DEFAULT_FARMACIA_ID &&
+                  currentUser.usuario.toLowerCase() === "anyer" && (
+                    <button
+                      onClick={() => {
+                        const cleanTenant = setActiveFarmaciaId(DEFAULT_FARMACIA_ID);
+                        setActiveFarmaciaIdState(cleanTenant);
+                        const defaultMeta = {
+                          nombre: "Control de Stock",
+                          subtitulo: "Suministros Hospitalarios • Dr. José Manuel Rodríguez"
+                        };
+                        setFarmaciaMeta(defaultMeta);
+                        localStorage.setItem("active_farmacia_meta", JSON.stringify(defaultMeta));
+                        const updatedUser = { ...currentUser, farmaciaId: cleanTenant };
+                        setCurrentUser(updatedUser);
+                        localStorage.setItem("current_user", JSON.stringify(updatedUser));
+                        setActiveCatalogId("default-cat");
+                        setActiveTab("configuracion");
+                        playSound("positive");
+                        showToast("Regresaste a la Sede Principal.");
+                      }}
+                      className="flex items-center gap-1.5 bg-amber-500 hover:bg-amber-400 text-slate-950 active:scale-95 transition rounded-xl px-3.5 py-2.5 text-xs font-black uppercase tracking-wider shadow-sm cursor-pointer"
+                      title="Volver a la Sede Principal"
+                    >
+                      <span>🏥 Sede Principal</span>
+                    </button>
+                  )}
 
                 {currentUser.rol === "Administrador" && (
                   <button
@@ -2735,8 +2283,13 @@ export default function App() {
                 )}
 
                 <button
-                  onClick={() => {
+                  onClick={async () => {
+                    try {
+                      await signOut(auth);
+                    } catch (e) {}
                     setCurrentUser(null);
+                    setUsers([]);
+                    setProducts([]);
                     localStorage.removeItem("current_user");
                     playSound("close");
                     showToast("Sesión cerrada correctamente");
@@ -2766,6 +2319,25 @@ export default function App() {
                   }`}
                 >
                   Suministros
+                </button>
+              )}
+
+              {enabledModules.includes("venta") && (
+                <button
+                  onClick={() => {
+                    setActiveTab("venta");
+                    setShowBlocks(false);
+                    setSelectedBlock(null);
+                    playSound("click");
+                  }}
+                  className={`rounded-full px-5 py-2 text-xs font-bold shadow-sm transition active:scale-95 flex items-center gap-1.5 cursor-pointer ${
+                    activeTab === "venta"
+                      ? "bg-white text-teal-800 font-extrabold"
+                      : "bg-teal-700/50 text-teal-100 hover:bg-teal-700/80"
+                  }`}
+                >
+                  <Receipt className="w-4 h-4" />
+                  Venta
                 </button>
               )}
 
@@ -2984,8 +2556,24 @@ export default function App() {
             </div>
           )}
 
-          <main className={`px-4 sm:px-6 py-6 mx-auto ${activeTab === "carga_masiva" || activeTab === "solicitudes" || activeTab === "configuracion" ? "max-w-7xl" : "max-w-4xl"}`}>
+          <main className={`px-6 py-6 ${activeTab === "venta" ? "max-w-6xl" : "max-w-4xl"} mx-auto`}>
             {/* Contenido Principal */}
+            {activeTab === "venta" && enabledModules.includes("venta") && (
+              <VentaPanel
+                currentUser={currentUser}
+                products={products}
+                catalogos={catalogos}
+                activeCatalogId={activeCatalogId}
+                onSelectCatalog={(catId) => {
+                  setActiveCatalogId(catId);
+                  localStorage.setItem("active_catalog_id", catId);
+                }}
+                conceptos={conceptos}
+                showToast={showToast}
+                onProductsUpdated={(updated) => setProducts(updated)}
+              />
+            )}
+
             {activeTab === "carga_masiva" && (
               <CargaMasiva
                 products={products}
@@ -2993,9 +2581,6 @@ export default function App() {
                 onImportComplete={(updated) => setProducts(updated)}
                 showToast={showToast}
                 activeCatalogId={activeCatalogId}
-                performImport={handleMassImport}
-                cargasMasivasList={cargasMasivasList}
-                onRevertirCarga={handleRevertirCarga}
               />
             )}
 
@@ -3003,7 +2588,6 @@ export default function App() {
               <HistorialMovimientos
                 activeCatalogId={activeCatalogId}
                 currentUser={currentUser}
-                institucionConfig={institucionConfig}
               />
             )}
 
@@ -3037,13 +2621,40 @@ export default function App() {
                 currentUser={currentUser}
                 activePeriod={activePeriod}
                 colores={colores}
-                institucion={institucionConfig}
                 onUpdatePeriod={(p) => setActivePeriod(p)}
                 onUpdateColores={(c) => setColores(c)}
-                onUpdateInstitucion={(inst) => setInstitucionConfig(inst)}
                 showToast={showToast}
                 departamentos={departamentos}
                 catalogos={catalogos}
+                conceptos={conceptos}
+                onUpdateConceptos={(list) => setConceptos(list)}
+                onUpdateInstitucion={(info) => {
+                  if (info.nombre) {
+                    const nextMeta = {
+                      nombre: "Control de Stock",
+                      subtitulo: info.nombre
+                    };
+                    setFarmaciaMeta(nextMeta);
+                    localStorage.setItem("active_farmacia_meta", JSON.stringify(nextMeta));
+                  }
+                }}
+                onSwitchFarmacia={(targetId, targetName) => {
+                  const cleanTenant = setActiveFarmaciaId(targetId);
+                  setActiveFarmaciaIdState(cleanTenant);
+                  const nextMeta = {
+                    nombre: "Control de Stock",
+                    subtitulo: targetName || `Sede: ${cleanTenant}`
+                  };
+                  setFarmaciaMeta(nextMeta);
+                  localStorage.setItem("active_farmacia_meta", JSON.stringify(nextMeta));
+                  const updatedUser = { ...currentUser, farmaciaId: cleanTenant };
+                  setCurrentUser(updatedUser);
+                  localStorage.setItem("current_user", JSON.stringify(updatedUser));
+                  setActiveCatalogId("default-cat");
+                  setActiveTab("inventory");
+                  playSound("positive");
+                  showToast(`Has accedido a la sede: ${targetName || cleanTenant}`);
+                }}
               />
             )}
 
@@ -3131,19 +2742,6 @@ export default function App() {
                           </span>
                         )}
                         
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setActiveTab("carga_masiva");
-                            playSound("click");
-                          }}
-                          className="inline-flex items-center gap-1.5 bg-emerald-50 border border-emerald-200 text-emerald-800 hover:bg-emerald-100 active:scale-95 transition rounded-xl px-3 py-1.5 text-[11px] font-black cursor-pointer shadow-xs uppercase tracking-wider"
-                          title="Subir archivo Excel para auditar e importar suministros y lotes"
-                        >
-                          <FileSpreadsheet className="w-3.5 h-3.5 text-emerald-700" />
-                          <span>Importar Excel</span>
-                        </button>
-
                         <div className="relative" ref={exportMenuRef}>
                           <button
                             type="button"
@@ -3331,12 +2929,7 @@ export default function App() {
               className="fixed bottom-6 right-6 z-30 bg-teal-600 hover:bg-teal-700 active:scale-95 transition text-white rounded-full shadow-lg shadow-teal-900/30 px-6 py-4 flex items-center gap-2 font-black uppercase text-xs tracking-wider cursor-pointer bg-custom-buttons"
             >
               <Plus className="w-5 h-5" />
-              <span>Registrar Producto</span>
-              {pendingEntryItems.length > 0 && (
-                <span className="bg-amber-400 text-slate-900 font-extrabold text-[10px] px-2 py-0.5 rounded-full ml-1 animate-pulse">
-                  {pendingEntryItems.length} pendiente{pendingEntryItems.length > 1 ? "s" : ""}
-                </span>
-              )}
+              Registrar Producto
             </button>
           )}
 
@@ -3541,8 +3134,8 @@ export default function App() {
                                 <input
                                   type="text"
                                   value={l.numeroLote}
-                                  onChange={(e) => handleEditLotField(l.id, "numeroLote", e.target.value.toUpperCase())}
-                                  className="mt-1 w-full rounded-lg border border-slate-200 px-2.5 py-2 font-bold text-slate-800 bg-slate-50 uppercase"
+                                  onChange={(e) => handleEditLotField(l.id, "numeroLote", e.target.value)}
+                                  className="mt-1 w-full rounded-lg border border-slate-200 px-2.5 py-2 font-bold text-slate-800 bg-slate-50"
                                 />
                               </div>
                               <div>
@@ -3553,9 +3146,9 @@ export default function App() {
                                   type="text"
                                   value={l.loteFisico || ""}
                                   disabled={!!coincidenLotesMap[l.id]}
-                                  onChange={(e) => handleEditLotField(l.id, "loteFisico", e.target.value.toUpperCase())}
-                                  placeholder="Ej. ESTANTE B"
-                                  className="mt-1 w-full rounded-lg border border-amber-200 bg-amber-50/50 disabled:bg-slate-100 disabled:border-slate-200 px-2.5 py-2 font-bold text-slate-800 uppercase"
+                                  onChange={(e) => handleEditLotField(l.id, "loteFisico", e.target.value)}
+                                  placeholder="Ej. Estante B"
+                                  className="mt-1 w-full rounded-lg border border-amber-200 bg-amber-50/50 disabled:bg-slate-100 disabled:border-slate-200 px-2.5 py-2 font-bold text-slate-800"
                                 />
                               </div>
 
@@ -3565,13 +3158,8 @@ export default function App() {
                                 </label>
                                 <input
                                   type="number"
-                                  value={l.cantidad === 0 ? "" : (l.cantidad ?? "")}
-                                  placeholder="0"
-                                  onFocus={(e) => e.target.select()}
-                                  onChange={(e) => {
-                                    const val = e.target.value;
-                                    handleEditLotField(l.id, "cantidad", val === "" ? 0 : Number(val));
-                                  }}
+                                  value={l.cantidad}
+                                  onChange={(e) => handleEditLotField(l.id, "cantidad", Number(e.target.value))}
                                   className="mt-1 w-full rounded-lg border border-slate-200 px-2.5 py-2 font-bold text-slate-800 bg-slate-50"
                                 />
                               </div>
@@ -3581,14 +3169,9 @@ export default function App() {
                                 </label>
                                 <input
                                   type="number"
-                                  value={l.cantidadF === 0 ? "" : (l.cantidadF ?? "")}
-                                  placeholder="0"
+                                  value={l.cantidadF || 0}
                                   disabled={!!coincidenLotesMap[l.id]}
-                                  onFocus={(e) => e.target.select()}
-                                  onChange={(e) => {
-                                    const val = e.target.value;
-                                    handleEditLotField(l.id, "cantidadF", val === "" ? 0 : Number(val));
-                                  }}
+                                  onChange={(e) => handleEditLotField(l.id, "cantidadF", Number(e.target.value))}
                                   className="mt-1 w-full rounded-lg border border-amber-200 bg-amber-50/50 disabled:bg-slate-100 disabled:border-slate-200 px-2.5 py-2 font-bold text-slate-800"
                                 />
                               </div>
@@ -3623,12 +3206,8 @@ export default function App() {
                                 </label>
                                 <input
                                   type="number"
-                                  min="0"
-                                  step="0.01"
-                                  value={l.precio === 0 ? "" : (l.precio ?? "")}
-                                  placeholder="0.00"
-                                  onFocus={(e) => e.target.select()}
-                                  onChange={(e) => handleEditLotField(l.id, "precio", e.target.value === "" ? 0 : Number(e.target.value))}
+                                  value={l.precio}
+                                  onChange={(e) => handleEditLotField(l.id, "precio", Number(e.target.value))}
                                   className="mt-1 w-full rounded-lg border border-slate-200 px-2.5 py-2 font-bold text-slate-800 bg-slate-50"
                                 />
                               </div>
@@ -3670,8 +3249,8 @@ export default function App() {
                       type="text"
                       placeholder="Ej. AB-202"
                       value={newLotNum}
-                      onChange={(e) => setNewLotNum(e.target.value.toUpperCase())}
-                      className="mt-1.5 w-full rounded-xl border border-slate-200 px-3.5 py-2.5 text-sm outline-none focus:ring-2 focus:ring-teal-400 bg-slate-50 uppercase font-bold"
+                      onChange={(e) => setNewLotNum(e.target.value)}
+                      className="mt-1.5 w-full rounded-xl border border-slate-200 px-3.5 py-2.5 text-sm outline-none focus:ring-2 focus:ring-teal-400 bg-slate-50"
                     />
                   </div>
 
@@ -3681,9 +3260,8 @@ export default function App() {
                       <input
                         type="number"
                         min="1"
-                        placeholder="Ej. 10"
+                        placeholder="0"
                         value={newLotQty}
-                        onFocus={(e) => e.target.select()}
                         onChange={(e) => setNewLotQty(e.target.value)}
                         className="mt-1.5 w-full rounded-xl border border-slate-200 px-3.5 py-2.5 text-sm outline-none focus:ring-2 focus:ring-teal-400 bg-slate-50"
                       />
@@ -3695,7 +3273,6 @@ export default function App() {
                         min="0"
                         placeholder="Dejar vacío para igualar"
                         value={newLotQtyF}
-                        onFocus={(e) => e.target.select()}
                         onChange={(e) => setNewLotQtyF(e.target.value)}
                         className="mt-1.5 w-full rounded-xl border border-amber-200 bg-amber-50/50 px-3.5 py-2.5 text-sm outline-none focus:ring-2 focus:ring-amber-400"
                       />
@@ -3727,10 +3304,10 @@ export default function App() {
                     <label className="text-xs font-bold text-amber-600 uppercase tracking-wider">Lote F (Físico) / Ubicación</label>
                     <input
                       type="text"
-                      placeholder="Ej. ESTANTE B"
+                      placeholder="Ej. Estante B"
                       value={newLotLocation}
-                      onChange={(e) => setNewLotLocation(e.target.value.toUpperCase())}
-                      className="mt-1.5 w-full rounded-xl border border-amber-200 bg-amber-50/50 px-3.5 py-2.5 text-sm outline-none focus:ring-2 focus:ring-amber-400 uppercase font-bold"
+                      onChange={(e) => setNewLotLocation(e.target.value)}
+                      className="mt-1.5 w-full rounded-xl border border-amber-200 bg-amber-50/50 px-3.5 py-2.5 text-sm outline-none focus:ring-2 focus:ring-amber-400"
                     />
                   </div>
 
@@ -3760,127 +3337,119 @@ export default function App() {
             </div>
           )}
 
-          {/* Modal Registro de Entrada de Productos agrupados por Factura */}
+          {/* Modal Registro de Entrada de Productos (Diseño Exacto Imagen 3) */}
           {showProductAdd && (
             <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center p-0 sm:p-4">
-              <div
-                className="absolute inset-0 bg-black/50 backdrop-blur-xs"
-                onClick={handleCloseProductAdd}
-              ></div>
-              <div className="relative w-full sm:max-w-4xl bg-white rounded-t-3xl sm:rounded-3xl shadow-2xl flex flex-col overflow-hidden anim-slide-up sm:anim-pop-in max-h-[92vh] border border-slate-100">
-                {/* Modal Header */}
-                <div className="px-6 py-4 flex items-center justify-between border-b border-slate-100 shrink-0 bg-white">
-                  <div className="flex items-center gap-3">
-                    <div className="w-10 h-10 rounded-2xl bg-teal-50 border border-teal-100 flex items-center justify-center text-teal-700 shrink-0">
+              <div className="absolute inset-0 bg-black/50 backdrop-blur-xs" onClick={() => setShowProductAdd(false)}></div>
+              <div className="relative w-full sm:max-w-3xl bg-slate-50 rounded-t-3xl sm:rounded-3xl shadow-2xl flex flex-col overflow-hidden anim-slide-up sm:anim-pop-in max-h-[92vh] border border-slate-200">
+                {/* Cabecera del Modal (Imagen 3) */}
+                <div className="px-6 py-4 flex items-center justify-between border-b border-slate-200 bg-white shrink-0">
+                  <div className="flex items-center gap-3.5">
+                    <div className="w-10 h-10 rounded-full bg-teal-50 border border-teal-100 flex items-center justify-center text-teal-600 shrink-0">
                       <FileText className="w-5 h-5" />
                     </div>
                     <div>
-                      <div className="flex items-center gap-2">
-                        <h2 className="font-black text-slate-800 text-base uppercase tracking-wide">
-                          Registro de Entrada de Productos
-                        </h2>
-                        {entryFacturaNum && (
-                          <span className="font-mono text-xs font-black bg-teal-100 text-teal-800 px-2 py-0.5 rounded-md border border-teal-200">
-                            {entryFacturaNum.toUpperCase()}
-                          </span>
-                        )}
-                      </div>
-                      <p className="text-xs text-slate-500">
+                      <h2 className="font-black text-slate-900 text-base uppercase tracking-wide leading-tight">
+                        REGISTRO DE ENTRADA DE PRODUCTOS
+                      </h2>
+                      <p className="text-xs text-slate-500 font-medium mt-0.5">
                         Agrega los productos a la lista temporal de la factura y confirma la entrada en un solo paso
                       </p>
                     </div>
                   </div>
                   <button
-                    type="button"
-                    onClick={handleCloseProductAdd}
+                    onClick={() => setShowProductAdd(false)}
                     className="p-2 text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded-xl transition cursor-pointer"
-                    title="Cerrar ventana"
                   >
                     <X className="w-5 h-5" />
                   </button>
                 </div>
 
-                {/* Modal Body */}
-                <div className="flex-1 overflow-y-auto px-6 py-5 space-y-6 bg-slate-50/70">
-                  {/* SECCIÓN 1: DATOS DE LA FACTURA */}
-                  <div className="bg-white rounded-2xl p-4 sm:p-5 border border-slate-200 shadow-2xs space-y-3">
-                    <div className="flex items-center justify-between border-b border-slate-100 pb-2.5">
-                      <span className="text-xs font-black text-teal-800 uppercase tracking-wider flex items-center gap-2">
+                {/* Cuerpo con Scroll */}
+                <div className="flex-1 overflow-y-auto px-5 sm:px-6 py-5 space-y-5 bg-slate-50/60">
+                  {/* SECCIÓN 1: INFORMACIÓN DE LA FACTURA / COMPROBANTE */}
+                  <div className="bg-white rounded-2xl border border-slate-200/90 p-5 shadow-2xs space-y-4">
+                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-1">
+                      <h3 className="flex items-center gap-2 text-xs font-black uppercase tracking-wider text-teal-800">
                         <FileText className="w-4 h-4 text-teal-600" />
-                        1. Información de la Factura / Comprobante
-                      </span>
+                        <span>1. INFORMACIÓN DE LA FACTURA / COMPROBANTE</span>
+                      </h3>
                       <span className="text-[11px] font-semibold text-slate-400">
                         Los productos registrados quedarán agrupados bajo esta factura
                       </span>
                     </div>
 
-                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-3.5">
+                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
                       <div>
-                        <label className="text-xs font-bold text-slate-600 uppercase tracking-wider flex items-center gap-1">
-                          N.º de Factura *
+                        <label className="block text-[11px] font-black text-slate-600 uppercase tracking-wider mb-1.5">
+                          N.º DE FACTURA *
                         </label>
                         <input
                           type="text"
-                          placeholder="Ej. F100094"
-                          value={entryFacturaNum}
-                          onChange={(e) => setEntryFacturaNum(e.target.value.toUpperCase())}
-                          className="mt-1.5 w-full rounded-xl border border-slate-200 px-3.5 py-2.5 text-sm font-black uppercase text-teal-900 bg-slate-50 outline-none focus:ring-2 focus:ring-teal-400 focus:bg-white"
+                          placeholder="EJ. F100094"
+                          value={invoiceNum}
+                          onChange={(e) => setInvoiceNum(e.target.value)}
+                          className="w-full rounded-xl border border-slate-200 px-3.5 py-2.5 text-xs font-bold uppercase text-slate-800 bg-slate-50/70 focus:bg-white outline-none focus:ring-2 focus:ring-teal-400 transition"
                         />
                       </div>
+
                       <div>
-                        <label className="text-xs font-bold text-slate-600 uppercase tracking-wider">
-                          Fecha de Entrada *
+                        <label className="block text-[11px] font-black text-slate-600 uppercase tracking-wider mb-1.5">
+                          FECHA DE ENTRADA *
                         </label>
                         <input
                           type="date"
-                          value={entryFacturaDate}
-                          onChange={(e) => setEntryFacturaDate(e.target.value)}
-                          className="mt-1.5 w-full rounded-xl border border-slate-200 px-3.5 py-2.5 text-xs font-bold text-slate-800 bg-slate-50 outline-none focus:ring-2 focus:ring-teal-400 focus:bg-white"
+                          value={invoiceDate}
+                          onChange={(e) => setInvoiceDate(e.target.value)}
+                          className="w-full rounded-xl border border-slate-200 px-3.5 py-2.5 text-xs font-bold text-slate-800 bg-slate-50/70 focus:bg-white outline-none focus:ring-2 focus:ring-teal-400 transition"
                         />
                       </div>
+
                       <div>
-                        <label className="text-xs font-bold text-slate-600 uppercase tracking-wider">
-                          Proveedor / Observación (Opcional)
+                        <label className="block text-[11px] font-black text-slate-600 uppercase tracking-wider mb-1.5">
+                          PROVEEDOR / OBSERVACIÓN (OPCIONAL)
                         </label>
                         <input
                           type="text"
-                          placeholder="Ej. Laboratorio Central / Compra regular"
-                          value={entryProveedor}
-                          onChange={(e) => setEntryProveedor(e.target.value)}
-                          className="mt-1.5 w-full rounded-xl border border-slate-200 px-3.5 py-2.5 text-sm font-medium text-slate-800 bg-slate-50 outline-none focus:ring-2 focus:ring-teal-400 focus:bg-white"
+                          placeholder="Ej. Laboratorio Central / Compra"
+                          value={invoiceSupplier}
+                          onChange={(e) => setInvoiceSupplier(e.target.value)}
+                          className="w-full rounded-xl border border-slate-200 px-3.5 py-2.5 text-xs font-semibold text-slate-800 bg-slate-50/70 focus:bg-white outline-none focus:ring-2 focus:ring-teal-400 transition"
                         />
                       </div>
                     </div>
                   </div>
 
-                  {/* SECCIÓN 2: FORMULARIO DE PRODUCTO A AGREGAR */}
-                  <div className="bg-white rounded-2xl p-4 sm:p-5 border border-slate-200 shadow-2xs space-y-4">
-                    <div className="flex items-center justify-between border-b border-slate-100 pb-2.5">
-                      <span className="text-xs font-black text-slate-800 uppercase tracking-wider flex items-center gap-2">
+                  {/* SECCIÓN 2: CARGAR PRODUCTO A LA ENTRADA */}
+                  <div className="bg-white rounded-2xl border border-slate-200/90 p-5 shadow-2xs space-y-4">
+                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-1">
+                      <h3 className="flex items-center gap-2 text-xs font-black uppercase tracking-wider text-slate-800">
                         <Package className="w-4 h-4 text-teal-600" />
-                        2. Cargar Producto a la Entrada
-                      </span>
-                      <span className="text-[11px] text-slate-400">
-                        Completa los datos y presiona &quot;+ Añadir a la Lista&quot;
+                        <span>2. CARGAR PRODUCTO A LA ENTRADA</span>
+                      </h3>
+                      <span className="text-[11px] font-semibold text-slate-400">
+                        Completa los datos y presiona "+ Añadir a la Lista"
                       </span>
                     </div>
 
-                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-3.5">
-                      <div className="col-span-1">
-                        <label className="text-xs font-bold text-slate-500 uppercase tracking-wider">
-                          Código (Opcional)
+                    {/* Fila 1: Código + Nombre del Medicamento */}
+                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                      <div className="sm:col-span-1">
+                        <label className="block text-[11px] font-black text-slate-500 uppercase tracking-wider mb-1.5">
+                          CÓDIGO (OPCIONAL)
                         </label>
                         <input
                           type="text"
-                          placeholder="Auto o ej. A100"
+                          placeholder="AUTO O EJ. A100"
                           value={newProdCode}
-                          onChange={(e) => setNewProdCode(e.target.value.toUpperCase())}
-                          className="mt-1.5 w-full rounded-xl border border-slate-200 px-3.5 py-2.5 text-sm outline-none focus:ring-2 focus:ring-teal-400 bg-white font-bold uppercase"
+                          onChange={(e) => setNewProdCode(e.target.value)}
+                          className="w-full rounded-xl border border-slate-200 px-3.5 py-2.5 text-xs outline-none focus:ring-2 focus:ring-teal-400 bg-slate-50/60 focus:bg-white font-bold uppercase text-slate-800"
                         />
                       </div>
-                      <div ref={nameSuggestionsRef} className="col-span-1 sm:col-span-2 relative">
-                        <label className="text-xs font-bold text-slate-500 uppercase tracking-wider">
-                          Nombre del Medicamento / Insumo *
+
+                      <div ref={nameSuggestionsRef} className="sm:col-span-2 relative">
+                        <label className="block text-[11px] font-black text-slate-500 uppercase tracking-wider mb-1.5">
+                          NOMBRE DEL MEDICAMENTO / INSUMO *
                         </label>
                         <input
                           type="text"
@@ -3891,7 +3460,7 @@ export default function App() {
                             setShowNameSuggestions(true);
                           }}
                           onFocus={() => setShowNameSuggestions(true)}
-                          className="mt-1.5 w-full rounded-xl border border-slate-200 px-3.5 py-2.5 text-sm outline-none focus:ring-2 focus:ring-teal-400 bg-white font-semibold text-slate-900"
+                          className="w-full rounded-xl border border-slate-200 px-3.5 py-2.5 text-xs font-semibold outline-none focus:ring-2 focus:ring-teal-400 bg-slate-50/60 focus:bg-white text-slate-800"
                         />
                         {showNameSuggestions && newProdName.trim().length > 0 && (() => {
                           const filteredSuggestions = products.filter(
@@ -3902,7 +3471,7 @@ export default function App() {
                           if (filteredSuggestions.length === 0) return null;
 
                           return (
-                            <div className="absolute left-0 right-0 mt-1 bg-white border border-slate-200 rounded-xl shadow-xl z-50 max-h-48 overflow-y-auto">
+                            <div className="absolute left-0 right-0 mt-1 bg-white border border-slate-200 rounded-xl shadow-lg z-50 max-h-48 overflow-y-auto">
                               {filteredSuggestions.map((prod) => (
                                 <button
                                   key={prod.codigo}
@@ -3917,9 +3486,7 @@ export default function App() {
                                   className="w-full text-left px-4 py-2.5 text-xs hover:bg-teal-50 hover:text-teal-700 transition font-bold border-b border-slate-100 last:border-0 flex justify-between items-center cursor-pointer"
                                 >
                                   <span>{prod.nombre}</span>
-                                  <span className="text-[10px] text-slate-400 font-mono font-bold bg-slate-100 px-2 py-0.5 rounded">
-                                    {prod.codigo}
-                                  </span>
+                                  <span className="text-[10px] text-slate-400 font-mono">{prod.codigo}</span>
                                 </button>
                               ))}
                             </div>
@@ -3928,79 +3495,82 @@ export default function App() {
                       </div>
                     </div>
 
+                    {/* Fila 2: Descripción o Presentación */}
                     <div>
-                      <label className="text-xs font-bold text-slate-500 uppercase tracking-wider">
-                        Descripción o Presentación
+                      <label className="block text-[11px] font-black text-slate-500 uppercase tracking-wider mb-1.5">
+                        DESCRIPCIÓN O PRESENTACIÓN
                       </label>
                       <input
                         type="text"
                         placeholder="Ej. Caja por 100 cápsulas / Frasco 60ml"
                         value={newProdDesc}
                         onChange={(e) => setNewProdDesc(e.target.value)}
-                        className="mt-1.5 w-full rounded-xl border border-slate-200 px-3.5 py-2.5 text-sm outline-none focus:ring-2 focus:ring-teal-400 bg-white text-slate-800"
+                        className="w-full rounded-xl border border-slate-200 px-3.5 py-2.5 text-xs font-semibold outline-none focus:ring-2 focus:ring-teal-400 bg-slate-50/60 focus:bg-white text-slate-800"
                       />
                     </div>
 
-                    {/* Fila de Lotes y Cantidades */}
-                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5 pt-2 border-t border-slate-100">
+                    {/* Fila 3: Lote (Sistema) + Lote F / Ubicación Física */}
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                       <div>
-                        <label className="text-xs font-bold text-slate-500 uppercase tracking-wider">
-                          Lote (Sistema) *
+                        <label className="block text-[11px] font-black text-slate-500 uppercase tracking-wider mb-1.5">
+                          LOTE (SISTEMA) *
                         </label>
                         <input
                           type="text"
-                          placeholder="Ej. LOT-8942"
+                          placeholder="EJ. LOT-8942"
                           value={newProdLotNum}
-                          onChange={(e) => setNewProdLotNum(e.target.value.toUpperCase())}
-                          className="mt-1.5 w-full rounded-xl border border-slate-200 px-3.5 py-2.5 text-sm outline-none focus:ring-2 focus:ring-teal-400 bg-white uppercase font-bold text-slate-800"
+                          onChange={(e) => setNewProdLotNum(e.target.value)}
+                          className="w-full rounded-xl border border-slate-200 px-3.5 py-2.5 text-xs font-bold uppercase outline-none focus:ring-2 focus:ring-teal-400 bg-slate-50/60 focus:bg-white text-slate-800"
                         />
                       </div>
+
                       <div>
-                        <label className="text-xs font-bold text-amber-600 uppercase tracking-wider">
-                          Lote F / Ubicación Física
+                        <label className="block text-[11px] font-black text-amber-600 uppercase tracking-wider mb-1.5">
+                          LOTE F / UBICACIÓN FÍSICA
                         </label>
                         <input
                           type="text"
-                          placeholder="Ej. ESTANTE A-2"
+                          placeholder="EJ. ESTANTE A-2"
                           value={newProdLotLocation}
-                          onChange={(e) => setNewProdLotLocation(e.target.value.toUpperCase())}
-                          className="mt-1.5 w-full rounded-xl border border-amber-200 bg-amber-50/50 px-3.5 py-2.5 text-sm outline-none focus:ring-2 focus:ring-amber-400 uppercase font-bold text-slate-800"
+                          onChange={(e) => setNewProdLotLocation(e.target.value)}
+                          className="w-full rounded-xl border border-amber-300 bg-amber-50/40 px-3.5 py-2.5 text-xs font-bold uppercase outline-none focus:ring-2 focus:ring-amber-400 text-slate-800"
                         />
                       </div>
                     </div>
 
-                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-3.5">
+                    {/* Fila 4: Cantidad (Sistema) + Cantidad F (Física) + Costo Adquisición Unit. (RD$) */}
+                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
                       <div>
-                        <label className="text-xs font-bold text-slate-500 uppercase tracking-wider">
-                          Cantidad (Sistema) *
+                        <label className="block text-[11px] font-black text-slate-500 uppercase tracking-wider mb-1.5">
+                          CANTIDAD (SISTEMA) *
                         </label>
                         <input
                           type="number"
                           min="1"
                           placeholder="Ej. 10"
                           value={newProdLotQty}
-                          onFocus={(e) => e.target.select()}
                           onChange={(e) => setNewProdLotQty(e.target.value)}
-                          className="mt-1.5 w-full rounded-xl border border-slate-200 px-3.5 py-2.5 text-sm font-bold outline-none focus:ring-2 focus:ring-teal-400 bg-white text-slate-900"
+                          className="w-full rounded-xl border border-slate-200 px-3.5 py-2.5 text-xs font-bold outline-none focus:ring-2 focus:ring-teal-400 bg-slate-50/60 focus:bg-white text-slate-800"
                         />
                       </div>
+
                       <div>
-                        <label className="text-xs font-bold text-amber-600 uppercase tracking-wider">
-                          Cantidad F (Física)
+                        <label className="block text-[11px] font-black text-amber-600 uppercase tracking-wider mb-1.5">
+                          CANTIDAD F (FÍSICA)
                         </label>
                         <input
                           type="number"
                           min="0"
                           placeholder="Dejar vacío para igualar"
                           value={newProdLotQtyF}
-                          onFocus={(e) => e.target.select()}
                           onChange={(e) => setNewProdLotQtyF(e.target.value)}
-                          className="mt-1.5 w-full rounded-xl border border-amber-200 bg-amber-50/50 px-3.5 py-2.5 text-sm font-bold outline-none focus:ring-2 focus:ring-amber-400 text-slate-900"
+                          className="w-full rounded-xl border border-amber-300 bg-amber-50/40 px-3.5 py-2.5 text-xs font-bold outline-none focus:ring-2 focus:ring-amber-400 text-slate-800"
                         />
                       </div>
+
                       <div>
-                        <label className="text-xs font-bold text-slate-500 uppercase tracking-wider">
-                          Costo Adquisición Unit. (RD$) *
+                        <label className="block text-[11px] font-black text-slate-500 uppercase tracking-wider mb-1.5">
+                          COSTO ADQUISICIÓN UNIT. (RD$) *
                         </label>
                         <input
                           type="number"
@@ -4008,207 +3578,159 @@ export default function App() {
                           step="0.01"
                           placeholder="0.00"
                           value={newProdLotPrice}
-                          onFocus={(e) => e.target.select()}
                           onChange={(e) => setNewProdLotPrice(e.target.value)}
-                          className="mt-1.5 w-full rounded-xl border border-slate-200 px-3.5 py-2.5 text-sm font-bold outline-none focus:ring-2 focus:ring-teal-400 bg-white text-slate-900"
+                          className="w-full rounded-xl border border-slate-200 px-3.5 py-2.5 text-xs font-bold outline-none focus:ring-2 focus:ring-teal-400 bg-slate-50/60 focus:bg-white text-slate-800"
                         />
                       </div>
                     </div>
 
-                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
+                    {/* Fila 5: Fecha Vencimiento (Sistema) + Fecha Vencimiento F (Física) */}
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                       <div>
-                        <label className="text-xs font-bold text-slate-500 uppercase tracking-wider">
-                          Fecha Vencimiento (Sistema) *
+                        <label className="block text-[11px] font-black text-slate-500 uppercase tracking-wider mb-1.5">
+                          FECHA VENCIMIENTO (SISTEMA) *
                         </label>
                         <input
                           type="date"
                           value={newProdLotExpDate}
                           onChange={(e) => setNewProdLotExpDate(e.target.value)}
-                          className="mt-1.5 w-full rounded-xl border border-slate-200 px-3.5 py-2.5 text-xs font-bold outline-none focus:ring-2 focus:ring-teal-400 bg-white text-slate-800"
+                          className="w-full rounded-xl border border-slate-200 px-3.5 py-2.5 text-xs font-bold outline-none focus:ring-2 focus:ring-teal-400 bg-slate-50/60 focus:bg-white text-slate-800"
                         />
                       </div>
+
                       <div>
-                        <label className="text-xs font-bold text-amber-600 uppercase tracking-wider">
-                          Fecha Vencimiento F (Física)
+                        <label className="block text-[11px] font-black text-amber-600 uppercase tracking-wider mb-1.5">
+                          FECHA VENCIMIENTO F (FÍSICA)
                         </label>
                         <input
                           type="date"
                           value={newProdLotPhysExpDate}
                           onChange={(e) => setNewProdLotPhysExpDate(e.target.value)}
-                          className="mt-1.5 w-full rounded-xl border border-amber-200 bg-amber-50/50 px-3.5 py-2.5 text-xs font-bold outline-none focus:ring-2 focus:ring-amber-400 text-slate-800"
+                          className="w-full rounded-xl border border-amber-300 bg-amber-50/40 px-3.5 py-2.5 text-xs font-bold outline-none focus:ring-2 focus:ring-amber-400 text-slate-800"
                         />
                       </div>
                     </div>
 
-                    {/* Botón para añadir producto a la lista temporal */}
+                    {/* Botón + AÑADIR A LA LISTA DE ENTRADA */}
                     <div className="pt-2 flex justify-end">
                       <button
                         type="button"
                         onClick={handleAddPendingEntryItem}
-                        className="w-full sm:w-auto px-6 py-3 bg-teal-800 hover:bg-teal-900 active:scale-95 transition text-white font-black text-xs rounded-xl uppercase tracking-wider flex items-center justify-center gap-2 shadow-xs cursor-pointer"
+                        className="px-5 py-2.5 bg-teal-900 hover:bg-teal-800 active:scale-95 text-white font-black text-xs uppercase tracking-wider rounded-xl transition flex items-center gap-2 shadow-xs cursor-pointer"
                       >
                         <Plus className="w-4 h-4" />
-                        <span>+ Añadir a la Lista de Entrada</span>
+                        <span>+ AÑADIR A LA LISTA DE ENTRADA</span>
                       </button>
                     </div>
                   </div>
 
-                  {/* SECCIÓN 3: LISTA TEMPORAL DE PRODUCTOS PENDIENTES DE ENTRADA */}
+                  {/* SECCIÓN 3: PRODUCTOS PENDIENTES DE ENTRADA */}
                   <div className="space-y-3">
-                    <div className="flex items-center justify-between">
-                      <h4 className="text-xs font-black text-slate-800 uppercase tracking-wider flex items-center gap-2">
-                        <Layers className="w-4 h-4 text-teal-600" />
-                        3. Productos Pendientes de Entrada ({pendingEntryItems.length})
-                      </h4>
-                      {pendingEntryItems.length > 0 && (
-                        <span className="text-xs font-bold text-teal-800 bg-teal-50 border border-teal-200 px-2.5 py-0.5 rounded-full">
-                          Factura: {entryFacturaNum ? entryFacturaNum.toUpperCase() : "Sin asignar"}
-                        </span>
-                      )}
-                    </div>
+                    <h3 className="flex items-center gap-2 text-xs font-black uppercase tracking-wider text-slate-800 px-1">
+                      <Layers className="w-4 h-4 text-teal-600" />
+                      <span>3. PRODUCTOS PENDIENTES DE ENTRADA ({pendingEntryItems.length})</span>
+                    </h3>
 
                     {pendingEntryItems.length === 0 ? (
-                      <div className="bg-white rounded-2xl p-8 border-2 border-dashed border-slate-200 text-center">
-                        <Package className="w-9 h-9 text-slate-300 mx-auto mb-2" />
-                        <p className="text-sm font-bold text-slate-700">
+                      <div className="bg-white/80 rounded-2xl border-2 border-dashed border-slate-200 p-8 text-center space-y-2">
+                        <Package className="w-9 h-9 text-slate-300 mx-auto stroke-[1.5]" />
+                        <p className="text-xs font-extrabold text-slate-700">
                           Aún no has agregado productos a esta entrada
                         </p>
-                        <p className="text-xs text-slate-400 mt-1 max-w-md mx-auto">
-                          Completa los campos del formulario superior y haz clic en &quot;+ Añadir a la Lista de Entrada&quot;. Los productos se mantendrán en esta tabla antes de aplicarse a la base de datos.
+                        <p className="text-[11px] text-slate-400 max-w-md mx-auto leading-relaxed">
+                          Completa los campos del formulario superior y haz clic en "+ Añadir a la Lista de Entrada". Los productos se mantendrán en esta tabla antes de aplicarse a la base de datos.
                         </p>
                       </div>
                     ) : (
-                      <div className="space-y-3">
-                        {/* Notice banner */}
-                        <div className="bg-amber-50/90 border border-amber-200/90 rounded-xl p-3 flex items-start gap-2.5 text-xs text-amber-900 font-semibold shadow-2xs">
-                          <TriangleAlert className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
-                          <span>
-                            <strong>En espera de confirmación:</strong> Estos {pendingEntryItems.length} productos <strong>aún NO se han registrado en el inventario ni en el historial</strong>. Revisa sus datos en la tabla y presiona &quot;Confirmar Entrada&quot; para aplicarlos definitivamente.
-                          </span>
-                        </div>
-
-                        {/* Staged items table */}
-                        <div className="bg-white rounded-2xl border border-slate-200 overflow-hidden shadow-2xs">
-                          <div className="overflow-x-auto">
-                            <table className="w-full text-left text-xs border-collapse">
-                              <thead>
-                                <tr className="bg-slate-100 text-[11px] font-bold text-slate-600 uppercase tracking-wider border-b border-slate-200">
-                                  <th className="py-2.5 px-3 text-center w-10">#</th>
-                                  <th className="py-2.5 px-3">Código</th>
-                                  <th className="py-2.5 px-3 min-w-[180px]">Medicamento / Suministro</th>
-                                  <th className="py-2.5 px-3">Lote</th>
-                                  <th className="py-2.5 px-3">Vence</th>
-                                  <th className="py-2.5 px-3 text-right">Cant.</th>
-                                  <th className="py-2.5 px-3 text-right">Costo Unit.</th>
-                                  <th className="py-2.5 px-3 text-right">Subtotal</th>
-                                  <th className="py-2.5 px-3 text-center w-12">Quitar</th>
-                                </tr>
-                              </thead>
-                              <tbody className="divide-y divide-slate-100">
-                                {pendingEntryItems.map((item, idx) => {
-                                  const subtotal = item.qty * item.price;
-                                  return (
-                                    <tr key={item.tempId} className="hover:bg-slate-50 transition">
-                                      <td className="py-2.5 px-3 text-center font-mono font-bold text-slate-400">
-                                        {idx + 1}
-                                      </td>
-                                      <td className="py-2.5 px-3 font-mono font-bold text-teal-700">
-                                        {item.codigo}
-                                      </td>
-                                      <td className="py-2.5 px-3 font-semibold text-slate-800">
-                                        <div>{item.nombre}</div>
-                                        {item.descripcion && (
-                                          <div className="text-[10px] text-slate-400 truncate max-w-[220px]">
-                                            {item.descripcion}
-                                          </div>
-                                        )}
-                                      </td>
-                                      <td className="py-2.5 px-3 font-mono font-bold text-slate-700">
-                                        {item.lotNum}
-                                      </td>
-                                      <td className="py-2.5 px-3 font-medium text-slate-600">
-                                        {item.expDate}
-                                      </td>
-                                      <td className="py-2.5 px-3 text-right font-black text-slate-900">
-                                        {item.qty}
-                                      </td>
-                                      <td className="py-2.5 px-3 text-right font-medium text-slate-600">
-                                        {item.price > 0 ? `RD$ ${item.price.toFixed(2)}` : "—"}
-                                      </td>
-                                      <td className="py-2.5 px-3 text-right font-bold text-slate-800">
-                                        {subtotal > 0 ? `RD$ ${subtotal.toFixed(2)}` : "—"}
-                                      </td>
-                                      <td className="py-2.5 px-3 text-center">
-                                        <button
-                                          type="button"
-                                          onClick={() => handleRemovePendingEntryItem(item.tempId)}
-                                          className="p-1 text-slate-400 hover:text-rose-600 transition rounded-lg hover:bg-rose-50 cursor-pointer"
-                                          title="Eliminar de la lista temporal"
-                                        >
-                                          <Trash2 className="w-4 h-4" />
-                                        </button>
-                                      </td>
-                                    </tr>
-                                  );
-                                })}
-                              </tbody>
-                            </table>
-                          </div>
-
-                          {/* Table Totals Footer */}
-                          {(() => {
-                            const totalQty = pendingEntryItems.reduce((acc, it) => acc + it.qty, 0);
-                            const totalAmount = pendingEntryItems.reduce((acc, it) => acc + it.qty * it.price, 0);
-                            return (
-                              <div className="bg-slate-50 px-4 py-3 border-t border-slate-200 flex flex-wrap items-center justify-between gap-4 text-xs font-bold">
-                                <span className="text-slate-500">
-                                  Resumen: <strong className="text-slate-800">{pendingEntryItems.length}</strong> {pendingEntryItems.length === 1 ? "producto" : "productos"} • <strong className="text-slate-800">{totalQty}</strong> unidades
-                                </span>
-                                <div className="text-slate-700 flex items-center gap-2">
-                                  <span className="text-[11px] font-normal uppercase text-slate-400">Total Factura Estimado:</span>
-                                  <span className="text-sm font-black text-teal-800">
-                                    {totalAmount > 0 ? `RD$ ${totalAmount.toLocaleString("es-DO", { minimumFractionDigits: 2 })}` : "RD$ 0.00"}
-                                  </span>
-                                </div>
-                              </div>
-                            );
-                          })()}
+                      <div className="bg-white rounded-2xl border border-slate-200 overflow-hidden shadow-2xs">
+                        <div className="overflow-x-auto">
+                          <table className="min-w-[640px] w-full text-left border-collapse text-xs">
+                            <thead>
+                              <tr className="bg-slate-100 border-b border-slate-200 text-[10px] font-black uppercase text-slate-500 tracking-wider">
+                                <th className="px-4 py-3">Código</th>
+                                <th className="px-4 py-3">Medicamento / Insumo</th>
+                                <th className="px-4 py-3">Lote / Ubic.</th>
+                                <th className="px-4 py-3 text-right">Cant. (Sis/Fís)</th>
+                                <th className="px-4 py-3">Vence</th>
+                                <th className="px-4 py-3 text-right">Costo Unit.</th>
+                                <th className="px-4 py-3 text-right">Subtotal</th>
+                                <th className="px-3 py-3 text-center"></th>
+                              </tr>
+                            </thead>
+                            <tbody className="divide-y divide-slate-100">
+                              {pendingEntryItems.map((it) => {
+                                const sub = it.cantidad * it.precio;
+                                return (
+                                  <tr key={it.tempId} className="hover:bg-slate-50/80">
+                                    <td className="px-4 py-3 font-mono font-black text-teal-700">{it.codigo}</td>
+                                    <td className="px-4 py-3">
+                                      <p className="font-bold text-slate-800">{it.nombre}</p>
+                                      {it.descripcion && <p className="text-[10px] text-slate-400">{it.descripcion}</p>}
+                                    </td>
+                                    <td className="px-4 py-3 font-mono font-bold text-slate-700">
+                                      {it.numeroLote}
+                                      <span className="block text-[10px] text-amber-700 font-sans">
+                                        {it.loteFisico}
+                                      </span>
+                                    </td>
+                                    <td className="px-4 py-3 text-right font-bold text-slate-800">
+                                      {it.cantidad}{" "}
+                                      <span className="text-[10px] text-amber-700">({it.cantidadF})</span>
+                                    </td>
+                                    <td className="px-4 py-3 text-slate-600 font-semibold">{it.fechaVencimiento}</td>
+                                    <td className="px-4 py-3 text-right font-semibold text-slate-600">
+                                      RD$ {it.precio.toFixed(2)}
+                                    </td>
+                                    <td className="px-4 py-3 text-right font-black text-teal-800">
+                                      RD$ {sub.toFixed(2)}
+                                    </td>
+                                    <td className="px-3 py-3 text-center">
+                                      <button
+                                        type="button"
+                                        onClick={() => handleRemovePendingEntryItem(it.tempId)}
+                                        className="p-1.5 text-slate-400 hover:text-rose-600 rounded-lg transition cursor-pointer"
+                                        title="Quitar de la lista"
+                                      >
+                                        <Trash2 className="w-4 h-4" />
+                                      </button>
+                                    </td>
+                                  </tr>
+                                );
+                              })}
+                            </tbody>
+                          </table>
                         </div>
                       </div>
                     )}
                   </div>
                 </div>
 
-                {/* Modal Actions Footer */}
-                <div className="px-6 py-4 border-t border-slate-100 bg-white shrink-0 flex flex-col sm:flex-row items-center justify-between gap-3">
+                {/* Pie del Modal (Imagen 3: Cerrar + CONFIRMAR ENTRADA (X PRODUCTOS)) */}
+                <div className="px-6 py-4 border-t border-slate-200 bg-white flex flex-col sm:flex-row items-center justify-between gap-3 shrink-0">
                   <button
                     type="button"
-                    onClick={handleCloseProductAdd}
-                    className="w-full sm:w-auto px-5 py-3 border border-slate-200 hover:bg-slate-100 rounded-xl text-xs font-bold text-slate-600 transition cursor-pointer"
+                    onClick={() => setShowProductAdd(false)}
+                    className="w-full sm:w-auto px-6 py-3 rounded-xl border border-slate-200 bg-white hover:bg-slate-50 text-slate-700 font-bold text-xs transition cursor-pointer"
                   >
-                    {pendingEntryItems.length > 0 ? "Descartar y Salir" : "Cerrar"}
+                    Cerrar
                   </button>
 
                   <button
                     type="button"
-                    onClick={handleConfirmEntrySubmit}
-                    disabled={pendingEntryItems.length === 0 || !entryFacturaNum.trim() || isConfirmingEntry}
-                    className="w-full sm:w-auto px-8 py-3.5 bg-teal-600 hover:bg-teal-700 disabled:bg-slate-300 disabled:cursor-not-allowed active:scale-95 transition text-white font-black text-xs rounded-xl uppercase tracking-wider flex items-center justify-center gap-2 shadow-sm cursor-pointer"
+                    disabled={pendingEntryItems.length === 0 || confirmingEntry}
+                    onClick={handleAddProductSubmit}
+                    className={`w-full sm:w-auto px-7 py-3.5 rounded-xl font-black text-xs uppercase tracking-wider transition flex items-center justify-center gap-2 ${
+                      pendingEntryItems.length === 0 || confirmingEntry
+                        ? "bg-slate-200 text-slate-500 cursor-not-allowed"
+                        : "bg-teal-700 hover:bg-teal-800 text-white shadow-sm active:scale-95 cursor-pointer"
+                    }`}
                   >
-                    {isConfirmingEntry ? (
-                      <>
-                        <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
-                        <span>Confirmando Entrada en Base de Datos...</span>
-                      </>
-                    ) : (
-                      <>
-                        <CheckCircle2 className="w-4 h-4" />
-                        <span>
-                          Confirmar Entrada ({pendingEntryItems.length}{" "}
-                          {pendingEntryItems.length === 1 ? "producto" : "productos"})
-                        </span>
-                      </>
-                    )}
+                    <CheckCircle2 className="w-4 h-4" />
+                    <span>
+                      {confirmingEntry
+                        ? "CONFIRMANDO ENTRADA..."
+                        : `CONFIRMAR ENTRADA (${pendingEntryItems.length} PRODUCTOS)`}
+                    </span>
                   </button>
                 </div>
               </div>

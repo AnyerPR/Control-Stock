@@ -251,10 +251,8 @@ export default function OrderPanel({
                       <input
                         type="number"
                         min="1"
-                        value={item.cantidadAprobada === 0 ? "" : item.cantidadAprobada}
-                        onFocus={(e) => e.target.select()}
-                        onChange={(e) => onUpdateOrderItemQuantity(idx, e.target.value === "" ? 0 : Number(e.target.value))}
-                        placeholder="0"
+                        value={item.cantidadAprobada}
+                        onChange={(e) => onUpdateOrderItemQuantity(idx, Number(e.target.value))}
                         className="w-20 text-right rounded-lg border border-slate-200 px-2 py-1.5 font-bold text-slate-800 outline-none focus:ring-2 focus:ring-teal-400 bg-slate-50 font-sans"
                       />
                     </td>
@@ -460,7 +458,6 @@ export default function OrderPanel({
                           min="1"
                           max={maxAvailable}
                           value={orderSelectedQuantity || ""}
-                          onFocus={(e) => e.target.select()}
                           onChange={(e) =>
                             onSetOrderSelectedQuantity(e.target.value ? Number(e.target.value) : null)
                           }
