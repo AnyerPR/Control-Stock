@@ -1,5 +1,5 @@
 import React, { useRef, useState } from "react";
-import * as XLSX from "xlsx";
+import * as XLSX from "@keep-lts/xlsx";
 import { doc, writeBatch } from "firebase/firestore";
 import { db, tenantCollection } from "../firebase";
 import { Producto, Usuario, Lote, Movimiento, Catalogo, matchesCatalog } from "../types";

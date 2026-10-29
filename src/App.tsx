@@ -42,10 +42,12 @@ import ConfiguracionPanel from "./components/ConfiguracionPanel";
 import VentaPanel from "./components/VentaPanel";
 import DashboardPanel from "./components/DashboardPanel";
 import ChatLateral from "./components/ChatLateral";
-import PhotoCaptureField from "./components/PhotoCaptureField";
+import ProductPhotosEditor from "./components/ProductPhotosEditor";
+import ImageLightbox from "./components/ImageLightbox";
 import { PWAInstallButton, OfflineIndicator, APP_ICON_PATH } from "./components/PWAInstallButton";
 import { logSystemEvent } from "./utils/chatHelper";
 import { exportToWord, exportToPDF } from "./utils/exportUtils";
+import { createAdjustedLot, getProductImages } from "./utils/productPhotos";
 
 // Suministros predefinidos para autosembrado (si la base de datos está vacía)
 import { bH as DEFAULT_PRODUCTS } from "./defaultProducts";
@@ -143,6 +145,9 @@ export default function App() {
   const [editName, setEditName] = useState("");
   const [editDesc, setEditDesc] = useState("");
   const [editLotes, setEditLotes] = useState<Lote[]>([]);
+  const [editImages, setEditImages] = useState<string[]>([]);
+  const [zoomProductImage, setZoomProductImage] = useState<{ url: string; alt: string } | null>(null);
+  const [adjustingLotIds, setAdjustingLotIds] = useState<string[]>([]);
   const [isPhotoUploading, setIsPhotoUploading] = useState(false);
   const [pendingDetailPhoto, setPendingDetailPhoto] = useState<string | null>(null);
   const [coincidenLotesMap, setCoincidenLotesMap] = useState<Record<string, boolean>>({});
@@ -193,6 +198,7 @@ export default function App() {
       fechaVencimiento: string;
       fechaFisica: string;
       imagen?: string;
+      imagenes?: string[];
     }>
   >([]);
   const [confirmingEntry, setConfirmingEntry] = useState(false);
@@ -207,6 +213,8 @@ export default function App() {
   const [newProdLotExpDate, setNewProdLotExpDate] = useState("");
   const [newProdLotPhysExpDate, setNewProdLotPhysExpDate] = useState("");
   const [newProdLotPrice, setNewProdLotPrice] = useState("");
+  const [newProdPhotos, setNewProdPhotos] = useState<string[]>([]);
+  const [newProdPhotoProductCode, setNewProdPhotoProductCode] = useState<string | null>(null);
   const [newProdPhoto, setNewProdPhoto] = useState("");
   const [pendingNewProdPhoto, setPendingNewProdPhoto] = useState<string | null>(null);
 
@@ -1309,32 +1317,34 @@ export default function App() {
   // General db save helper for products
   const saveProductDoc = async (prod: Producto) => {
     const isLocalFileMode = typeof window !== "undefined" && window.location.protocol === "file:";
-    try {
-      const ref = tenantDoc("productos", prod.codigo.replace(/\//g, "_"), activeFarmaciaId);
-      const allAdjusted = prod.lotes.length > 0 && prod.lotes.every((l) => !!l.articuloAjustado);
-      const finalVerified = allAdjusted ? false : (prod.verificado || false);
+    const ref = tenantDoc("productos", prod.codigo.replace(/\//g, "_"), activeFarmaciaId);
+    const allAdjusted = prod.lotes.length > 0 && prod.lotes.every((l) => !!l.articuloAjustado);
+    const prodData: Producto = {
+      ...prod,
+      catalogId: prod.catalogId || activeCatalogId,
+      verificado: allAdjusted ? false : (prod.verificado || false),
+      updatedAt: Date.now()
+    };
 
-      const prodData = {
-        ...prod,
-        catalogId: prod.catalogId || activeCatalogId,
-        verificado: finalVerified,
-        updatedAt: Date.now()
-      };
-      setProducts(prev => {
-        const exists = prev.some(p => p.codigo === prod.codigo);
-        if (exists) {
-          return prev.map(p => p.codigo === prod.codigo ? prodData : p);
-        } else {
-          return [...prev, prodData];
-        }
-      });
-      if (!isLocalFileMode) {
-        await setDoc(ref, prodData);
-      }
-    } catch (err) {
-      console.error("Error saving product:", err);
-      showToast("Error al guardar cambios");
+    if (isLocalFileMode) {
+      const storedProducts = localStorage.getItem("offline_productos");
+      const localProducts = storedProducts ? JSON.parse(storedProducts) as Producto[] : products;
+      const exists = localProducts.some((product) => product.codigo === prod.codigo);
+      const updatedProducts = exists
+        ? localProducts.map((product) => product.codigo === prod.codigo ? prodData : product)
+        : [...localProducts, prodData];
+      localStorage.setItem("offline_productos", JSON.stringify(updatedProducts));
+      window.dispatchEvent(new Event("offline_productos_update"));
+    } else {
+      await setDoc(ref, prodData);
     }
+
+    setProducts((previous) => {
+      const exists = previous.some((product) => product.codigo === prod.codigo);
+      return exists
+        ? previous.map((product) => product.codigo === prod.codigo ? prodData : product)
+        : [...previous, prodData];
+    });
   };
 
   // Log single inventory movement
@@ -1554,6 +1564,7 @@ export default function App() {
     setEditName(prod.nombre);
     setEditDesc(prod.descripcion || "");
     setEditLotes(JSON.parse(JSON.stringify(prod.lotes))); // deep clone
+    setEditImages(getProductImages(prod));
 
     // Initialize "coinciden" checkboxes based on whether system & physical lots match
     const matchMap: Record<string, boolean> = {};
@@ -1617,6 +1628,189 @@ export default function App() {
         return l;
       })
     );
+  };
+
+  const handleToggleAdjusted = async (lotId: string, checked: boolean) => {
+    if (!selectedProductCode || !currentUser || !getEnabledModules(currentUser).includes("inventory")) {
+      showToast("No tienes permisos para ajustar este inventario.");
+      playSound("negative");
+      return;
+    }
+
+    const sourceProduct = products.find((product) => product.codigo === selectedProductCode);
+    const sourceLot = sourceProduct?.lotes.find((lot) => lot.id === lotId);
+    const draftLot = editLotes.find((lot) => lot.id === lotId);
+    if (!sourceProduct || !sourceLot || !draftLot) return;
+
+    if (checked && (
+      Number(draftLot.cantidadF) !== Number(sourceLot.cantidadF) ||
+      draftLot.loteFisico !== sourceLot.loteFisico ||
+      draftLot.fechaFisica !== sourceLot.fechaFisica
+    )) {
+      showToast("Guarda primero los cambios de los datos físicos y luego aplica el ajuste.");
+      playSound("negative");
+      return;
+    }
+    if (checked) {
+      try {
+        createAdjustedLot(sourceLot, true);
+      } catch (error) {
+        showToast(error instanceof Error ? error.message : "Los datos físicos del lote no son válidos.");
+        playSound("negative");
+        return;
+      }
+    }
+    if (adjustingLotIds.includes(lotId)) return;
+
+    setAdjustingLotIds((previous) => [...previous, lotId]);
+    try {
+      const nowTs = Date.now();
+      const nowIso = new Date(nowTs).toISOString();
+      const movementId = `ajuste-${selectedProductCode.replace(/\//g, "_")}-${lotId.replace(/\//g, "_")}-${nowTs}`;
+      const isLocalFileMode = typeof window !== "undefined" && window.location.protocol === "file:";
+      let updatedProduct: Producto | null = null;
+      let adjustmentMovement: Movimiento | null = null;
+
+      if (isLocalFileMode) {
+        const storedProducts = localStorage.getItem("offline_productos");
+        if (!storedProducts) throw new Error("No se encontró el inventario local para guardar el ajuste.");
+        const localProducts = JSON.parse(storedProducts) as Producto[];
+        const localProduct = localProducts.find((product) => product.codigo === selectedProductCode);
+        const localLot = localProduct?.lotes.find((lot) => lot.id === lotId);
+        if (!localProduct || !localLot) throw new Error("El producto o lote ya no existe en el inventario local.");
+        if (checked && localLot.articuloAjustado) {
+          updatedProduct = localProduct;
+        } else {
+          const nextLot = createAdjustedLot(localLot, checked);
+          const difference = Number(nextLot.cantidad) - Number(localLot.cantidad);
+          const nextLots = localProduct.lotes.map((lot) => lot.id === lotId ? nextLot : lot);
+          updatedProduct = {
+            ...localProduct,
+            lotes: nextLots,
+            verificado: nextLots.every((lot) => !!lot.articuloAjustado) ? false : !!localProduct.verificado,
+            updatedAt: nowTs
+          };
+          const storedMovements = localStorage.getItem("offline_movimientos");
+          const movements = storedMovements ? JSON.parse(storedMovements) as Movimiento[] : [];
+          if (checked && difference !== 0) {
+            adjustmentMovement = {
+              id: movementId,
+              productoCodigo: localProduct.codigo,
+              productoNombre: localProduct.nombre,
+              lote: nextLot.numeroLote,
+              cantidad: Math.abs(difference),
+              precio: localLot.precio,
+              tipoMovimiento: "Ajuste",
+              usuario: `${currentUser.nombre} (${currentUser.usuario})`,
+              fecha: nowIso,
+              timestamp: nowTs,
+              catalogId: localProduct.catalogId || activeCatalogId
+            };
+          }
+
+          const originalMovements = storedMovements;
+          try {
+            localStorage.setItem("offline_productos", JSON.stringify(
+              localProducts.map((product) => product.codigo === selectedProductCode ? updatedProduct : product)
+            ));
+            if (adjustmentMovement) {
+              localStorage.setItem("offline_movimientos", JSON.stringify([adjustmentMovement, ...movements]));
+            }
+          } catch (error) {
+            try {
+              localStorage.setItem("offline_productos", storedProducts);
+              if (originalMovements === null) localStorage.removeItem("offline_movimientos");
+              else localStorage.setItem("offline_movimientos", originalMovements);
+            } catch (rollbackError) {
+              console.error("No se pudo revertir el ajuste local:", rollbackError);
+            }
+            throw error;
+          }
+          window.dispatchEvent(new Event("offline_productos_update"));
+          if (adjustmentMovement) window.dispatchEvent(new Event("offline_movimientos_update"));
+        }
+      } else {
+        const productRef = tenantDoc("productos", selectedProductCode.replace(/\//g, "_"), activeFarmaciaId);
+        await runTransaction(db, async (transaction) => {
+          const snapshot = await transaction.get(productRef);
+          if (!snapshot.exists()) throw new Error("El producto ya no existe en esta sede.");
+          const serverProduct = snapshot.data() as Producto;
+          const currentLot = serverProduct.lotes.find((lot) => lot.id === lotId);
+          if (!currentLot) throw new Error("El lote ya no existe en esta sede.");
+
+          if (checked && currentLot.articuloAjustado) {
+            updatedProduct = serverProduct;
+            return;
+          }
+
+          const nextLot = createAdjustedLot(currentLot, checked);
+          const difference = Number(nextLot.cantidad) - Number(currentLot.cantidad);
+          const nextLots = serverProduct.lotes.map((lot) => lot.id === lotId ? nextLot : lot);
+          const nextProduct: Producto = {
+            ...serverProduct,
+            lotes: nextLots,
+            verificado: nextLots.every((lot) => !!lot.articuloAjustado) ? false : !!serverProduct.verificado,
+            updatedAt: nowTs
+          };
+
+          transaction.update(productRef, {
+            lotes: nextLots,
+            verificado: nextProduct.verificado,
+            updatedAt: nowTs
+          });
+          if (checked && difference !== 0) {
+            adjustmentMovement = {
+              id: movementId,
+              productoCodigo: serverProduct.codigo,
+              productoNombre: serverProduct.nombre,
+              lote: nextLot.numeroLote,
+              cantidad: Math.abs(difference),
+              precio: currentLot.precio,
+              tipoMovimiento: "Ajuste",
+              usuario: `${currentUser.nombre} (${currentUser.usuario})`,
+              fecha: nowIso,
+              timestamp: nowTs,
+              catalogId: serverProduct.catalogId || activeCatalogId
+            };
+            transaction.set(tenantDoc("movimientos", movementId, activeFarmaciaId), adjustmentMovement);
+          }
+          updatedProduct = nextProduct;
+        });
+      }
+
+      if (!updatedProduct) throw new Error("No se pudo confirmar el ajuste del lote.");
+      setProducts((previous) => previous.map((product) =>
+        product.codigo === selectedProductCode ? updatedProduct! : product
+      ));
+      const adjustedLot = updatedProduct.lotes.find((lot) => lot.id === lotId);
+      if (adjustedLot) {
+        setEditLotes((previous) => previous.map((lot) =>
+          lot.id === lotId
+            ? {
+                ...lot,
+                cantidad: adjustedLot.cantidad,
+                numeroLote: adjustedLot.numeroLote,
+                fechaVencimiento: adjustedLot.fechaVencimiento,
+                articuloAjustado: adjustedLot.articuloAjustado
+              }
+            : lot
+        ));
+      }
+      if (adjustmentMovement) {
+        logSystemEvent(`📦 **Ajuste de Inventario**: ${sourceProduct.nombre}, lote ${adjustmentMovement.lote}, cantidad ajustada ${adjustmentMovement.cantidad} por ${currentUser.nombre}.`);
+        playSound("positive");
+        showToast(`Lote ${adjustmentMovement.lote} ajustado y guardado. Se registró el movimiento de inventario.`);
+      } else {
+        playSound("positive");
+        showToast(checked ? "Lote ajustado y guardado correctamente." : "Marca «Ajustado» retirada.");
+      }
+    } catch (error) {
+      console.error("Error ajustando inventario:", error);
+      playSound("negative");
+      showToast(error instanceof Error ? error.message : "No se pudo guardar el ajuste del inventario.");
+    } finally {
+      setAdjustingLotIds((previous) => previous.filter((id) => id !== lotId));
+    }
   };
 
   // Delete Lot inside Detail Modal
@@ -1715,25 +1909,32 @@ export default function App() {
       }
     });
 
+    const productWithoutLegacyImages = { ...prod };
+    delete productWithoutLegacyImages.imagen;
+    delete productWithoutLegacyImages.imagenURL;
     const updatedProduct: Producto = {
-      ...prod,
+      ...productWithoutLegacyImages,
+      ...(editImages[0] ? { imagen: editImages[0], imagenURL: editImages[0] } : {}),
+      imagenes: editImages,
       nombre: editName.trim() || prod.nombre,
       descripcion: editDesc.trim(),
-      lotes: editLotes,
-      ...(pendingDetailPhoto ? { imagen: pendingDetailPhoto, imagenURL: pendingDetailPhoto } : {})
+      lotes: editLotes
     };
 
-    await saveProductDoc(updatedProduct);
+    try {
+      await saveProductDoc(updatedProduct);
+      for (const adj of adjustments) {
+        await saveMovementLog(adj);
+      }
 
-    // Save adjustment logs
-    for (const adj of adjustments) {
-      await saveMovementLog(adj);
+      setSelectedProductCode(null);
+      playSound("positive");
+      showToast("Los cambios del suministro se han guardado con éxito.");
+    } catch (error) {
+      console.error("Error guardando los cambios del suministro:", error);
+      playSound("negative");
+      showToast(error instanceof Error ? error.message : "Error al guardar cambios. Inténtalo nuevamente.");
     }
-
-    setPendingDetailPhoto(null);
-    setSelectedProductCode(null);
-    playSound("positive");
-    showToast("Los cambios del suministro se han guardado con éxito.");
   };
 
   // Confirm & Save Photo directly to Firebase Firestore (compressed WebP/JPEG)
@@ -1907,7 +2108,16 @@ export default function App() {
       }
     }
 
-    const finalPhoto = pendingNewProdPhoto || newProdPhoto || undefined;
+    const existingProduct = products.find((product) => product.codigo === code);
+    const existingImages = existingProduct ? getProductImages(existingProduct) : [];
+    const finalPhotos = existingProduct && newProdPhotoProductCode !== existingProduct.codigo
+      ? [...existingImages, ...newProdPhotos]
+      : newProdPhotos;
+    if (finalPhotos.length > 3) {
+      showToast(`El producto admite hasta 3 fotografías. Ya tiene ${existingImages.length}; elimina o reemplaza alguna antes de continuar.`);
+      playSound("negative");
+      return;
+    }
 
     const newItem = {
       tempId: `pend-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
@@ -1921,7 +2131,7 @@ export default function App() {
       precio: price,
       fechaVencimiento: exp,
       fechaFisica: newProdLotPhysExpDate || exp,
-      ...(finalPhoto ? { imagen: finalPhoto } : {})
+      ...(finalPhotos.length > 0 ? { imagen: finalPhotos[0], imagenes: finalPhotos } : {})
     };
 
     setPendingEntryItems((prev) => [...prev, newItem]);
@@ -1939,6 +2149,8 @@ export default function App() {
     setNewProdLotPrice("");
     setNewProdPhoto("");
     setPendingNewProdPhoto(null);
+    setNewProdPhotos([]);
+    setNewProdPhotoProductCode(null);
     playSound("action");
     showToast(`"${name}" añadido a la lista de entrada.`);
   };
@@ -1995,7 +2207,9 @@ export default function App() {
             nombre: item.nombre || existingProd.nombre,
             descripcion: item.descripcion || existingProd.descripcion || "",
             lotes: [...existingProd.lotes, newLot],
-            ...(item.imagen ? { imagen: item.imagen, imagenURL: item.imagen } : {}),
+            ...(item.imagenes?.length
+              ? { imagen: item.imagenes[0], imagenURL: item.imagenes[0], imagenes: item.imagenes }
+              : item.imagen ? { imagen: item.imagen, imagenURL: item.imagen } : {}),
             updatedAt: Date.now()
           };
           updatedProductsMap.set(item.codigo, merged);
@@ -2005,7 +2219,9 @@ export default function App() {
             nombre: item.nombre,
             descripcion: item.descripcion,
             lotes: [newLot],
-            ...(item.imagen ? { imagen: item.imagen, imagenURL: item.imagen } : {}),
+            ...(item.imagenes?.length
+              ? { imagen: item.imagenes[0], imagenURL: item.imagenes[0], imagenes: item.imagenes }
+              : item.imagen ? { imagen: item.imagen, imagenURL: item.imagen } : {}),
             updatedAt: Date.now(),
             catalogId: activeCatalogId
           };
@@ -3253,6 +3469,7 @@ export default function App() {
                       {getFilteredProducts().map((p, idx) => {
                         const stats = getProductStats(p);
                         const coords = getProductCoordinates(p.codigo);
+                        const productImage = getProductImages(p)[0];
 
                         return (
                           <div
@@ -3263,12 +3480,23 @@ export default function App() {
                           >
                             <div className="flex flex-col xs:flex-row sm:flex-row justify-between items-start gap-3 sm:gap-4">
                               <div className="flex items-start gap-3 min-w-0 flex-1 w-full">
-                                {p.imagen || p.imagenURL ? (
-                                  <img
-                                    src={p.imagen || p.imagenURL}
-                                    alt={p.nombre}
-                                    className="w-12 h-12 sm:w-14 sm:h-14 rounded-2xl object-cover border border-slate-200 shrink-0 shadow-2xs"
-                                  />
+                                {productImage ? (
+                                  <button
+                                    type="button"
+                                    aria-label={`Ampliar fotografía de ${p.nombre}`}
+                                    onClick={(event) => {
+                                      event.preventDefault();
+                                      event.stopPropagation();
+                                      setZoomProductImage({ url: productImage, alt: p.nombre });
+                                    }}
+                                    className="h-12 w-12 shrink-0 cursor-zoom-in overflow-hidden rounded-2xl border border-slate-200 shadow-2xs sm:h-14 sm:w-14"
+                                  >
+                                    <img
+                                      src={productImage}
+                                      alt={p.nombre}
+                                      className="h-full w-full object-cover"
+                                    />
+                                  </button>
                                 ) : (
                                   <div className="w-12 h-12 sm:w-14 sm:h-14 rounded-2xl bg-slate-50 border border-slate-200/90 flex items-center justify-center shrink-0 text-teal-600/70 shadow-2xs">
                                     <Package className="w-5 h-5 sm:w-6 sm:h-6" />
@@ -3441,23 +3669,7 @@ export default function App() {
                 </div>
 
                 <div className="flex-1 overflow-y-auto px-6 py-6 space-y-6">
-                  {/* Photo Capture & Selection Card */}
-                  <div>
-                    <PhotoCaptureField
-                      label="Fotografía del Suministro"
-                      currentImageUrl={
-                        products.find((p) => p.codigo === selectedProductCode)?.imagen ||
-                        products.find((p) => p.codigo === selectedProductCode)?.imagenURL
-                      }
-                      onConfirmImage={handleConfirmProductPhoto}
-                      onDeleteImage={() => handlePhotoDelete()}
-                      onPendingChange={setPendingDetailPhoto}
-                      isSaving={isPhotoUploading}
-                      placeholderText="Toma una fotografía al momento o selecciona una imagen desde tu dispositivo"
-                      heightClass="h-52"
-                      objectFit="cover"
-                    />
-                  </div>
+                  <ProductPhotosEditor images={editImages} onChange={setEditImages} />
 
                   <div className="bg-white rounded-2xl p-5 border border-slate-200/90 space-y-4 shadow-2xs">
                     <div>
@@ -3566,10 +3778,12 @@ export default function App() {
                                   <input
                                     type="checkbox"
                                     checked={!!l.articuloAjustado}
-                                    onChange={(e) => handleEditLotField(l.id, "articuloAjustado", e.target.checked)}
+                                    disabled={adjustingLotIds.includes(l.id)}
+                                    onChange={(e) => void handleToggleAdjusted(l.id, e.target.checked)}
                                     className="w-4 h-4 rounded text-amber-600 focus:ring-amber-500"
                                   />
                                   <span className="text-amber-800 font-extrabold">Ajustado</span>
+                                  {adjustingLotIds.includes(l.id) && <span className="text-[10px] text-slate-500">Guardando…</span>}
                                 </label>
 
                                 <button
@@ -3915,7 +4129,16 @@ export default function App() {
                           type="text"
                           placeholder="AUTO O EJ. A100"
                           value={newProdCode}
-                          onChange={(e) => setNewProdCode(e.target.value)}
+                          onChange={(e) => {
+                            const code = e.target.value;
+                            const matchingProduct = products.find((product) =>
+                              product.codigo === code.trim().toUpperCase() &&
+                              matchesCatalog(product.catalogId, activeCatalogId, catalogos)
+                            );
+                            setNewProdCode(code);
+                            setNewProdPhotos(matchingProduct ? getProductImages(matchingProduct) : []);
+                            setNewProdPhotoProductCode(matchingProduct?.codigo || null);
+                          }}
                           className="w-full rounded-xl border border-slate-300 px-3.5 py-2.5 text-xs outline-none focus:ring-2 focus:ring-teal-500/30 bg-white font-mono font-bold uppercase text-slate-900"
                         />
                       </div>
@@ -3953,6 +4176,8 @@ export default function App() {
                                     setNewProdName(prod.nombre);
                                     setNewProdDesc(prod.descripcion || "");
                                     setNewProdCode(prod.codigo);
+                                    setNewProdPhotos(getProductImages(prod));
+                                    setNewProdPhotoProductCode(prod.codigo);
                                     setShowNameSuggestions(false);
                                     playSound("click");
                                   }}
@@ -4084,28 +4309,9 @@ export default function App() {
                       </div>
                     </div>
 
-                    {/* Fila 6: Fotografía del Producto (Opcional) */}
+                    {/* Fila 6: Fotografías del Producto (Opcional) */}
                     <div className="pt-1">
-                      <PhotoCaptureField
-                        label="FOTOGRAFÍA DEL PRODUCTO (OPCIONAL)"
-                        currentImageUrl={newProdPhoto || undefined}
-                        onConfirmImage={(dataUrl) => {
-                          setNewProdPhoto(dataUrl);
-                          setPendingNewProdPhoto(null);
-                          showToast("Fotografía confirmada para el producto.");
-                          playSound("positive");
-                        }}
-                        onDeleteImage={() => {
-                          setNewProdPhoto("");
-                          setPendingNewProdPhoto(null);
-                          playSound("negative");
-                        }}
-                        onPendingChange={setPendingNewProdPhoto}
-                        placeholderText="Toma una fotografía al momento o selecciona una desde el dispositivo"
-                        heightClass="h-40"
-                        objectFit="cover"
-                        compact
-                      />
+                      <ProductPhotosEditor images={newProdPhotos} onChange={setNewProdPhotos} />
                     </div>
                     <div className="pt-2 flex justify-end">
                       <button
@@ -4232,6 +4438,12 @@ export default function App() {
             </div>
           )}
           
+          <ImageLightbox
+            imageUrl={zoomProductImage?.url || null}
+            alt={zoomProductImage?.alt || "Fotografía del producto"}
+            onClose={() => setZoomProductImage(null)}
+          />
+
           {/* Global Lateral Chat drawer */}
           {!showProductAdd && <ChatLateral currentUser={currentUser} />}
         </div>

@@ -24,6 +24,7 @@ export interface Producto {
   descripcion?: string;
   imagen?: string;
   imagenURL?: string;
+  imagenes?: string[];
   verificado?: boolean;
   lotes: Lote[];
   updatedAt: number;

@@ -12,6 +12,7 @@ import {
   Trash2
 } from "lucide-react";
 import { playSound } from "../utils/audio";
+import ImageLightbox from "./ImageLightbox";
 
 interface PhotoCaptureFieldProps {
   currentImageUrl?: string;
@@ -139,6 +140,7 @@ export default function PhotoCaptureField({
   compact = false
 }: PhotoCaptureFieldProps) {
   const [pendingPreview, setPendingPreview] = useState<string | null>(null);
+  const [zoomImage, setZoomImage] = useState<string | null>(null);
   const [processingFile, setProcessingFile] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
@@ -384,13 +386,24 @@ export default function PhotoCaptureField({
           </div>
         ) : displayImage ? (
           <>
-            <img
-              src={displayImage}
-              alt="Vista previa de fotografía"
-              className={`w-full h-full ${
-                objectFit === "contain" ? "object-contain p-3" : "object-cover"
-              }`}
-            />
+            <button
+              type="button"
+              onClick={(event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                setZoomImage(displayImage);
+              }}
+              aria-label="Ampliar fotografía"
+              className="h-full w-full cursor-zoom-in"
+            >
+              <img
+                src={displayImage}
+                alt="Vista previa de fotografía"
+                className={`w-full h-full ${
+                  objectFit === "contain" ? "object-contain p-3" : "object-cover"
+                }`}
+              />
+            </button>
 
             {/* Badge when in preview state */}
             {pendingPreview ? (
@@ -658,6 +671,11 @@ export default function PhotoCaptureField({
           </div>
         </div>
       )}
+      <ImageLightbox
+        imageUrl={zoomImage}
+        alt="Fotografía ampliada"
+        onClose={() => setZoomImage(null)}
+      />
     </div>
   );
 }
