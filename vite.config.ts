@@ -24,7 +24,7 @@ export default defineConfig(() => {
           'assets/aistudio/farmacia_6a281112.png'
         ],
         manifest: {
-          id: '/',
+          id: './',
           name: 'Control de Stock Hospitalario',
           short_name: 'Farmacia',
           description: 'Sistema de control de inventario de medicamentos y gestión de solicitudes y órdenes hospitalarias.',
@@ -32,29 +32,30 @@ export default defineConfig(() => {
           background_color: '#f1f5f9',
           display: 'standalone',
           orientation: 'any',
-          start_url: '/',
-          scope: '/',
+          start_url: './',
+          scope: './',
+          lang: 'es',
           icons: [
             {
-              src: '/pwa-192x192.png',
+              src: 'pwa-192x192.png',
               sizes: '192x192',
               type: 'image/png',
               purpose: 'any',
             },
             {
-              src: '/pwa-512x512.png',
+              src: 'pwa-512x512.png',
               sizes: '512x512',
               type: 'image/png',
               purpose: 'any',
             },
             {
-              src: '/assets/aistudio/farmacia_6a281112.png',
+              src: 'assets/aistudio/farmacia_6a281112.png',
               sizes: '512x512',
               type: 'image/png',
               purpose: 'any',
             },
             {
-              src: '/pwa-maskable-512x512.png',
+              src: 'pwa-maskable-512x512.png',
               sizes: '512x512',
               type: 'image/png',
               purpose: 'maskable',
