@@ -1,30 +1,137 @@
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&display=swap');
 @import "tailwindcss";
 
 @theme {
-  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-sans: "Plus Jakarta Sans", "Inter", ui-sans-serif, system-ui, -apple-system, sans-serif;
   --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
 }
 
-/* Hide scrollbar for Chrome, Safari and Opera */
-.chip-scroll::-webkit-scrollbar {
-  display: none;
+@layer base {
+  html {
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    text-rendering: optimizeLegibility;
+    scroll-behavior: smooth;
+    -webkit-tap-highlight-color: transparent;
+    overflow-x: hidden;
+  }
+
+  body {
+    background-color: #f1f5f9;
+    color: #0f172a;
+    font-feature-settings: "cv02", "cv03", "cv04", "cv11";
+    overflow-x: hidden;
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+  }
+
+  /* Mejorar legibilidad, contraste y fluidez global en campos de formulario y listas desplegables */
+  input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="color"]),
+  select,
+  textarea {
+    transition: border-color 0.18s ease, box-shadow 0.18s ease, background-color 0.18s ease;
+    font-size: 0.875rem;
+    line-height: 1.35rem;
+  }
+
+  /* Evitar auto-zoom en teléfonos móviles (iOS/Android) al tocar campos de formulario */
+  @media (max-width: 640px) {
+    input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="color"]),
+    select,
+    textarea {
+      font-size: 16px !important;
+    }
+  }
+
+  input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="color"]):hover:not(:disabled),
+  select:hover:not(:disabled),
+  textarea:hover:not(:disabled) {
+    border-color: #94a3b8;
+  }
+
+  input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="color"]):focus,
+  select:focus,
+  textarea:focus {
+    border-color: #0d9488;
+    box-shadow: 0 0 0 3px rgba(13, 148, 136, 0.16);
+  }
+
+  input::placeholder,
+  textarea::placeholder {
+    color: #64748b;
+    opacity: 0.85;
+  }
+
+  /* Números tabulares para alineación perfecta de precios, códigos, lotes y cantidades */
+  input[type="number"],
+  .font-mono,
+  .tabular-nums,
+  table td,
+  table th {
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* Transiciones suaves y respuesta táctil rápida para botones e interacciones */
+  button,
+  a,
+  select,
+  input[type="checkbox"],
+  input[type="radio"] {
+    touch-action: manipulation;
+  }
+
+  button {
+    transition: all 0.18s cubic-bezier(0.16, 1, 0.3, 1);
+  }
+
+  /* Mejora de visualización y desplazamiento táctil fluido en tablas */
+  .overflow-x-auto {
+    -webkit-overflow-scrolling: touch;
+  }
+
+  table thead th {
+    letter-spacing: 0.05em;
+  }
 }
 
-/* Hide scrollbar for IE, Edge and Firefox */
+/* Ocultar barra de desplazamiento en contenedores de pestañas y filtros horizontales */
+.chip-scroll::-webkit-scrollbar {
+  display: none;
+  height: 0px;
+}
+
 .chip-scroll {
-  -ms-overflow-style: none;  /* IE and Edge */
-  scrollbar-width: none;  /* Firefox */
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
+/* Barra de desplazamiento estilizada y discreta para tablas y modales */
+::-webkit-scrollbar {
+  width: 7px;
+  height: 7px;
+}
+
+::-webkit-scrollbar-track {
+  background: #f1f5f9;
+  border-radius: 9999px;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #cbd5e1;
+  border-radius: 9999px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #94a3b8;
 }
 
 @keyframes pop-in {
   from {
     opacity: 0;
-    transform: scale(0.95);
+    transform: scale(0.96) translateY(4px);
   }
   to {
     opacity: 1;
-    transform: scale(1);
+    transform: scale(1) translateY(0);
   }
 }
 
@@ -37,14 +144,29 @@
   }
 }
 
+@keyframes toast-in {
+  from {
+    opacity: 0;
+    transform: translate(-50%, 12px) scale(0.96);
+  }
+  to {
+    opacity: 1;
+    transform: translate(-50%, 0) scale(1);
+  }
+}
+
 .anim-pop-in {
-  animation: pop-in 0.2s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+  animation: pop-in 0.22s cubic-bezier(0.16, 1, 0.3, 1) forwards;
 }
 
 .anim-card-in {
-  animation: pop-in 0.35s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+  animation: pop-in 0.3s cubic-bezier(0.16, 1, 0.3, 1) forwards;
 }
 
 .animate-fade-in {
-  animation: fade-in 0.15s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+  animation: fade-in 0.18s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+.anim-toast {
+  animation: toast-in 0.25s cubic-bezier(0.16, 1, 0.3, 1) forwards;
 }

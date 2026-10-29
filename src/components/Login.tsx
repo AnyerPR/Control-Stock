@@ -28,6 +28,7 @@ import {
   X,
   ChevronDown
 } from "lucide-react";
+import { PWAInstallButton, APP_ICON_PATH } from "./PWAInstallButton";
 
 interface LoginProps {
   users: Usuario[];
@@ -382,14 +383,19 @@ export default function Login({ users, isInitializingUsers, onLoginSuccess }: Lo
         ) {
           preVerifiedFirestoreUser = foundInSelectedTenant;
         } else if (!matchesDefaultAdminPass) {
-          // Antes de rechazar, verificar si existe en otra farmacia con esa contraseña (ej. usuario "admin" en otra sede)
+          // Antes de rechazar, verificar en paralelo si existe en otra farmacia con esa contraseña
           let foundInOtherFarmacia: { user: Usuario; tenant: FarmaciaTenant } | null = null;
           try {
             const secDb = await getDirectoryFirestore();
             const farmSnap = await getDocs(collection(secDb, "farmacias"));
-            for (const fDoc of farmSnap.docs) {
-              if (fDoc.id === cleanTenant) continue;
-              const candidateUser = await findUserInTenant(fDoc.id, cleanUsername);
+            const otherDocs = farmSnap.docs.filter((fDoc) => fDoc.id !== cleanTenant);
+            const candidates = await Promise.all(
+              otherDocs.map(async (fDoc) => {
+                const candidateUser = await findUserInTenant(fDoc.id, cleanUsername);
+                return { fDoc, candidateUser };
+              })
+            );
+            for (const { fDoc, candidateUser } of candidates) {
               if (
                 candidateUser &&
                 (candidateUser.contrasenaHash === inputHash || candidateUser.contrasenaHash === password)
@@ -415,15 +421,19 @@ export default function Login({ users, isInitializingUsers, onLoginSuccess }: Lo
         }
       }
 
-      // 2.B AUTO-DETECCIÓN DE FARMACIA: Si no se encontró en la sede actual (ej. estaba en "principal" por defecto),
-      // buscar automáticamente en todas las farmacias registradas si el usuario pertenece a una de ellas.
+      // 2.B AUTO-DETECCIÓN DE FARMACIA EN PARALELO: Si no se encontró en la sede actual,
+      // buscar simultáneamente en todas las farmacias registradas.
       if (!preVerifiedFirestoreUser && !matchesDefaultAdminPass) {
         try {
           const secDb = await getDirectoryFirestore();
           const farmSnap = await getDocs(collection(secDb, "farmacias"));
-          for (const fDoc of farmSnap.docs) {
-            const fData = { ...(fDoc.data() as FarmaciaTenant), id: fDoc.id };
-            const candidateUser = await findUserInTenant(fDoc.id, cleanUsername);
+          const candidates = await Promise.all(
+            farmSnap.docs.map(async (fDoc) => {
+              const candidateUser = await findUserInTenant(fDoc.id, cleanUsername);
+              return { fDoc, candidateUser };
+            })
+          );
+          for (const { fDoc, candidateUser } of candidates) {
             if (candidateUser) {
               if (
                 candidateUser.contrasenaHash === inputHash ||
@@ -595,38 +605,38 @@ export default function Login({ users, isInitializingUsers, onLoginSuccess }: Lo
   };
 
   return (
-    <div className="min-h-screen bg-slate-100 flex flex-col justify-center py-12 sm:px-6 lg:px-8 font-sans">
+    <div className="min-h-screen bg-gradient-to-b from-slate-100 to-slate-200/80 flex flex-col justify-center py-8 sm:py-12 sm:px-6 lg:px-8 font-sans">
       <div className="sm:mx-auto sm:w-full sm:max-w-md text-center px-4">
-        <div className="mx-auto h-16 w-16 bg-teal-800 rounded-3xl flex items-center justify-center shadow-md text-white mb-4">
-          <Hospital className="w-9 h-9" />
+        <div className="mx-auto h-18 w-18 bg-white rounded-2xl flex items-center justify-center shadow-lg shadow-teal-950/15 mb-3.5 border border-slate-200/90 p-2">
+          <img
+            src={APP_ICON_PATH}
+            alt="Icono de la Aplicación"
+            className="w-full h-full object-contain"
+          />
         </div>
-        <h2 className="text-3xl font-black text-slate-900 tracking-tight">{farmaciaTitle}</h2>
-        <p className="mt-1.5 text-sm font-semibold text-teal-700">{farmaciaSubtitle}</p>
-        <div className="mt-2.5 inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-emerald-50 border border-emerald-200 text-[11px] font-bold text-emerald-800">
-          <ShieldCheck className="w-3.5 h-3.5 text-emerald-600" />
-          <span>Firebase Authentication • Multi-Farmacia Activo</span>
-        </div>
+        <h2 className="text-2xl sm:text-3xl font-extrabold text-slate-900 tracking-tight">{farmaciaTitle}</h2>
+        <p className="mt-1 text-xs sm:text-sm font-bold text-teal-800">{farmaciaSubtitle}</p>
       </div>
 
-      <div className="mt-6 sm:mx-auto sm:w-full sm:max-w-md px-4 sm:px-0">
-        <div className="bg-white py-8 px-6 border border-slate-200 shadow-md rounded-3xl sm:px-10">
-          <div className="flex items-center justify-between border-b border-slate-100 pb-3 mb-5">
-            <h3 className="text-lg font-black text-slate-800">Iniciar Sesión</h3>
-            <span className="inline-flex items-center gap-1.5 text-[11px] font-extrabold text-teal-700 bg-teal-50 border border-teal-200 px-2.5 py-1 rounded-xl">
-              <Building2 className="w-3.5 h-3.5" />
-              <span>Sede: {normalizeFarmaciaId(farmaciaId)}</span>
+      <div className="mt-5 sm:mt-6 sm:mx-auto sm:w-full sm:max-w-md px-4 sm:px-0">
+        <div className="bg-white py-6 sm:py-8 px-5 border border-slate-200/90 shadow-xl shadow-slate-900/5 rounded-3xl sm:px-10">
+          <div className="flex items-center justify-between border-b border-slate-200/80 pb-3.5 mb-5 gap-2">
+            <h3 className="text-base sm:text-lg font-extrabold text-slate-900">Iniciar Sesión</h3>
+            <span className="inline-flex items-center gap-1.5 text-[11px] font-extrabold text-teal-800 bg-teal-50 border border-teal-200 px-3 py-1 rounded-xl truncate max-w-[180px]">
+              <Building2 className="w-3.5 h-3.5 text-teal-700 shrink-0" />
+              <span className="truncate">Sede: {normalizeFarmaciaId(farmaciaId)}</span>
             </span>
           </div>
 
           {isInitializingUsers ? (
-            <div className="flex flex-col items-center justify-center py-6 text-slate-400">
-              <LoaderCircle className="w-8 h-8 animate-spin text-teal-600 mb-2" />
-              <p className="text-xs font-semibold text-slate-500">Verificando sesión de seguridad...</p>
+            <div className="flex flex-col items-center justify-center py-8 text-slate-500">
+              <LoaderCircle className="w-8 h-8 animate-spin text-teal-600 mb-2.5" />
+              <p className="text-xs font-bold text-slate-600">Verificando sesión de seguridad...</p>
             </div>
           ) : (
             <form onSubmit={handleSubmit} className="space-y-4">
               {error && (
-                <div className="rounded-xl bg-rose-50 border border-rose-200 p-3.5 flex flex-col gap-2 text-xs text-rose-800 font-semibold anim-card-in">
+                <div className="rounded-2xl bg-rose-50 border border-rose-200 p-4 flex flex-col gap-2 text-xs text-rose-800 font-bold anim-card-in">
                   <div className="flex items-start gap-2.5">
                     <ShieldAlert className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
                     <span>{error}</span>
@@ -635,7 +645,7 @@ export default function Login({ users, isInitializingUsers, onLoginSuccess }: Lo
                     <button
                       type="button"
                       onClick={() => setShowRulesModal(true)}
-                      className="self-start mt-1 bg-rose-700 hover:bg-rose-800 text-white font-black px-3 py-1.5 rounded-lg text-[11px] uppercase tracking-wider transition cursor-pointer"
+                      className="self-start mt-1 bg-rose-700 hover:bg-rose-800 text-white font-extrabold px-3.5 py-2 rounded-xl text-[11px] uppercase tracking-wider transition cursor-pointer"
                     >
                       Ver y Copiar Reglas de Firestore
                     </button>
@@ -644,15 +654,15 @@ export default function Login({ users, isInitializingUsers, onLoginSuccess }: Lo
               )}
 
               {/* Selector Visible de Farmacia / Sede */}
-              <div className="bg-slate-50 p-3.5 rounded-2xl border border-slate-200/80 space-y-2">
+              <div className="bg-slate-50/90 p-4 rounded-2xl border border-slate-200/90 space-y-2.5">
                 <div className="flex items-center justify-between">
-                  <label className="block text-[11px] font-black uppercase text-slate-600 tracking-wider">
+                  <label className="block text-[11px] font-extrabold uppercase text-slate-700 tracking-wider">
                     Farmacia / Sede de Acceso
                   </label>
                   <button
                     type="button"
                     onClick={() => setShowCustomCodeInput((prev) => !prev)}
-                    className="text-[10px] font-bold text-teal-700 hover:underline cursor-pointer"
+                    className="text-[11px] font-extrabold text-teal-700 hover:text-teal-900 hover:underline cursor-pointer"
                   >
                     {showCustomCodeInput ? "Elegir de la lista" : "Escribir código manual"}
                   </button>
@@ -660,11 +670,11 @@ export default function Login({ users, isInitializingUsers, onLoginSuccess }: Lo
 
                 {!showCustomCodeInput ? (
                   <div className="relative">
-                    <Building2 className="w-4 h-4 absolute left-3.5 top-1/2 -translate-y-1/2 text-teal-600 pointer-events-none" />
+                    <Building2 className="w-4 h-4 absolute left-3.5 top-1/2 -translate-y-1/2 text-teal-700 pointer-events-none" />
                     <select
                       value={normalizeFarmaciaId(farmaciaId)}
                       onChange={(e) => setFarmaciaId(e.target.value)}
-                      className="w-full rounded-xl border border-slate-200 bg-white pl-10 pr-8 py-2.5 text-xs font-bold outline-none focus:ring-2 focus:ring-teal-400 text-slate-800 appearance-none cursor-pointer"
+                      className="w-full rounded-xl border border-slate-300 bg-white pl-10 pr-9 py-2.5 text-xs font-bold outline-none focus:ring-2 focus:ring-teal-500/30 text-slate-900 appearance-none cursor-pointer shadow-2xs"
                     >
                       <option value="principal">
                         🏥 Sede Principal (Dr. José Manuel Rodríguez)
@@ -675,27 +685,27 @@ export default function Login({ users, isInitializingUsers, onLoginSuccess }: Lo
                         </option>
                       ))}
                     </select>
-                    <ChevronDown className="w-4 h-4 absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none" />
+                    <ChevronDown className="w-4 h-4 absolute right-3 top-1/2 -translate-y-1/2 text-slate-500 pointer-events-none" />
                   </div>
                 ) : (
                   <div className="relative">
-                    <Building2 className="w-4 h-4 absolute left-3.5 top-1/2 -translate-y-1/2 text-teal-600" />
+                    <Building2 className="w-4 h-4 absolute left-3.5 top-1/2 -translate-y-1/2 text-teal-700" />
                     <input
                       type="text"
                       value={farmaciaId}
                       onChange={(e) => setFarmaciaId(e.target.value)}
                       placeholder="Ej: principal o código de la farmacia"
-                      className="w-full rounded-xl border border-slate-200 bg-white pl-10 pr-4 py-2 text-xs font-bold outline-none focus:ring-2 focus:ring-teal-400 text-slate-800"
+                      className="w-full rounded-xl border border-slate-300 bg-white pl-10 pr-4 py-2.5 text-xs font-bold outline-none focus:ring-2 focus:ring-teal-500/30 text-slate-900 shadow-2xs"
                     />
                   </div>
                 )}
-                <p className="text-[10px] text-slate-500 font-medium">
+                <p className="text-[11px] text-slate-500 font-medium leading-relaxed">
                   Selecciona tu farmacia o ingresa directamente tu usuario y contraseña (el sistema detectará tu sede automáticamente).
                 </p>
               </div>
 
               <div>
-                <label className="block text-xs font-black uppercase text-slate-500 tracking-wider mb-1.5">
+                <label className="block text-xs font-extrabold uppercase text-slate-700 tracking-wider mb-1.5">
                   Usuario
                 </label>
                 <div className="relative">
@@ -706,13 +716,13 @@ export default function Login({ users, isInitializingUsers, onLoginSuccess }: Lo
                     value={username}
                     onChange={(e) => setUsername(e.target.value)}
                     placeholder="Tu nombre de usuario (ej. admin o Anyer)"
-                    className="w-full rounded-xl border border-slate-200 bg-white pl-10 pr-4 py-2.5 text-sm outline-none focus:ring-2 focus:ring-teal-400 text-slate-800"
+                    className="w-full rounded-xl border border-slate-300 bg-white pl-10 pr-4 py-3 text-sm font-semibold outline-none focus:ring-2 focus:ring-teal-500/30 text-slate-900 shadow-2xs"
                   />
                 </div>
               </div>
 
               <div>
-                <label className="block text-xs font-black uppercase text-slate-500 tracking-wider mb-1.5">
+                <label className="block text-xs font-extrabold uppercase text-slate-700 tracking-wider mb-1.5">
                   Contraseña
                 </label>
                 <div className="relative">
@@ -723,7 +733,7 @@ export default function Login({ users, isInitializingUsers, onLoginSuccess }: Lo
                     value={password}
                     onChange={(e) => setPassword(e.target.value)}
                     placeholder="••••••"
-                    className="w-full rounded-xl border border-slate-200 bg-white pl-10 pr-4 py-2.5 text-sm outline-none focus:ring-2 focus:ring-teal-400 text-slate-800"
+                    className="w-full rounded-xl border border-slate-300 bg-white pl-10 pr-4 py-3 text-sm font-semibold outline-none focus:ring-2 focus:ring-teal-500/30 text-slate-900 shadow-2xs"
                   />
                 </div>
               </div>
@@ -731,31 +741,21 @@ export default function Login({ users, isInitializingUsers, onLoginSuccess }: Lo
               <button
                 type="submit"
                 disabled={loading}
-                className="w-full rounded-xl bg-teal-800 hover:bg-teal-700 disabled:bg-slate-300 text-white py-3 text-sm font-bold tracking-wide uppercase transition shadow-sm flex items-center justify-center gap-2 cursor-pointer"
+                className="w-full rounded-xl bg-teal-800 hover:bg-teal-700 active:scale-[0.99] disabled:bg-slate-300 text-white py-3.5 text-sm font-extrabold tracking-wider uppercase transition shadow-md shadow-teal-900/15 flex items-center justify-center gap-2 cursor-pointer"
               >
                 {loading ? (
                   <>
                     <LoaderCircle className="w-4 h-4 animate-spin" />
-                    Autenticando...
+                    <span>Autenticando...</span>
                   </>
                 ) : (
-                  "Entrar al Sistema"
+                  <span>Entrar al Sistema</span>
                 )}
               </button>
-
-              <div className="pt-3 border-t border-slate-100 flex items-center justify-between text-[11px]">
-                <span className="text-slate-400 font-semibold">¿Bloqueado por reglas en Firebase?</span>
-                <button
-                  type="button"
-                  onClick={() => setShowRulesModal(true)}
-                  className="text-teal-700 hover:text-teal-900 font-extrabold underline cursor-pointer"
-                >
-                  Copiar Reglas de Firestore
-                </button>
-              </div>
             </form>
           )}
         </div>
+        <PWAInstallButton variant="login" />
       </div>
 
       {/* Modal con las Reglas de Seguridad de Firestore listas para copiar */}

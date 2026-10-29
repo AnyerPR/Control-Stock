@@ -145,6 +145,8 @@ export function tenantDoc(collectionName: string, docId: string, farmaciaIdOverr
   return doc(db, "farmacias", tenantId, collectionName, docId);
 }
 
+const provisionedUsersCache = new Set<string>();
+
 /**
  * Registra o sincroniza un usuario en Firebase Authentication en segundo plano
  * usando una instancia secundaria para no cerrar la sesión del administrador actual.
@@ -157,12 +159,24 @@ export async function provisionUserInFirebaseAuth(
   if (!passwordHash || passwordHash.length < 6) return false;
   const cleanTenant = normalizeFarmaciaId(farmaciaId ?? getActiveFarmaciaId());
   const cleanUser = normalizeUsernameForEmail(username) || "usuario";
+  const cacheKey = `${cleanTenant}::${cleanUser}::${passwordHash.slice(0, 12)}`;
+
+  if (provisionedUsersCache.has(cacheKey)) return true;
+  try {
+    if (sessionStorage.getItem(`auth_prov_${cacheKey}`) === "1") {
+      provisionedUsersCache.add(cacheKey);
+      return true;
+    }
+  } catch {}
+
   const email = getTenantAuthEmail(username, cleanTenant);
   const versionedEmail = `${cleanUser}.${passwordHash.slice(0, 8)}@${cleanTenant}.controlstock.local`;
 
   try {
     const secAuth = getSecondaryAuth();
     await createUserWithEmailAndPassword(secAuth, email, passwordHash);
+    provisionedUsersCache.add(cacheKey);
+    try { sessionStorage.setItem(`auth_prov_${cacheKey}`, "1"); } catch {}
     return true;
   } catch (err: any) {
     if (err?.code === "auth/email-already-in-use") {
@@ -172,6 +186,8 @@ export async function provisionUserInFirebaseAuth(
       } catch {
         // Versioned email also exists
       }
+      provisionedUsersCache.add(cacheKey);
+      try { sessionStorage.setItem(`auth_prov_${cacheKey}`, "1"); } catch {}
       return true;
     }
     console.warn(`No se pudo aprovisionar ${email} en Firebase Auth:`, err?.code || err);

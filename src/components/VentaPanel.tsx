@@ -10,7 +10,9 @@ import {
   VentaItem,
   FacturaVenta,
   InstitucionInfo,
-  Movimiento
+  Movimiento,
+  getUserAvailableCatalogos,
+  getEnabledModules
 } from "../types";
 import {
   getActiveInstitucionInfo,
@@ -94,17 +96,8 @@ export default function VentaPanel({
   };
 
   const activeCatalogosList = useMemo(() => {
-    const active = (catalogos || []).filter((c) => c.activo);
-    if (active.length > 0) return active;
-    return [
-      {
-        id: "default-cat",
-        nombre: "Medicamentos e Insumos",
-        activo: true,
-        createdAt: Date.now()
-      }
-    ];
-  }, [catalogos]);
+    return getUserAvailableCatalogos(currentUser, catalogos);
+  }, [currentUser, catalogos]);
 
   const activeConceptos = useMemo(() => {
     const list = conceptos && conceptos.length > 0 ? conceptos : DEFAULT_CONCEPTOS_FACTURA;
@@ -201,7 +194,7 @@ export default function VentaPanel({
     return () => {
       cancelled = true;
     };
-  }, [isLocalFileMode]);
+  }, [isLocalFileMode, currentUser?.farmaciaId]);
 
   const activeCatalogName = useMemo(() => {
     if (selectedCatalogId === "todos") return "Todos los Catálogos";
@@ -546,6 +539,10 @@ export default function VentaPanel({
 
   const handleEmitirFactura = async (exportFormat?: "pdf" | "word" | "whatsapp") => {
     if (submitting) return;
+    if (!getEnabledModules(currentUser).includes("venta")) {
+      showToast("Acceso denegado: No tienes permisos autorizados para el módulo de Ventas.");
+      return;
+    }
     if (itemsFactura.length === 0) {
       alert("Agregue al menos un medicamento, insumo o producto a la factura.");
       return;

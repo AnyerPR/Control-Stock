@@ -75,20 +75,20 @@ export default function BlockPanel({
   const targetProduct = products.find((p) => p.codigo === blockAddProduct);
 
   return (
-    <div className="anim-card-in mb-6 rounded-3xl bg-white border border-slate-200 shadow-sm overflow-hidden">
-      <div className="flex items-center justify-between gap-3 px-6 py-4 border-b border-slate-200">
+    <div className="anim-card-in mb-6 rounded-3xl bg-white border border-slate-200/90 shadow-xs overflow-hidden">
+      <div className="flex items-center justify-between gap-3 px-6 py-5 border-b border-slate-200 bg-slate-50/50">
         <div>
-          <p className="text-xs decoration-dashed uppercase tracking-[0.24em] text-slate-400 font-bold">
+          <p className="text-[11px] uppercase tracking-[0.2em] text-teal-700 font-extrabold">
             Bloque Seleccionado
           </p>
-          <h2 className="text-2xl font-black text-slate-900 flex items-center gap-2">
+          <h2 className="text-xl sm:text-2xl font-extrabold text-slate-900 flex items-center gap-2.5 mt-0.5">
             <Layers className="w-6 h-6 text-teal-600" />
-            Bloque {currentBlock.id}
+            <span>Bloque {currentBlock.id}</span>
           </h2>
         </div>
         <button
           onClick={() => onSelectBlock(null)}
-          className="rounded-2xl border border-slate-200 p-2.5 text-slate-500 hover:bg-slate-50 active:scale-90 transition"
+          className="rounded-2xl border border-slate-300 bg-white p-2.5 text-slate-600 hover:bg-slate-100 active:scale-90 transition cursor-pointer"
         >
           <X className="w-5 h-5" />
         </button>
@@ -98,9 +98,9 @@ export default function BlockPanel({
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
           <button
             onClick={onAddSupplyToBlock}
-            className="inline-flex items-center gap-2 rounded-full border border-slate-200 bg-slate-50 hover:bg-slate-100 px-4 py-2.5 text-sm font-semibold text-slate-800 shadow-sm transition active:scale-95"
+            className="inline-flex items-center gap-2.5 rounded-xl border border-slate-300 bg-slate-50 hover:bg-slate-100 px-4 py-2.5 text-xs font-extrabold text-slate-800 shadow-2xs transition active:scale-95 cursor-pointer"
           >
-            <span className="inline-flex items-center justify-center w-6 h-6 rounded-full bg-teal-600 text-white text-md font-bold">
+            <span className="inline-flex items-center justify-center w-6 h-6 rounded-lg bg-teal-700 text-white text-sm font-bold">
               +
             </span>
             <span>Asignar medicamentos</span>
@@ -114,8 +114,10 @@ export default function BlockPanel({
                 <button
                   key={lvl}
                   onClick={() => onSetBlockLevelFilter(lvl)}
-                  className={`rounded-full px-3 py-1.5 text-xs font-semibold transition active:scale-90 ${
-                    isActive ? "bg-teal-600 text-white shadow-sm" : "bg-slate-100 text-slate-700 hover:bg-slate-200"
+                  className={`rounded-xl px-3.5 py-1.5 text-xs font-extrabold transition active:scale-90 cursor-pointer ${
+                    isActive
+                      ? "bg-teal-800 text-white shadow-xs"
+                      : "bg-slate-100 text-slate-700 hover:bg-slate-200/80 border border-slate-200/80"
                   }`}
                 >
                   {text}

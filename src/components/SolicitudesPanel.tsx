@@ -1,10 +1,23 @@
-import React, { useState, useEffect } from "react";
-import { doc, query, orderBy, onSnapshot, addDoc, updateDoc, getCountFromServer, writeBatch, limit, deleteDoc } from "firebase/firestore";
+import React, { useState, useEffect, useMemo } from "react";
+import { doc, query, orderBy, onSnapshot, addDoc, updateDoc, getCountFromServer, writeBatch, limit, deleteDoc, runTransaction } from "firebase/firestore";
 import { db, tenantCollection, tenantDoc, getActiveFarmaciaId, DEFAULT_FARMACIA_ID } from "../firebase";
-import { Usuario, Solicitud, RegistroHistorial, CambioEstado, Producto, Lote, Movimiento, SolicitudItem, Departamento } from "../types";
+import {
+  Usuario,
+  Solicitud,
+  RegistroHistorial,
+  CambioEstado,
+  Producto,
+  Lote,
+  Movimiento,
+  SolicitudItem,
+  Departamento,
+  getUserAvailableCatalogos,
+  isCatalogAllowedForUser,
+  matchesCatalog
+} from "../types";
 import { playSound } from "../utils/audio";
 import { logSystemEvent } from "../utils/chatHelper";
-import { FileText, ClipboardList, Plus, Search, Filter, AlertCircle, HelpCircle, Calendar, Clock, RefreshCw, Layers, LoaderCircle, User, X, PlusCircle, Trash2 } from "lucide-react";
+import { FileText, ClipboardList, Plus, Search, Filter, AlertCircle, Calendar, Clock, RefreshCw, Layers, LoaderCircle, User, X, PlusCircle, Trash2 } from "lucide-react";
 
 interface SolicitudesPanelProps {
   currentUser: Usuario;
@@ -14,6 +27,7 @@ interface SolicitudesPanelProps {
   departamentos: Departamento[];
   activeCatalogId: string;
   catalogos: any[];
+  onSelectCatalog?: (catalogId: string) => void;
 }
 
 const DEPARTAMENTOS = [
@@ -28,7 +42,7 @@ const DEPARTAMENTOS = [
   "Farmacia Clínica"
 ];
 
-export default function SolicitudesPanel({ currentUser, activePeriod, showToast, products, departamentos, activeCatalogId, catalogos }: SolicitudesPanelProps) {
+export default function SolicitudesPanel({ currentUser, activePeriod, showToast, products, departamentos, activeCatalogId, catalogos, onSelectCatalog }: SolicitudesPanelProps) {
   const dynamicDepts = departamentos.length > 0 ? departamentos.map((d) => d.nombre) : DEPARTAMENTOS;
   const isWarehouseOrAdmin = currentUser.rol === "Administrador" || currentUser.departamento === "Almacén y Suministro" || currentUser.departamento === "Farmacia";
 
@@ -45,40 +59,50 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
   const [loading, setLoading] = useState(true);
   const [activeSubTab, setActiveSubTab] = useState<"list" | "create" | "history">("list");
 
-  // Catalog Active state for new solicitud
-  const [solicitudCatalogId, setSolicitudCatalogId] = useState<string>("");
+  const availableCatalogosMemo = useMemo(
+    () => getUserAvailableCatalogos(currentUser, catalogos),
+    [currentUser, catalogos]
+  );
 
-  const getAvailableCatalogos = () => {
-    const activeCatalogos = (catalogos || []).filter((c) => c.activo);
-    if (currentUser?.rol === "Administrador" || currentUser?.departamento === "Almacén y Suministro") {
-      return activeCatalogos;
+  const getAvailableCatalogos = () => availableCatalogosMemo;
+
+  // Catalog Active state for new solicitud
+  const [solicitudCatalogId, setSolicitudCatalogId] = useState<string>(() => {
+    const allowed = getUserAvailableCatalogos(currentUser, catalogos);
+    if (activeCatalogId && allowed.some((c) => c.id === activeCatalogId)) {
+      return activeCatalogId;
     }
-    if (currentUser?.departamento === "Laboratorio") {
-      return activeCatalogos.filter((c) => c.id === "laboratorio");
+    return allowed[0]?.id || "";
+  });
+
+  // Sync solicitudCatalogId if activeCatalogId changes and draft is empty, or if current selection is not in availableCatalogos
+  useEffect(() => {
+    if (availableCatalogosMemo.length === 0) return;
+    const currentValid = availableCatalogosMemo.some((c) => c.id === solicitudCatalogId);
+    if (!solicitudCatalogId || !currentValid) {
+      const preferred = availableCatalogosMemo.find((c) => c.id === activeCatalogId) || availableCatalogosMemo[0];
+      if (preferred) {
+        setSolicitudCatalogId(preferred.id);
+      }
     }
-    if (currentUser?.departamento === "Odontología") {
-      return activeCatalogos.filter((c) => c.id === "odontologia");
-    }
-    const userCats = currentUser?.catalogos || [];
-    if (userCats.length > 0) {
-      return activeCatalogos.filter((c) => userCats.includes(c.id));
-    }
-    return activeCatalogos;
-  };
+  }, [availableCatalogosMemo, activeCatalogId, solicitudCatalogId]);
 
   const handleSetSolicitudCatalogId = (catId: string) => {
-    const allowed = getAvailableCatalogos().some(c => c.id === catId);
+    const allowed = availableCatalogosMemo.some((c) => c.id === catId);
     if (catId && !allowed) {
       showToast("No tiene permisos para acceder a este catálogo.");
       return;
     }
 
-    if (solicitudItems.length > 0) {
+    if (solicitudItems.length > 0 && catId !== solicitudCatalogId) {
       const confirmChange = window.confirm("Cambiar el catálogo eliminará los productos ya seleccionados en la solicitud actual. ¿Desea continuar?");
       if (!confirmChange) return;
       setSolicitudItems([]);
     }
     setSolicitudCatalogId(catId);
+    if (catId && onSelectCatalog) {
+      onSelectCatalog(catId);
+    }
     playSound("click");
   };
 
@@ -102,11 +126,30 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
   const [histUserFilter, setHistUserFilter] = useState("");
 
   // Create Form State
-  const [department, setDepartment] = useState(DEPARTAMENTOS[0]);
+  const [department, setDepartment] = useState(() => {
+    const canChooseDept =
+      currentUser.rol === "Administrador" ||
+      currentUser.departamento === "Farmacia" ||
+      currentUser.departamento === "Almacén y Suministro";
+    return canChooseDept
+      ? dynamicDepts[0] || DEPARTAMENTOS[0]
+      : currentUser.departamento || DEPARTAMENTOS[0];
+  });
   const [description, setDescription] = useState("");
   const [priority, setPriority] = useState<"Baja" | "Media" | "Alta">("Media");
   const [observations, setObservations] = useState("");
   const [creating, setCreating] = useState(false);
+
+  // Sync department with currentUser.departamento for non-admin/non-warehouse operators (e.g. Laboratorio)
+  useEffect(() => {
+    const canChooseDept =
+      currentUser.rol === "Administrador" ||
+      currentUser.departamento === "Farmacia" ||
+      currentUser.departamento === "Almacén y Suministro";
+    if (!canChooseDept && currentUser.departamento && department !== currentUser.departamento) {
+      setDepartment(currentUser.departamento);
+    }
+  }, [currentUser.rol, currentUser.departamento, department]);
 
   // Custom structured products in solicitud creation
   const [solicitudItems, setSolicitudItems] = useState<Omit<SolicitudItem, "id">[]>([]);
@@ -117,7 +160,9 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
 
   // Edit Status State
   const [selectedSolicitud, setSelectedSolicitud] = useState<Solicitud | null>(null);
-  const [newStatus, setNewState] = useState<"Pendiente" | "Aprobada" | "Rechazada" | "En Proceso" | "Entregada">("Pendiente");
+  const [newStatus, setNewState] = useState<
+    "Pendiente" | "Aprobada" | "Rechazada" | "En Proceso" | "En preparación" | "Parcialmente entregada" | "Entregada" | "Cancelada"
+  >("Pendiente");
   const [statusObs, setStatusObs] = useState("");
   const [updating, setUpdating] = useState(false);
 
@@ -163,19 +208,8 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
 
     setLoading(true);
     const colRef = tenantCollection("solicitudes");
-    
-    // Listen to all solicitudes to feed available periods
-    const unsubAll = onSnapshot(colRef, (snapshot) => {
-      const periodsSet = new Set<string>();
-      periodsSet.add(activePeriod);
-      snapshot.forEach(d => {
-        const data = d.data() as Solicitud;
-        if (data.periodo) periodsSet.add(data.periodo);
-      });
-      setAvailablePeriods(Array.from(periodsSet).sort());
-    });
 
-    // Main query ordered by timestamp
+    // Main query ordered by timestamp (also populates availablePeriods in a single listener)
     const q = query(colRef, orderBy("timestamp", "desc"));
     
     // Track known requests and their states
@@ -184,12 +218,15 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
 
     const unsub = onSnapshot(q, (snapshot) => {
       const list: Solicitud[] = [];
+      const periodsSet = new Set<string>();
+      periodsSet.add(activePeriod);
       const newRequestsMap = new Map<string, { id: string, numeroSolicitud: string, departamento: string, estado: string, usuarioCreador: string }>();
       
       snapshot.forEach((docSnap) => {
         const data = docSnap.data() as Omit<Solicitud, "id">;
         const item = { id: docSnap.id, ...data } as Solicitud;
         list.push(item);
+        if (item.periodo) periodsSet.add(item.periodo);
         newRequestsMap.set(item.id, {
           id: item.id,
           numeroSolicitud: item.numeroSolicitud,
@@ -199,6 +236,7 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
         });
       });
 
+      setAvailablePeriods(Array.from(periodsSet).sort());
       setSolicitudes(list);
       setLoading(false);
 
@@ -209,13 +247,11 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
           const selfCreator = `${currentUser.nombre} (${currentUser.usuario})`;
           
           if (!oldVal) {
-            // Created!
             if (newVal.usuarioCreador !== selfCreator) {
               playSound("notify");
               showToast(`Nueva solicitud creada: ${newVal.numeroSolicitud} - ${newVal.departamento}`);
             }
           } else if (oldVal.estado !== newVal.estado) {
-            // Status changed!
             const belongsToDept = currentUser.departamento === newVal.departamento;
             const canSeeAll = currentUser.rol === "Administrador" || currentUser.departamento === "Almacén y Suministro" || currentUser.departamento === "Farmacia";
             
@@ -243,11 +279,10 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
     });
 
     return () => {
-      unsubAll();
       unsub();
       unsubHist();
     };
-  }, [activePeriod, currentUser]);
+  }, [activePeriod, currentUser, currentUser.farmaciaId]);
 
   const handleCreateRequest = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -260,12 +295,36 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
 
     const desc = description.trim();
     if (!desc && solicitudItems.length === 0) {
-      alert("Por favor agregue una descripción o añada insumos específicos a la solicitud.");
+      playSound("negative");
+      showToast("Por favor agregue una descripción o añada insumos específicos a la solicitud.");
       return;
+    }
+
+    // Validar que todos los productos agregados tengan existencias suficientes tanto en Sistema como en Físico
+    for (const item of solicitudItems) {
+      const prod = products?.find((p) => p.codigo === item.productoCodigo);
+      const totalSys = prod?.lotes?.reduce((acc, l) => acc + Number(l.cantidad || 0), 0) || 0;
+      const totalPhys = prod?.lotes?.reduce((acc, l) => acc + Number(l.cantidadF || 0), 0) || 0;
+      const maxAvailableBoth = Math.min(totalSys, totalPhys);
+      if (!prod || item.cantidadSolicitada <= 0 || item.cantidadSolicitada > totalSys || item.cantidadSolicitada > totalPhys) {
+        playSound("negative");
+        showToast(
+          `Stock insuficiente para "${item.productoNombre}". Solicitado: ${item.cantidadSolicitada} und. | Disponible en Sistema: ${totalSys} und. | Físico: ${totalPhys} und. (Máx: ${maxAvailableBoth} und.)`
+        );
+        return;
+      }
     }
 
     setCreating(true);
     playSound("action");
+
+    const canChooseDept =
+      currentUser.rol === "Administrador" ||
+      currentUser.departamento === "Farmacia" ||
+      currentUser.departamento === "Almacén y Suministro";
+    const effectiveDept = canChooseDept
+      ? department
+      : currentUser.departamento || department;
 
     const isLocalFileMode = typeof window !== "undefined" && window.location.protocol === "file:";
 
@@ -291,7 +350,7 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
           numeroSolicitud,
           fecha: localDate,
           hora: localTime,
-          departamento: department,
+          departamento: effectiveDept,
           usuarioCreador: `${currentUser.nombre} (${currentUser.usuario})`,
           descripcion: finalDesc,
           prioridad: priority,
@@ -328,7 +387,7 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
           tipo: "Creación",
           solicitudId: newId,
           numeroSolicitud,
-          descripcionEvent: `Se creó la solicitud ${numeroSolicitud} para el departamento de ${department}.`,
+          descripcionEvent: `Se creó la solicitud ${numeroSolicitud} para el departamento de ${effectiveDept}.`,
           usuarioResponsable: `${currentUser.nombre} (${currentUser.usuario})`,
           fecha: localDate,
           hora: localTime,
@@ -339,7 +398,7 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
         localStorage.setItem("offline_historial", JSON.stringify(histList));
 
         // Notify chat
-        logSystemEvent(`🆕 **Nueva Solicitud**: Se creó la solicitud **${numeroSolicitud}** de **${department}** por el usuario **${currentUser.nombre}** (Prioridad: ${priority}).`);
+        logSystemEvent(`🆕 **Nueva Solicitud**: Se creó la solicitud **${numeroSolicitud}** de **${effectiveDept}** por el usuario **${currentUser.nombre}** (Prioridad: ${priority}).`);
 
         window.dispatchEvent(new Event("offline_solicitudes_update"));
         window.dispatchEvent(new Event("offline_historial_update"));
@@ -347,9 +406,8 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
         setDescription("");
         setObservations("");
         setPriority("Media");
-        setDepartment(DEPARTAMENTOS[0]);
+        setDepartment(canChooseDept ? dynamicDepts[0] || DEPARTAMENTOS[0] : effectiveDept);
         setSolicitudItems([]);
-        setSolicitudCatalogId("");
         setActiveSubTab("list");
         playSound("positive");
         showToast(`Solicitud ${numeroSolicitud} creada exitosamente.`);
@@ -375,7 +433,7 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
         numeroSolicitud,
         fecha: localDate,
         hora: localTime,
-        departamento: department,
+        departamento: effectiveDept,
         usuarioCreador: `${currentUser.nombre} (${currentUser.usuario})`,
         descripcion: finalDesc,
         prioridad: priority,
@@ -406,7 +464,7 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
         tipo: "Creación",
         solicitudId: docRef.id,
         numeroSolicitud,
-        descripcionEvent: `Se creó la solicitud ${numeroSolicitud} para el departamento de ${department}.`,
+        descripcionEvent: `Se creó la solicitud ${numeroSolicitud} para el departamento de ${effectiveDept}.`,
         usuarioResponsable: `${currentUser.nombre} (${currentUser.usuario})`,
         fecha: localDate,
         hora: localTime,
@@ -416,14 +474,13 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
       await addDoc(histCol, histData);
       
       // Notify chat
-      logSystemEvent(`🆕 **Nueva Solicitud**: Se creó la solicitud **${numeroSolicitud}** de **${department}** por el usuario **${currentUser.nombre}** (Prioridad: ${priority}).`);
+      logSystemEvent(`🆕 **Nueva Solicitud**: Se creó la solicitud **${numeroSolicitud}** de **${effectiveDept}** por el usuario **${currentUser.nombre}** (Prioridad: ${priority}).`);
 
       setDescription("");
       setObservations("");
       setPriority("Media");
-      setDepartment(DEPARTAMENTOS[0]);
+      setDepartment(canChooseDept ? dynamicDepts[0] || DEPARTAMENTOS[0] : effectiveDept);
       setSolicitudItems([]);
-      setSolicitudCatalogId("");
       setActiveSubTab("list");
       playSound("positive");
       showToast(`Solicitud ${numeroSolicitud} creada exitosamente.`);
@@ -836,27 +893,43 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
     e.preventDefault();
     if (!selectedSolicitud || updating) return;
 
-    // Validation
+    const shouldDeductStock =
+      newStatus === "Entregada" ||
+      newStatus === "Parcialmente entregada" ||
+      (newStatus as string) === "Completada";
+
+    // Validation: verificar existencias tanto en inventario del sistema como en inventario físico cuando se despacha/entrega
     for (const item of deliveryItems) {
       if (item.cantidadEntregada < 0) {
-        alert("La cantidad entregada no puede ser negativa.");
+        playSound("negative");
+        showToast("La cantidad entregada no puede ser negativa.");
         return;
       }
-      if (item.cantidadEntregada !== item.cantidadSolicitada && !item.motivoDiferencia?.trim()) {
-        alert(`Por favor ingrese el motivo de la diferencia para el producto: ${item.productoNombre}`);
-        return;
-      }
-      if (item.productoCodigo !== "Gral" && item.cantidadEntregada > 0) {
-        const matchingProduct = products?.find(p => p.codigo === item.productoCodigo);
-        if (matchingProduct && matchingProduct.lotes.length > 0) {
-          if (!item.loteId) {
-            alert(`Por favor seleccione el lote de despacho para el producto: ${item.productoNombre}`);
-            return;
-          }
-          const lot = matchingProduct.lotes.find(l => l.id === item.loteId);
-          if (!lot || lot.cantidad < item.cantidadEntregada) {
-            alert(`Stock insuficiente en el lote seleccionado para ${item.productoNombre}. Disponible: ${lot ? lot.cantidad : 0}`);
-            return;
+      if (shouldDeductStock) {
+        if (item.cantidadEntregada !== item.cantidadSolicitada && !item.motivoDiferencia?.trim()) {
+          playSound("negative");
+          showToast(`Por favor ingrese el motivo de la diferencia para el producto: ${item.productoNombre}`);
+          return;
+        }
+        if (item.productoCodigo !== "Gral" && item.cantidadEntregada > 0) {
+          const matchingProduct = products?.find(p => p.codigo === item.productoCodigo);
+          if (matchingProduct && matchingProduct.lotes.length > 0) {
+            if (!item.loteId) {
+              playSound("negative");
+              showToast(`Por favor seleccione el lote de despacho para el producto: ${item.productoNombre}`);
+              return;
+            }
+            const lot = matchingProduct.lotes.find(l => l.id === item.loteId);
+            const stockSistema = lot ? Number(lot.cantidad || 0) : 0;
+            const stockFisico = lot ? Number(lot.cantidadF || 0) : 0;
+            const maxAvailableBoth = Math.min(stockSistema, stockFisico);
+            if (!lot || item.cantidadEntregada > stockSistema || item.cantidadEntregada > stockFisico) {
+              playSound("negative");
+              showToast(
+                `Stock insuficiente en el lote seleccionado para "${item.productoNombre}". Solicitado: ${item.cantidadEntregada} und. | Disponible en Sistema: ${stockSistema} und. | Físico: ${stockFisico} und. (Máx: ${maxAvailableBoth} und.)`
+              );
+              return;
+            }
           }
         }
       }
@@ -865,6 +938,7 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
     setUpdating(true);
     playSound("action");
 
+    const effectiveSolicitudCatalogId = selectedSolicitud.catalogId || activeCatalogId;
     const isLocalFileMode = typeof window !== "undefined" && window.location.protocol === "file:";
 
     try {
@@ -902,66 +976,61 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
         });
         localStorage.setItem("offline_solicitudes", JSON.stringify(solList));
 
-        // 2. Update offline products & movements
-        let storedProds = localStorage.getItem("offline_productos");
-        let prodList: Producto[] = [];
-        if (storedProds) {
-          try { prodList = JSON.parse(storedProds); } catch (e) {}
-        }
-
-        let storedMovs = localStorage.getItem("offline_movimientos");
-        let movList: Movimiento[] = [];
-        if (storedMovs) {
-          try { movList = JSON.parse(storedMovs); } catch (e) {}
-        }
-
-        for (const item of deliveryItems) {
-          if (item.productoCodigo !== "Gral" && item.cantidadEntregada > 0 && item.loteId) {
-            prodList = prodList.map(prod => {
-              if (prod.codigo === item.productoCodigo) {
-                const nextLotes = prod.lotes.map((l: Lote) => {
-                  if (l.id === item.loteId) {
-                    let nextQty = l.cantidad;
-                    let nextQtyF = l.cantidadF;
-
-                    if (l.cantidad >= item.cantidadEntregada) {
-                      nextQty = l.cantidad - item.cantidadEntregada;
-                    }
-                    if (l.cantidadF !== undefined && l.cantidadF !== null && l.cantidadF >= item.cantidadEntregada) {
-                      nextQtyF = l.cantidadF - item.cantidadEntregada;
-                    }
-
-                    return { ...l, cantidad: nextQty, cantidadF: nextQtyF };
-                  }
-                  return l;
-                });
-                return { ...prod, lotes: nextLotes, verificado: false, updatedAt: Date.now() };
-              }
-              return prod;
-            });
-
-            // Create movement log
-            const matchingProd = products?.find(p => p.codigo === item.productoCodigo);
-            const movId = `mov-${item.productoCodigo}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
-            const mov: Movimiento = {
-              id: movId,
-              productoCodigo: item.productoCodigo,
-              productoNombre: item.productoNombre,
-              lote: item.loteNumero || "S/L",
-              cantidad: item.cantidadEntregada,
-              precio: matchingProd?.lotes.find((l: Lote) => l.id === item.loteId)?.precio || 0,
-              tipoMovimiento: "Salida",
-              usuario: `${currentUser.nombre} (${currentUser.usuario})`,
-              fecha: new Date().toISOString(),
-              timestamp: Date.now(),
-              catalogId: activeCatalogId
-            };
-            movList.unshift(mov);
+        // 2. Update offline products & movements only if dispatching/delivering
+        if (shouldDeductStock) {
+          let storedProds = localStorage.getItem("offline_productos");
+          let prodList: Producto[] = [];
+          if (storedProds) {
+            try { prodList = JSON.parse(storedProds); } catch (e) {}
           }
-        }
 
-        localStorage.setItem("offline_productos", JSON.stringify(prodList));
-        localStorage.setItem("offline_movimientos", JSON.stringify(movList));
+          let storedMovs = localStorage.getItem("offline_movimientos");
+          let movList: Movimiento[] = [];
+          if (storedMovs) {
+            try { movList = JSON.parse(storedMovs); } catch (e) {}
+          }
+
+          for (const item of deliveryItems) {
+            if (item.productoCodigo !== "Gral" && item.cantidadEntregada > 0 && item.loteId) {
+              prodList = prodList.map(prod => {
+                if (prod.codigo === item.productoCodigo) {
+                  const nextLotes = prod.lotes.map((l: Lote) => {
+                    if (l.id === item.loteId) {
+                      const nextQty = Math.max(0, Number(l.cantidad || 0) - item.cantidadEntregada);
+                      const nextQtyF = Math.max(0, Number(l.cantidadF || 0) - item.cantidadEntregada);
+                      return { ...l, cantidad: nextQty, cantidadF: nextQtyF };
+                    }
+                    return l;
+                  });
+                  return { ...prod, lotes: nextLotes, verificado: false, updatedAt: Date.now() };
+                }
+                return prod;
+              });
+
+              // Create movement log
+              const matchingProd = products?.find(p => p.codigo === item.productoCodigo);
+              const movId = `mov-${item.productoCodigo}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+              const mov: Movimiento = {
+                id: movId,
+                productoCodigo: item.productoCodigo,
+                productoNombre: item.productoNombre,
+                lote: item.loteNumero || "S/L",
+                cantidad: item.cantidadEntregada,
+                cantidadF: item.cantidadEntregada,
+                precio: matchingProd?.lotes.find((l: Lote) => l.id === item.loteId)?.precio || 0,
+                tipoMovimiento: "Salida",
+                usuario: `${currentUser.nombre} (${currentUser.usuario})`,
+                fecha: new Date().toISOString(),
+                timestamp: Date.now(),
+                catalogId: selectedSolicitud.catalogId || matchingProd?.catalogId || activeCatalogId
+              };
+              movList.unshift(mov);
+            }
+          }
+
+          localStorage.setItem("offline_productos", JSON.stringify(prodList));
+          localStorage.setItem("offline_movimientos", JSON.stringify(movList));
+        }
 
         // 3. Register in global history
         let storedHist = localStorage.getItem("offline_historial");
@@ -975,32 +1044,36 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
           tipo: "Cambio de Estado",
           solicitudId: selectedSolicitud.id,
           numeroSolicitud: selectedSolicitud.numeroSolicitud,
-          descripcionEvent: `La orden ${selectedSolicitud.numeroSolicitud} actualizó entrega y cambió su estado a "${newStatus}".`,
+          descripcionEvent: `La orden ${selectedSolicitud.numeroSolicitud} de ${selectedSolicitud.departamento} actualizó su estado a "${newStatus}".`,
           usuarioResponsable: `${currentUser.nombre} (${currentUser.usuario})`,
           fecha: localDate,
           hora: localTime,
           timestamp: Date.now(),
-          catalogId: activeCatalogId
+          catalogId: effectiveSolicitudCatalogId
         };
         histList.unshift(histData);
         localStorage.setItem("offline_historial", JSON.stringify(histList));
 
         // Notify chat & dispatches
-        logSystemEvent(`🚚 **Entrega de Orden**: La orden **${selectedSolicitud.numeroSolicitud}** del departamento **${selectedSolicitud.departamento}** ha sido actualizada por **${currentUser.nombre}**. Nuevo estado: **${newStatus}**.`);
+        logSystemEvent(`🚚 **Actualización de Orden**: La orden **${selectedSolicitud.numeroSolicitud}** del departamento **${selectedSolicitud.departamento}** ha sido actualizada por **${currentUser.nombre}**. Nuevo estado: **${newStatus}**.`);
 
         window.dispatchEvent(new Event("offline_solicitudes_update"));
         window.dispatchEvent(new Event("offline_historial_update"));
-        window.dispatchEvent(new Event("offline_productos_update"));
-        window.dispatchEvent(new Event("offline_movimientos_update"));
+        if (shouldDeductStock) {
+          window.dispatchEvent(new Event("offline_productos_update"));
+          window.dispatchEvent(new Event("offline_movimientos_update"));
+        }
 
         setSelectedSolicitud(null);
         playSound("positive");
-        showToast(`Estado y entrega de la orden ${selectedSolicitud.numeroSolicitud} actualizados con éxito.`);
+        showToast(`Estado de la orden ${selectedSolicitud.numeroSolicitud} actualizado con éxito.`);
         setUpdating(false);
         return;
       }
 
       const now = new Date();
+      const nowTs = now.getTime();
+      const nowIso = now.toISOString();
       const localDate = now.toLocaleDateString("en-CA");
       const localTime = now.toLocaleTimeString("es-DO", { hour12: false }).slice(0, 5);
 
@@ -1013,71 +1086,89 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
 
       const updatedHistory = [...selectedSolicitud.historialCambios, nuevoCambio];
       const docRef = tenantDoc("solicitudes", selectedSolicitud.id);
+      const validItemsToDeduct = shouldDeductStock
+        ? deliveryItems.filter(
+            (item) => item.productoCodigo !== "Gral" && item.cantidadEntregada > 0 && item.loteId
+          )
+        : [];
+      const uniqueProdCodes = Array.from(new Set<string>(validItemsToDeduct.map((it) => it.productoCodigo)));
 
-      // Save delivery details inside the order
-      await updateDoc(docRef, {
-        estado: newStatus,
-        observaciones: statusObs.trim() || selectedSolicitud.observaciones,
-        historialCambios: updatedHistory,
-        items: deliveryItems.filter(item => item.id !== "fallback-item")
-      });
+      // Transacción atómica en el servidor para validar stock real (Sistema y Físico) antes de descontar
+      await runTransaction(db, async (transaction) => {
+        const prodSnaps = await Promise.all(
+          uniqueProdCodes.map((code) => transaction.get(tenantDoc("productos", code.replace(/\//g, "_"))))
+        );
 
-      // Update inventory and log movements in batch
-      const batch = writeBatch(db);
-      const productsCol = tenantCollection("productos");
-      const movementsCol = tenantCollection("movimientos");
-      const productsToUpdateMap = new Map<string, Producto>();
-
-      for (const item of deliveryItems) {
-        if (item.productoCodigo !== "Gral" && item.cantidadEntregada > 0 && item.loteId) {
-          const matchingProduct = products?.find(p => p.codigo === item.productoCodigo);
-          if (matchingProduct) {
-            const prod = productsToUpdateMap.get(item.productoCodigo) || JSON.parse(JSON.stringify(matchingProduct));
-            
-            prod.lotes = prod.lotes.map((l: Lote) => {
-              if (l.id === item.loteId) {
-                let nextQty = l.cantidad;
-                let nextQtyF = l.cantidadF;
-
-                if (l.cantidad >= item.cantidadEntregada) {
-                  nextQty = l.cantidad - item.cantidadEntregada;
-                }
-                if (l.cantidadF !== undefined && l.cantidadF !== null && l.cantidadF >= item.cantidadEntregada) {
-                  nextQtyF = l.cantidadF - item.cantidadEntregada;
-                }
-
-                return { ...l, cantidad: nextQty, cantidadF: nextQtyF };
-              }
-              return l;
-            });
-
-            productsToUpdateMap.set(item.productoCodigo, prod);
-
-            // Create movement log
-            const movId = `mov-${prod.codigo}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
-            const mov: Movimiento = {
-              id: movId,
-              productoCodigo: prod.codigo,
-              productoNombre: prod.nombre,
-              lote: item.loteNumero || "S/L",
-              cantidad: item.cantidadEntregada,
-              precio: prod.lotes.find((l: Lote) => l.id === item.loteId)?.precio || 0,
-              tipoMovimiento: "Salida",
-              usuario: `${currentUser.nombre} (${currentUser.usuario})`,
-              fecha: new Date().toISOString(),
-              timestamp: Date.now(),
-              catalogId: activeCatalogId
-            };
-            batch.set(doc(movementsCol, movId), mov);
+        const serverProdsMap = new Map<string, Producto>();
+        prodSnaps.forEach((snap, idx) => {
+          const code = uniqueProdCodes[idx];
+          if (!snap.exists()) {
+            throw new Error(`El producto "${code}" no existe en el servidor.`);
           }
+          serverProdsMap.set(code, snap.data() as Producto);
+        });
+
+        for (const item of validItemsToDeduct) {
+          const serverProd = serverProdsMap.get(item.productoCodigo);
+          if (!serverProd) {
+            throw new Error(`Producto "${item.productoNombre}" no encontrado en el servidor.`);
+          }
+          const targetLot = (serverProd.lotes || []).find((l) => l.id === item.loteId);
+          if (!targetLot) {
+            throw new Error(`Lote seleccionado no encontrado para "${item.productoNombre}".`);
+          }
+          const serverSis = Number(targetLot.cantidad || 0);
+          const serverFis = Number(targetLot.cantidadF || 0);
+          const reqQty = Number(item.cantidadEntregada || 0);
+
+          if (reqQty > serverSis || reqQty > serverFis) {
+            throw new Error(
+              `Stock insuficiente en el servidor para "${item.productoNombre}" (Lote ${targetLot.numeroLote}). Solicitado: ${reqQty} und. | Disponible en Sistema: ${serverSis} und. | Físico: ${serverFis} und.`
+            );
+          }
+
+          targetLot.cantidad = serverSis - reqQty;
+          targetLot.cantidadF = serverFis - reqQty;
         }
-      }
 
-      for (const [code, updatedProd] of productsToUpdateMap.entries()) {
-        batch.set(doc(productsCol, code.replace(/\//g, "_")), { ...updatedProd, verificado: false });
-      }
+        // Actualizar orden
+        transaction.update(docRef, {
+          estado: newStatus,
+          observaciones: statusObs.trim() || selectedSolicitud.observaciones,
+          historialCambios: updatedHistory,
+          items: deliveryItems.filter((item) => item.id !== "fallback-item")
+        });
 
-      await batch.commit();
+        // Guardar productos actualizados y movimientos
+        for (const [code, updatedProd] of serverProdsMap.entries()) {
+          transaction.set(tenantDoc("productos", code.replace(/\//g, "_")), {
+            ...updatedProd,
+            verificado: false,
+            updatedAt: nowTs
+          });
+        }
+
+        for (const item of validItemsToDeduct) {
+          const serverProd = serverProdsMap.get(item.productoCodigo)!;
+          const lotPrice = serverProd.lotes.find((l) => l.id === item.loteId)?.precio || 0;
+          const movId = `mov-${serverProd.codigo}-${nowTs}-${Math.random().toString(36).slice(2, 6)}`;
+          const mov: Movimiento = {
+            id: movId,
+            productoCodigo: serverProd.codigo,
+            productoNombre: serverProd.nombre,
+            lote: item.loteNumero || "S/L",
+            cantidad: item.cantidadEntregada,
+            cantidadF: item.cantidadEntregada,
+            precio: lotPrice,
+            tipoMovimiento: "Salida",
+            usuario: `${currentUser.nombre} (${currentUser.usuario})`,
+            fecha: nowIso,
+            timestamp: nowTs,
+            catalogId: selectedSolicitud.catalogId || serverProd.catalogId || activeCatalogId
+          };
+          transaction.set(tenantDoc("movimientos", movId), mov);
+        }
+      });
 
       // Register in global history
       const histCol = tenantCollection("historial");
@@ -1085,24 +1176,25 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
         tipo: "Cambio de Estado",
         solicitudId: selectedSolicitud.id,
         numeroSolicitud: selectedSolicitud.numeroSolicitud,
-        descripcionEvent: `La orden ${selectedSolicitud.numeroSolicitud} actualizó entrega y cambió su estado a "${newStatus}".`,
+        descripcionEvent: `La orden ${selectedSolicitud.numeroSolicitud} de ${selectedSolicitud.departamento} actualizó su estado a "${newStatus}".`,
         usuarioResponsable: `${currentUser.nombre} (${currentUser.usuario})`,
         fecha: localDate,
         hora: localTime,
-        timestamp: Date.now(),
-        catalogId: activeCatalogId
+        timestamp: nowTs,
+        catalogId: effectiveSolicitudCatalogId
       };
       await addDoc(histCol, histData);
       
       // Notify chat
-      logSystemEvent(`🚚 **Entrega de Orden**: La orden **${selectedSolicitud.numeroSolicitud}** del departamento **${selectedSolicitud.departamento}** ha sido actualizada por **${currentUser.nombre}**. Nuevo estado: **${newStatus}**.`);
+      logSystemEvent(`🚚 **Actualización de Orden**: La orden **${selectedSolicitud.numeroSolicitud}** del departamento **${selectedSolicitud.departamento}** ha sido actualizada por **${currentUser.nombre}**. Nuevo estado: **${newStatus}**.`);
 
       setSelectedSolicitud(null);
       playSound("positive");
       showToast(`Estado y entrega de la orden ${selectedSolicitud.numeroSolicitud} actualizados con éxito.`);
-    } catch (err) {
+    } catch (err: any) {
       console.error("Error updating order delivery:", err);
-      alert("Error al actualizar la entrega.");
+      playSound("negative");
+      showToast(err?.message || "Error al actualizar la entrega.");
     } finally {
       setUpdating(false);
     }
@@ -1116,6 +1208,8 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
     playSound("action");
     try {
       const now = new Date();
+      const nowTs = now.getTime();
+      const nowIso = now.toISOString();
       const localDate = now.toLocaleDateString("en-CA");
       const localTime = now.toLocaleTimeString("es-DO", { hour12: false }).slice(0, 5);
 
@@ -1129,83 +1223,111 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
       const updatedHistory = [...sol.historialCambios, nuevoCambio];
       const docRef = tenantDoc("solicitudes", sol.id);
 
-      // If nextStatus is "Entregada", we discount inventory automatically!
-      const batch = writeBatch(db);
-      const productsCol = tenantCollection("productos");
-      const movementsCol = tenantCollection("movimientos");
-      const productsToUpdateMap = new Map<string, Producto>();
-
       if (nextStatus === "Entregada") {
-        const itemsToProcess = sol.items || [];
+        const itemsToProcess = (sol.items || []).filter((it) => it.productoCodigo !== "Gral" && it.cantidadSolicitada > 0);
+
+        // 1. Validación en la interfaz verificando tanto el inventario del sistema como el físico
         for (const item of itemsToProcess) {
-          if (item.productoCodigo !== "Gral") {
-            const matchingProduct = products?.find(p => p.codigo === item.productoCodigo);
-            if (matchingProduct && matchingProduct.lotes.length > 0) {
-              const prod = productsToUpdateMap.get(item.productoCodigo) || JSON.parse(JSON.stringify(matchingProduct));
-              
-              // Find first lote that has sufficient system or physical stock
-              let targetLote = prod.lotes.find((l: Lote) => l.cantidad >= item.cantidadSolicitada || l.cantidadF >= item.cantidadSolicitada);
-              if (!targetLote && prod.lotes.length > 0) {
-                targetLote = prod.lotes[0];
-              }
-
-              if (targetLote) {
-                const qty = item.cantidadSolicitada;
-
-                prod.lotes = prod.lotes.map((l: Lote) => {
-                  if (l.id === targetLote.id) {
-                    let nextQty = l.cantidad;
-                    let nextQtyF = l.cantidadF;
-
-                    // "si una de las dos no tiene suficiente, solo se descontará de la que si tenga."
-                    if (l.cantidad >= qty) {
-                      nextQty = l.cantidad - qty;
-                    }
-                    if (l.cantidadF !== undefined && l.cantidadF !== null && l.cantidadF >= qty) {
-                      nextQtyF = l.cantidadF - qty;
-                    }
-
-                    return { ...l, cantidad: nextQty, cantidadF: nextQtyF };
-                  }
-                  return l;
-                });
-
-                productsToUpdateMap.set(item.productoCodigo, prod);
-
-                // Create movement log
-                const movId = `mov-${prod.codigo}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
-                const mov: Movimiento = {
-                  id: movId,
-                  productoCodigo: prod.codigo,
-                  productoNombre: prod.nombre,
-                  lote: targetLote.numeroLote || "S/L",
-                  cantidad: qty,
-                  precio: targetLote.precio || 0,
-                  tipoMovimiento: "Salida",
-                  usuario: `${currentUser.nombre} (${currentUser.usuario})`,
-                  fecha: new Date().toISOString(),
-                  timestamp: Date.now(),
-                  catalogId: activeCatalogId
-                };
-                batch.set(doc(movementsCol, movId), mov);
-              }
-            }
+          const matchingProduct = products?.find((p) => p.codigo === item.productoCodigo);
+          const totalSys = matchingProduct?.lotes?.reduce((acc, l) => acc + Number(l.cantidad || 0), 0) || 0;
+          const totalPhys = matchingProduct?.lotes?.reduce((acc, l) => acc + Number(l.cantidadF || 0), 0) || 0;
+          const validLote = matchingProduct?.lotes?.find(
+            (l) => Number(l.cantidad || 0) >= item.cantidadSolicitada && Number(l.cantidadF || 0) >= item.cantidadSolicitada
+          );
+          if (!matchingProduct || !validLote) {
+            playSound("negative");
+            showToast(
+              `Stock insuficiente en lote para "${item.productoNombre}". Solicitado: ${item.cantidadSolicitada} und. | Total en Sistema: ${totalSys} und. | Total Físico: ${totalPhys} und.`
+            );
+            return;
           }
         }
-      }
 
-      // Prepare update for the request
-      await updateDoc(docRef, {
-        estado: nextStatus,
-        observaciones: obs.trim() || sol.observaciones,
-        historialCambios: updatedHistory
-      });
+        const uniqueCodes = Array.from(new Set(itemsToProcess.map((it) => it.productoCodigo)));
 
-      // Commit product updates in batch
-      for (const [code, updatedProd] of productsToUpdateMap.entries()) {
-        batch.set(doc(productsCol, code.replace(/\//g, "_")), { ...updatedProd, verificado: false });
+        // 2. Transacción en el servidor para evitar sobre-descuentos ante solicitudes simultáneas
+        await runTransaction(db, async (transaction) => {
+          const prodSnaps = await Promise.all(
+            uniqueCodes.map((code) => transaction.get(tenantDoc("productos", code.replace(/\//g, "_"))))
+          );
+
+          const serverProdsMap = new Map<string, Producto>();
+          prodSnaps.forEach((snap, idx) => {
+            const code = uniqueCodes[idx];
+            if (!snap.exists()) {
+              throw new Error(`El producto "${code}" no existe en el servidor.`);
+            }
+            serverProdsMap.set(code, snap.data() as Producto);
+          });
+
+          const movementsToCreate: Movimiento[] = [];
+
+          for (const item of itemsToProcess) {
+            const serverProd = serverProdsMap.get(item.productoCodigo);
+            if (!serverProd) {
+              throw new Error(`Producto "${item.productoNombre}" no encontrado.`);
+            }
+            const qty = Number(item.cantidadSolicitada || 0);
+            const targetLote = (serverProd.lotes || []).find(
+              (l) =>
+                (item.loteId ? l.id === item.loteId : true) &&
+                Number(l.cantidad || 0) >= qty &&
+                Number(l.cantidadF || 0) >= qty
+            );
+
+            if (!targetLote) {
+              const totalSys = (serverProd.lotes || []).reduce((acc, l) => acc + Number(l.cantidad || 0), 0);
+              const totalPhys = (serverProd.lotes || []).reduce((acc, l) => acc + Number(l.cantidadF || 0), 0);
+              throw new Error(
+                `Stock insuficiente en el servidor para "${item.productoNombre}". Solicitado: ${qty} und. | Disponible en Sistema: ${totalSys} und. | Físico: ${totalPhys} und.`
+              );
+            }
+
+            targetLote.cantidad = Number(targetLote.cantidad || 0) - qty;
+            targetLote.cantidadF = Number(targetLote.cantidadF || 0) - qty;
+
+            const movId = `mov-${serverProd.codigo}-${nowTs}-${Math.random().toString(36).slice(2, 6)}`;
+            movementsToCreate.push({
+              id: movId,
+              productoCodigo: serverProd.codigo,
+              productoNombre: serverProd.nombre,
+              lote: targetLote.numeroLote || "S/L",
+              cantidad: qty,
+              cantidadF: qty,
+              precio: targetLote.precio || 0,
+              tipoMovimiento: "Salida",
+              usuario: `${currentUser.nombre} (${currentUser.usuario})`,
+              fecha: nowIso,
+              timestamp: nowTs,
+              catalogId: sol.catalogId || serverProd.catalogId || activeCatalogId
+            });
+          }
+
+          transaction.update(docRef, {
+            estado: nextStatus,
+            observaciones: obs.trim() || sol.observaciones,
+            historialCambios: updatedHistory
+          });
+
+          for (const [code, updatedProd] of serverProdsMap.entries()) {
+            transaction.set(tenantDoc("productos", code.replace(/\//g, "_")), {
+              ...updatedProd,
+              verificado: false,
+              updatedAt: nowTs
+            });
+          }
+
+          for (const mov of movementsToCreate) {
+            transaction.set(tenantDoc("movimientos", mov.id), mov);
+          }
+        });
+      } else {
+        await updateDoc(docRef, {
+          estado: nextStatus,
+          observaciones: obs.trim() || sol.observaciones,
+          historialCambios: updatedHistory
+        });
       }
-      await batch.commit();
 
       // Register in global history
       const histCol = tenantCollection("historial");
@@ -1217,8 +1339,8 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
         usuarioResponsable: `${currentUser.nombre} (${currentUser.usuario})`,
         fecha: localDate,
         hora: localTime,
-        timestamp: Date.now(),
-        catalogId: activeCatalogId
+        timestamp: nowTs,
+        catalogId: sol.catalogId || activeCatalogId
       };
       await addDoc(histCol, histData);
       
@@ -1227,9 +1349,10 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
 
       playSound("positive");
       showToast(`Solicitud ${sol.numeroSolicitud} cambiada a ${nextStatus} correctamente.`);
-    } catch (err) {
+    } catch (err: any) {
       console.error("Error updating status:", err);
-      alert("Error al actualizar el estado de la solicitud.");
+      playSound("negative");
+      showToast(err?.message || "Error al actualizar el estado de la solicitud.");
     }
   };
 
@@ -1338,56 +1461,82 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
     }
   };
 
-  const filteredList = solicitudes.filter((item) => {
-    // 0. Catalog Filter
-    const solCatalogId = item.catalogId || "default-cat";
-    if (catalogFilterState !== "todos" && solCatalogId !== catalogFilterState) return false;
-    if (catalogFilterState === "todos" && solCatalogId !== activeCatalogId) return false;
+  const filteredList = useMemo(() => {
+    const allowedCatIds = new Set(availableCatalogosMemo.map((c) => c.id));
+    const canSeeAll =
+      currentUser.rol === "Administrador" ||
+      currentUser.departamento === "Almacén y Suministro" ||
+      currentUser.departamento === "Farmacia";
 
-    // 1. Period Filter
-    if (periodFilter !== "todos" && item.periodo !== periodFilter) return false;
-
-    // 2. Department Filter
-    if (deptFilter !== "todos" && item.departamento !== deptFilter) return false;
-
-    // 3. Status Filter
-    if (statusFilter !== "todos" && item.estado !== statusFilter) return false;
-
-    // 4. Date Filter (Fecha)
-    if (dateFilter && item.fecha !== dateFilter) return false;
-
-    // 5. Order Number Filter (Número de orden)
-    if (orderNumberFilter && !item.numeroSolicitud.toLowerCase().includes(orderNumberFilter.toLowerCase())) return false;
-
-    // 6. Creator Filter (Usuario solicitante)
-    if (creatorFilter && !item.usuarioCreador.toLowerCase().includes(creatorFilter.toLowerCase())) return false;
-
-    // 7. Role & Department permissions: each department can only see their own requests under strict RBAC.
-    const canSeeAll = currentUser.rol === "Administrador" || currentUser.departamento === "Almacén y Suministro" || currentUser.departamento === "Farmacia";
-    if (!canSeeAll) {
-      if (currentUser.departamento === "Laboratorio") {
-        if (item.departamento !== "Laboratorio" && item.catalogId !== "laboratorio") return false;
-        if (item.departamento === "Odontología") return false;
-      } else if (currentUser.departamento === "Odontología") {
-        if (item.departamento !== "Odontología" && item.catalogId !== "odontologia") return false;
-        if (item.departamento === "Laboratorio") return false;
-      } else {
-        if (item.departamento !== currentUser.departamento) return false;
+    return solicitudes.filter((item) => {
+      // 0. Catalog Filter: allow filtering by a specific catalog or across all authorized catalogs for the user
+      const solCatalogId = item.catalogId || "default-cat";
+      if (!canSeeAll && !allowedCatIds.has(solCatalogId) && !isCatalogAllowedForUser(currentUser, solCatalogId, catalogos)) {
+        return false;
       }
-    }
+      if (catalogFilterState !== "todos" && !matchesCatalog(solCatalogId, catalogFilterState, catalogos)) {
+        return false;
+      }
 
-    // 8. Search by number or creator name
-    if (searchTerm) {
-      const search = searchTerm.toLowerCase();
-      return (
-        item.numeroSolicitud.toLowerCase().includes(search) ||
-        item.usuarioCreador.toLowerCase().includes(search) ||
-        item.descripcion.toLowerCase().includes(search)
-      );
-    }
+      // 1. Period Filter
+      if (periodFilter !== "todos" && item.periodo !== periodFilter) return false;
 
-    return true;
-  });
+      // 2. Department Filter
+      if (deptFilter !== "todos" && item.departamento !== deptFilter) return false;
+
+      // 3. Status Filter
+      if (statusFilter !== "todos" && item.estado !== statusFilter) return false;
+
+      // 4. Date Filter (Fecha)
+      if (dateFilter && item.fecha !== dateFilter) return false;
+
+      // 5. Order Number Filter (Número de orden)
+      if (orderNumberFilter && !item.numeroSolicitud.toLowerCase().includes(orderNumberFilter.toLowerCase())) return false;
+
+      // 6. Creator Filter (Usuario solicitante)
+      if (creatorFilter && !item.usuarioCreador.toLowerCase().includes(creatorFilter.toLowerCase())) return false;
+
+      // 7. Role & Department permissions: each user can see their department's requests or requests created by them
+      if (!canSeeAll) {
+        const isOwnCreator =
+          item.usuarioCreador.toLowerCase().includes(currentUser.usuario.toLowerCase()) ||
+          item.usuarioCreador.toLowerCase().includes(currentUser.nombre.toLowerCase());
+        const isOwnDept = item.departamento === currentUser.departamento;
+        const isAllowedDeptCatalog =
+          (currentUser.departamento === "Laboratorio" && matchesCatalog(solCatalogId, "laboratorio", catalogos)) ||
+          (currentUser.departamento === "Odontología" && matchesCatalog(solCatalogId, "odontologia", catalogos));
+
+        if (!isOwnCreator && !isOwnDept && !isAllowedDeptCatalog) {
+          return false;
+        }
+      }
+
+      // 8. Search by number or creator name
+      if (searchTerm) {
+        const search = searchTerm.toLowerCase();
+        return (
+          item.numeroSolicitud.toLowerCase().includes(search) ||
+          item.usuarioCreador.toLowerCase().includes(search) ||
+          item.descripcion.toLowerCase().includes(search)
+        );
+      }
+
+      return true;
+    });
+  }, [
+    solicitudes,
+    availableCatalogosMemo,
+    currentUser,
+    catalogos,
+    catalogFilterState,
+    periodFilter,
+    deptFilter,
+    statusFilter,
+    dateFilter,
+    orderNumberFilter,
+    creatorFilter,
+    searchTerm
+  ]);
 
   const getPriorityBadgeClass = (priority: string) => {
     switch (priority) {
@@ -1406,12 +1555,18 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
     switch (status) {
       case "Pendiente":
         return "bg-amber-100 text-amber-800 border border-amber-200";
+      case "Aprobada":
+        return "bg-teal-100 text-teal-800 border border-teal-200";
+      case "En Proceso":
+      case "En proceso":
       case "En preparación":
         return "bg-blue-100 text-blue-800 border border-blue-200";
       case "Parcialmente entregada":
         return "bg-indigo-100 text-indigo-800 border border-indigo-200";
       case "Entregada":
+      case "Completada":
         return "bg-emerald-100 text-emerald-800 border border-emerald-200";
+      case "Rechazada":
       case "Cancelada":
         return "bg-rose-100 text-rose-800 border border-rose-200";
       default:
@@ -1544,9 +1699,12 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
                 >
                   <option value="todos">Todos los estados</option>
                   <option value="Pendiente">Pendiente</option>
+                  <option value="Aprobada">Aprobada</option>
+                  <option value="En Proceso">En Proceso</option>
                   <option value="En preparación">En preparación</option>
                   <option value="Parcialmente entregada">Parcialmente entregada</option>
                   <option value="Entregada">Entregada</option>
+                  <option value="Rechazada">Rechazada</option>
                   <option value="Cancelada">Cancelada</option>
                 </select>
               </div>
@@ -1861,13 +2019,13 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
                   <label className="block text-xs font-black uppercase text-slate-500 tracking-wider mb-1.5">
                     Departamento Solicitante
                   </label>
-                  {(currentUser.rol === "Administrador" || currentUser.departamento === "Farmacia") ? (
+                  {(currentUser.rol === "Administrador" || currentUser.departamento === "Farmacia" || currentUser.departamento === "Almacén y Suministro") ? (
                     <select
                       value={department}
                       onChange={(e) => setDepartment(e.target.value)}
                       className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2.5 text-sm outline-none focus:ring-2 focus:ring-teal-400 font-extrabold text-teal-800"
                     >
-                      {DEPARTAMENTOS.map((d) => (
+                      {dynamicDepts.map((d) => (
                         <option key={d} value={d}>{d}</option>
                       ))}
                     </select>
@@ -1928,6 +2086,17 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
                                 onChange={(e) => {
                                   const val = parseInt(e.target.value);
                                   if (!isNaN(val) && val > 0) {
+                                    const prod = products?.find((p) => p.codigo === item.productoCodigo);
+                                    const totalSys = prod?.lotes?.reduce((acc, l) => acc + Number(l.cantidad || 0), 0) || 0;
+                                    const totalPhys = prod?.lotes?.reduce((acc, l) => acc + Number(l.cantidadF || 0), 0) || 0;
+                                    const maxAvailableBoth = Math.min(totalSys, totalPhys);
+                                    if (val > totalSys || val > totalPhys) {
+                                      playSound("negative");
+                                      showToast(
+                                        `Stock insuficiente para "${item.productoNombre}". Disponible en Sistema: ${totalSys} und. | Físico: ${totalPhys} und. (Máx: ${maxAvailableBoth} und.)`
+                                      );
+                                      return;
+                                    }
                                     setSolicitudItems(prev => prev.map((it, i) => i === idx ? { ...it, cantidadSolicitada: val, cantidadEntregada: val } : it));
                                   }
                                 }}
@@ -2048,8 +2217,7 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
                   </div>
                 ) : (() => {
                   const itemsToShow = products?.filter(p => {
-                    const pCatalogId = p.catalogId || "default-cat";
-                    if (pCatalogId !== solicitudCatalogId) return false;
+                    if (!matchesCatalog(p.catalogId, solicitudCatalogId, catalogos)) return false;
                     if (onlyUnverified && p.verificado) return false;
                     if (!itemSearch.trim()) return true;
                     const term = itemSearch.toLowerCase();
@@ -2102,6 +2270,7 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
                           <input
                             type="number"
                             min="1"
+                            max={Math.max(1, Math.min(totalSys, totalPhys))}
                             defaultValue="1"
                             id={`qty-catalog-${p.codigo}`}
                             className="w-12 bg-slate-50 border border-slate-200 rounded-lg text-center text-xs py-1.5 font-bold outline-none"
@@ -2113,7 +2282,16 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
                               const qtyInput = document.getElementById(`qty-catalog-${p.codigo}`) as HTMLInputElement;
                               const qty = parseInt(qtyInput?.value || "1");
                               if (isNaN(qty) || qty <= 0) {
-                                alert("Ingrese una cantidad válida mayor a cero.");
+                                playSound("negative");
+                                showToast("Ingrese una cantidad válida mayor a cero.");
+                                return;
+                              }
+                              const maxAvailableBoth = Math.min(totalSys, totalPhys);
+                              if (totalSys <= 0 || totalPhys <= 0 || qty > totalSys || qty > totalPhys) {
+                                playSound("negative");
+                                showToast(
+                                  `No se puede agregar "${p.nombre}": cantidad solicitada (${qty} und.) supera la existencia disponible. Disponible en Sistema: ${totalSys} und. | Físico: ${totalPhys} und. (Máx: ${maxAvailableBoth} und.)`
+                                );
                                 return;
                               }
                               setSolicitudItems(prev => [
@@ -2130,10 +2308,12 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
                             className={`px-3 py-1.5 text-xs font-bold rounded-lg transition active:scale-95 cursor-pointer ${
                               inDraft
                                 ? "bg-slate-100 text-slate-400 border border-slate-200"
+                                : totalSys <= 0 || totalPhys <= 0
+                                ? "bg-rose-600 hover:bg-rose-700 text-white shadow-xs"
                                 : "bg-teal-800 hover:bg-teal-700 text-white shadow-xs"
                             }`}
                           >
-                            {inDraft ? "Añadido" : "+ Añadir"}
+                            {inDraft ? "Añadido" : totalSys <= 0 || totalPhys <= 0 ? "Sin Stock" : "+ Añadir"}
                           </button>
                         </div>
                       </div>
@@ -2146,26 +2326,25 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
         </form>
       ) : (
         activeSubTab === "history" && (() => {
+          const allowedCatIds = new Set(availableCatalogosMemo.map((c) => c.id));
+          const canSeeAll = currentUser.rol === "Administrador" || currentUser.departamento === "Almacén y Suministro" || currentUser.departamento === "Farmacia";
+
           const filteredHistorial = historialList.filter((hist) => {
             const histCatalogId = hist.catalogId || "default-cat";
-            if (histCatalogId !== activeCatalogId) return false;
+            if (!canSeeAll && !allowedCatIds.has(histCatalogId) && !isCatalogAllowedForUser(currentUser, histCatalogId, catalogos)) {
+              return false;
+            }
 
             // Strict Role-Based and Department-Based Access Control for History events
-            const canSeeAll = currentUser.rol === "Administrador" || currentUser.departamento === "Almacén y Suministro" || currentUser.departamento === "Farmacia";
             if (!canSeeAll) {
               const sol = solicitudes.find(s => s.id === hist.solicitudId || s.numeroSolicitud === hist.numeroSolicitud);
               if (sol) {
-                if (currentUser.departamento === "Laboratorio") {
-                  if (sol.departamento !== "Laboratorio" && sol.catalogId !== "laboratorio") return false;
-                  if (sol.departamento === "Odontología") return false;
-                } else if (currentUser.departamento === "Odontología") {
-                  if (sol.departamento !== "Odontología" && sol.catalogId !== "odontologia") return false;
-                  if (sol.departamento === "Laboratorio") return false;
-                } else {
-                  if (sol.departamento !== currentUser.departamento) return false;
-                }
+                const isOwnCreator =
+                  sol.usuarioCreador.toLowerCase().includes(currentUser.usuario.toLowerCase()) ||
+                  sol.usuarioCreador.toLowerCase().includes(currentUser.nombre.toLowerCase());
+                const isOwnDept = sol.departamento === currentUser.departamento;
+                if (!isOwnCreator && !isOwnDept) return false;
               } else {
-                // Safe check using description event keywords to avoid leaks
                 const otherDepts = ["Laboratorio", "Odontología"].filter(d => d !== currentUser.departamento);
                 if (otherDepts.some(d => hist.descripcionEvent.toLowerCase().includes(d.toLowerCase()))) return false;
               }

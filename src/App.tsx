@@ -1,5 +1,5 @@
-import React, { useState, useEffect, useRef } from "react";
-import { doc, onSnapshot, getDocs, getDoc, writeBatch, updateDoc, setDoc, deleteDoc } from "firebase/firestore";
+import React, { useState, useEffect, useRef, useMemo } from "react";
+import { doc, onSnapshot, getDocs, getDoc, writeBatch, updateDoc, setDoc, deleteDoc, runTransaction } from "firebase/firestore";
 import { onAuthStateChanged, signOut } from "firebase/auth";
 import {
   db,
@@ -20,7 +20,11 @@ import {
   Departamento,
   ConceptoFactura,
   DEFAULT_CONCEPTOS_FACTURA,
-  getEnabledModules
+  getEnabledModules,
+  getUserAvailableCatalogos,
+  isModuleAuthorized,
+  resolveModuleFromSlug,
+  matchesCatalog
 } from "./types";
 import { playSound, setMuteState } from "./utils/audio";
 import { hashPassword } from "./components/Login";
@@ -36,7 +40,10 @@ import Login from "./components/Login";
 import SolicitudesPanel from "./components/SolicitudesPanel";
 import ConfiguracionPanel from "./components/ConfiguracionPanel";
 import VentaPanel from "./components/VentaPanel";
+import DashboardPanel from "./components/DashboardPanel";
 import ChatLateral from "./components/ChatLateral";
+import PhotoCaptureField from "./components/PhotoCaptureField";
+import { PWAInstallButton, OfflineIndicator, APP_ICON_PATH } from "./components/PWAInstallButton";
 import { logSystemEvent } from "./utils/chatHelper";
 import { exportToWord, exportToPDF } from "./utils/exportUtils";
 
@@ -46,6 +53,7 @@ import { bH as DEFAULT_PRODUCTS } from "./defaultProducts";
 // Iconos de Lucide
 import {
   Layers,
+  LayoutDashboard,
   ShoppingCart,
   Trash2,
   RefreshCw,
@@ -136,6 +144,7 @@ export default function App() {
   const [editDesc, setEditDesc] = useState("");
   const [editLotes, setEditLotes] = useState<Lote[]>([]);
   const [isPhotoUploading, setIsPhotoUploading] = useState(false);
+  const [pendingDetailPhoto, setPendingDetailPhoto] = useState<string | null>(null);
   const [coincidenLotesMap, setCoincidenLotesMap] = useState<Record<string, boolean>>({});
 
   // Order / Pedido State
@@ -183,6 +192,7 @@ export default function App() {
       precio: number;
       fechaVencimiento: string;
       fechaFisica: string;
+      imagen?: string;
     }>
   >([]);
   const [confirmingEntry, setConfirmingEntry] = useState(false);
@@ -197,6 +207,8 @@ export default function App() {
   const [newProdLotExpDate, setNewProdLotExpDate] = useState("");
   const [newProdLotPhysExpDate, setNewProdLotPhysExpDate] = useState("");
   const [newProdLotPrice, setNewProdLotPrice] = useState("");
+  const [newProdPhoto, setNewProdPhoto] = useState("");
+  const [pendingNewProdPhoto, setPendingNewProdPhoto] = useState<string | null>(null);
 
   // Global Config (Cierre de mes & Colores)
   const [activePeriod, setActivePeriod] = useState<string>("Julio 2026");
@@ -237,19 +249,86 @@ export default function App() {
     };
   }, []);
 
-  // Auto-redirect to first enabled module upon login, if current tab is not enabled
+  // Safe module navigation helper that enforces user permissions and blocks unauthorized URL access
+  const navigateToTab = (targetTab: string) => {
+    if (!currentUser) return;
+    if (targetTab === "dashboard") {
+      setActiveTab("dashboard");
+      setShowBlocks(false);
+      setSelectedBlock(null);
+      setShowOrder(false);
+      return;
+    }
+    const enabled = getEnabledModules(currentUser);
+    if (!enabled.includes(targetTab)) {
+      playSound("negative");
+      showToast("Acceso denegado: No tienes permisos para acceder a ese módulo.");
+      const fallback = enabled[0] || "dashboard";
+      setActiveTab(fallback);
+      return;
+    }
+    setActiveTab(targetTab);
+    setShowBlocks(false);
+    setSelectedBlock(null);
+  };
+
+  // Auto-redirect to first enabled module (or verify URL route permissions) upon login or permission update
   useEffect(() => {
-    if (currentUser) {
-      const enabled = getEnabledModules(currentUser);
-      if (enabled.length > 0) {
-        if (!enabled.includes(activeTab)) {
-          setActiveTab(enabled[0]);
+    if (!currentUser) return;
+    const enabled = getEnabledModules(currentUser);
+
+    const enforceRoutePermissions = () => {
+      if (typeof window === "undefined") return false;
+      const urlParams = new URLSearchParams(window.location.search);
+      const tabParam = urlParams.get("tab") || urlParams.get("modulo") || urlParams.get("module");
+      const hashSlug = window.location.hash ? window.location.hash.replace(/^#\/?/, "") : "";
+      const pathSlug = window.location.pathname && window.location.pathname !== "/" ? window.location.pathname : "";
+
+      const candidateSlug = tabParam || hashSlug || pathSlug;
+      if (candidateSlug) {
+        const resolvedMod = resolveModuleFromSlug(candidateSlug);
+        if (resolvedMod) {
+          if (resolvedMod === "dashboard") {
+            setActiveTab("dashboard");
+            return true;
+          }
+          if (enabled.includes(resolvedMod)) {
+            setActiveTab(resolvedMod);
+            return true;
+          } else {
+            // Block unauthorized direct URL access and clean URL
+            try {
+              window.history.replaceState(null, "", window.location.pathname.startsWith("/") ? "/" : window.location.pathname);
+            } catch {}
+            setToastMessage("Acceso restringido: No tienes autorización para abrir ese módulo.");
+            const fallback = enabled[0] || "dashboard";
+            setActiveTab(fallback);
+            return true;
+          }
         }
       }
-    }
-  }, [currentUser]);
+      return false;
+    };
 
-  // Keep currentUser state in sync with users list from DB
+    const handledByUrl = enforceRoutePermissions();
+    if (!handledByUrl) {
+      if (activeTab !== "dashboard" && !enabled.includes(activeTab)) {
+        setActiveTab(enabled[0] || "dashboard");
+      }
+    }
+
+    const onUrlChange = () => {
+      enforceRoutePermissions();
+    };
+    window.addEventListener("hashchange", onUrlChange);
+    window.addEventListener("popstate", onUrlChange);
+    return () => {
+      window.removeEventListener("hashchange", onUrlChange);
+      window.removeEventListener("popstate", onUrlChange);
+    };
+  }, [currentUser, activeTab]);
+
+  // Keep currentUser state in sync with users list from DB (including modulos and catalogos)
   useEffect(() => {
     if (currentUser && users.length > 0) {
       const dbUser = users.find(
@@ -261,12 +340,18 @@ export default function App() {
         const dbModulos = dbUser.modulos || [];
         const currentModulos = currentUser.modulos || [];
         const modulosChanged = JSON.stringify(dbModulos) !== JSON.stringify(currentModulos);
+
+        const dbCatalogos = dbUser.catalogos || [];
+        const currentCatalogos = currentUser.catalogos || [];
+        const catalogosChanged = JSON.stringify(dbCatalogos) !== JSON.stringify(currentCatalogos);
+
         if (
           dbUser.nombre !== currentUser.nombre ||
           dbUser.rol !== currentUser.rol ||
           dbUser.estado !== currentUser.estado ||
           dbUser.departamento !== currentUser.departamento ||
-          modulosChanged
+          modulosChanged ||
+          catalogosChanged
         ) {
           setCurrentUser(dbUser);
           localStorage.setItem("current_user", JSON.stringify(dbUser));
@@ -306,12 +391,15 @@ export default function App() {
     if (isLocalFileMode || !authReady || !isFirebaseAuthed || !currentUser) return;
 
     const runCatalogMigration = async () => {
+      const localMigrationKey = `migracion_catalogos_v2_done_${activeFarmaciaId}`;
+      if (localStorage.getItem(localMigrationKey) === "1") return;
       try {
         const migrationRef = tenantDoc("configuracion", "migracion_catalogos_v2", activeFarmaciaId);
         const migrationSnap = await getDoc(migrationRef);
         
-        // If already run, do nothing
+        // If already run, cache locally and do nothing
         if (migrationSnap.exists() && migrationSnap.data()?.completada) {
+          localStorage.setItem(localMigrationKey, "1");
           return;
         }
 
@@ -385,6 +473,7 @@ export default function App() {
           timestamp: Date.now(),
           migratedCollections: ["productos", "movimientos", "solicitudes", "historial"]
         });
+        localStorage.setItem(localMigrationKey, "1");
       } catch (err) {
         console.error("Error running catalog migration:", err);
       }
@@ -406,11 +495,14 @@ export default function App() {
       if (storedColores) {
         try { setColores(JSON.parse(storedColores)); } catch(e) {}
       } else {
-        const defaultColores = {
-          primario: "#0f766e",
-          secundario: "#14b8a6",
-          fondo: "#f8fafc",
-          barraSuperior: "#0f766e"
+        const defaultColores: ColoresConfig = {
+          primary: "#0d9488",
+          sidebar: "#134e4a",
+          buttons: "#0d9488",
+          headers: "#0f766e",
+          cards: "#ffffff",
+          tables: "#f8fafc",
+          elements: "#14b8a6"
         };
         setColores(defaultColores);
         localStorage.setItem("offline_colores", JSON.stringify(defaultColores));
@@ -667,39 +759,43 @@ export default function App() {
       }
     );
 
-    // 3. Sync Blocks
-    const unsubBlocks = onSnapshot(
-      tenantCollection("bloques", activeFarmaciaId),
-      async (snapshot) => {
-        const dbBlocks: Record<string, any> = {};
-        snapshot.forEach((d) => {
-          dbBlocks[d.id] = d.data();
-        });
+    const userMods = getEnabledModules(currentUser);
 
-        const fullBlocks = BLOQUES.map((id) => ({
-          id,
-          items: dbBlocks[id]?.items || [],
-          updatedAt: dbBlocks[id]?.updatedAt || Date.now()
-        }));
-
-        // Seed missing blocks to Firestore
-        const missing = BLOQUES.filter((id) => !dbBlocks[id]);
-        if (missing.length > 0) {
-          try {
-            const batch = writeBatch(db);
-            const colRef = tenantCollection("bloques", activeFarmaciaId);
-            missing.forEach((id) => {
-              batch.set(doc(colRef, id), { id, items: [], updatedAt: Date.now() });
+    // 3. Sync Blocks (only if user has inventory module enabled to avoid unnecessary listeners)
+    const unsubBlocks = userMods.includes("inventory")
+      ? onSnapshot(
+          tenantCollection("bloques", activeFarmaciaId),
+          async (snapshot) => {
+            const dbBlocks: Record<string, any> = {};
+            snapshot.forEach((d) => {
+              dbBlocks[d.id] = d.data();
             });
-            await batch.commit();
-          } catch (err) {
-            console.error("Error seeding empty blocks:", err);
-          }
-        }
-        setBlocks(fullBlocks);
-      },
-      (err) => console.error("Error listening to bloques:", err)
-    );
+
+            const fullBlocks = BLOQUES.map((id) => ({
+              id,
+              items: dbBlocks[id]?.items || [],
+              updatedAt: dbBlocks[id]?.updatedAt || Date.now()
+            }));
+
+            // Seed missing blocks to Firestore
+            const missing = BLOQUES.filter((id) => !dbBlocks[id]);
+            if (missing.length > 0) {
+              try {
+                const batch = writeBatch(db);
+                const colRef = tenantCollection("bloques", activeFarmaciaId);
+                missing.forEach((id) => {
+                  batch.set(doc(colRef, id), { id, items: [], updatedAt: Date.now() });
+                });
+                await batch.commit();
+              } catch (err) {
+                console.error("Error seeding empty blocks:", err);
+              }
+            }
+            setBlocks(fullBlocks);
+          },
+          (err) => console.error("Error listening to bloques:", err)
+        )
+      : () => {};
 
     // 4. Sync Users & background Firebase Auth provisioning
     const unsubUsers = onSnapshot(
@@ -832,22 +928,24 @@ export default function App() {
           return activeB - activeA || a.nombre.localeCompare(b.nombre);
         });
         setCatalogos(list);
-        
+
         if (list.length > 0) {
+          const allowedForUser = getUserAvailableCatalogos(currentUser, list);
           const stored = localStorage.getItem("active_catalog_id");
-          const activeItem = list.find((c) => c.activo);
-          const storedExistsAndActive = list.find((c) => c.id === stored && c.activo);
-          if (storedExistsAndActive) {
-            setActiveCatalogId(stored!);
-          } else if (activeItem) {
-            setActiveCatalogId(activeItem.id);
-            localStorage.setItem("active_catalog_id", activeItem.id);
+          const storedAllowed = allowedForUser.find((c) => c.id === stored && c.activo !== false);
+          if (storedAllowed) {
+            setActiveCatalogId(storedAllowed.id);
+          } else if (allowedForUser.length > 0) {
+            setActiveCatalogId(allowedForUser[0].id);
+            localStorage.setItem("active_catalog_id", allowedForUser[0].id);
           } else {
-            setActiveCatalogId(list[0].id);
-            localStorage.setItem("active_catalog_id", list[0].id);
+            const activeItem = list.find((c) => c.activo);
+            const fallbackId = activeItem ? activeItem.id : list[0].id;
+            setActiveCatalogId(fallbackId);
+            localStorage.setItem("active_catalog_id", fallbackId);
           }
         } else {
-          // Seed default catalog if empty
+          // Seed default catalogs if empty
           const defaultCatRef = tenantDoc("catalogos", "default-cat", activeFarmaciaId);
           setDoc(defaultCatRef, {
             id: "default-cat",
@@ -861,23 +959,26 @@ export default function App() {
       (err) => console.error("Error listening to catalogos:", err)
     );
 
-    // 7. Sync Conceptos de Facturación (Módulo de Venta)
-    const unsubConceptos = onSnapshot(
-      tenantDoc("configuracion", "conceptos_venta", activeFarmaciaId),
-      (docSnap) => {
-        if (docSnap.exists() && Array.isArray(docSnap.data().items) && docSnap.data().items.length > 0) {
-          setConceptos(docSnap.data().items);
-        } else {
-          setConceptos(DEFAULT_CONCEPTOS_FACTURA);
-          setDoc(
+    // 7. Sync Conceptos de Facturación (only when Venta or Configuracion is enabled for user)
+    const unsubConceptos =
+      userMods.includes("venta") || userMods.includes("configuracion")
+        ? onSnapshot(
             tenantDoc("configuracion", "conceptos_venta", activeFarmaciaId),
-            { items: DEFAULT_CONCEPTOS_FACTURA, updatedAt: Date.now() },
-            { merge: true }
-          ).catch(() => {});
-        }
-      },
-      (err) => console.error("Error listening to conceptos_venta:", err)
-    );
+            (docSnap) => {
+              if (docSnap.exists() && Array.isArray(docSnap.data().items) && docSnap.data().items.length > 0) {
+                setConceptos(docSnap.data().items);
+              } else {
+                setConceptos(DEFAULT_CONCEPTOS_FACTURA);
+                setDoc(
+                  tenantDoc("configuracion", "conceptos_venta", activeFarmaciaId),
+                  { items: DEFAULT_CONCEPTOS_FACTURA, updatedAt: Date.now() },
+                  { merge: true }
+                ).catch(() => {});
+              }
+            },
+            (err) => console.error("Error listening to conceptos_venta:", err)
+          )
+        : () => {};
 
     return () => {
       unsubColores();
@@ -947,17 +1048,21 @@ export default function App() {
     }
   }, [activePeriod]);
 
-  // Synchronize active catalog when currentUser or catalogos changes
+  // Synchronize active catalog and order catalog when currentUser or catalogos changes
   useEffect(() => {
     if (currentUser && catalogos.length > 0) {
       const allowed = getAvailableCatalogos();
       const isAllowed = allowed.some((c) => c.id === activeCatalogId);
+      const effectiveCatId = isAllowed ? activeCatalogId : (allowed[0]?.id || activeCatalogId);
       if (!isAllowed && allowed.length > 0) {
         setActiveCatalogId(allowed[0].id);
         localStorage.setItem("active_catalog_id", allowed[0].id);
       }
+      if (!orderCatalogId && orderItems.length === 0 && effectiveCatId) {
+        setOrderCatalogId(effectiveCatId);
+      }
     }
-  }, [currentUser, catalogos, activeCatalogId]);
+  }, [currentUser, catalogos, activeCatalogId, orderCatalogId, orderItems.length]);
 
   const showToast = (message: string) => {
     setToastMessage(message);
@@ -967,8 +1072,99 @@ export default function App() {
     }, 2500);
   };
 
-  // Get details and lots status for a product
+  const getDaysToExpiration = (dateStr: string) => {
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const expDate = new Date(dateStr + "T00:00:00");
+    return Math.ceil((expDate.getTime() - today.getTime()) / 86400000);
+  };
+
+  const getEarliestExpiration = (p: Producto) => {
+    if (!p.lotes || p.lotes.length === 0) return Infinity;
+    let earliest = Infinity;
+    p.lotes.forEach((l) => {
+      if (!l.fechaVencimiento) return;
+      const t = new Date(l.fechaVencimiento + "T00:00:00").getTime();
+      if (!isNaN(t) && t < earliest) earliest = t;
+    });
+    return earliest;
+  };
+
+  // Precompute stats per product in a memoized Map for fast O(1) lookup during filtering and rendering
+  const productStatsMap = useMemo(() => {
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const todayMs = today.getTime();
+
+    const map = new Map<string, {
+      totalStock: number;
+      physicalStock: number;
+      hasExpired: boolean;
+      hasSoonToExpire: boolean;
+      hasNextToExpire: boolean;
+      hasAdjusted: boolean;
+      lowStock: boolean;
+      noStockBoth: boolean;
+      noStockSystem: boolean;
+      noStockPhysical: boolean;
+      wideMismatch: boolean;
+      verificado: boolean;
+      earliestExp: number;
+    }>();
+
+    for (const p of products) {
+      let totalStock = 0;
+      let physicalStock = 0;
+      let hasExpired = false;
+      let hasSoonToExpire = false;
+      let hasNextToExpire = false;
+      let hasAdjusted = false;
+      let wideMismatch = false;
+      let earliestExp = Infinity;
+
+      for (const l of p.lotes) {
+        const cSys = Number(l.cantidad || 0);
+        const cFis = Number(l.cantidadF || 0);
+        totalStock += cSys;
+        physicalStock += cFis;
+        if (cFis !== cSys) wideMismatch = true;
+        if (l.articuloAjustado) hasAdjusted = true;
+        if (l.fechaVencimiento) {
+          const expMs = new Date(l.fechaVencimiento + "T00:00:00").getTime();
+          if (!isNaN(expMs)) {
+            if (expMs < earliestExp) earliestExp = expMs;
+            const days = Math.ceil((expMs - todayMs) / 86400000);
+            if (days < 0) hasExpired = true;
+            else if (days <= 30) hasSoonToExpire = true;
+            else if (days <= 90) hasNextToExpire = true;
+          }
+        }
+      }
+
+      map.set(p.codigo, {
+        totalStock,
+        physicalStock,
+        hasExpired,
+        hasSoonToExpire,
+        hasNextToExpire,
+        hasAdjusted,
+        lowStock: totalStock < 20,
+        noStockBoth: totalStock === 0 && physicalStock === 0,
+        noStockSystem: totalStock === 0,
+        noStockPhysical: physicalStock === 0,
+        wideMismatch,
+        verificado: !!p.verificado,
+        earliestExp
+      });
+    }
+    return map;
+  }, [products]);
+
+  // Get details and lots status for a product (uses memoized Map when available)
   const getProductStats = (p: Producto) => {
+    const cached = productStatsMap.get(p.codigo);
+    if (cached) return cached;
+
     const totalStock = p.lotes.reduce((sum, l) => sum + Number(l.cantidad || 0), 0);
     const physicalStock = p.lotes.reduce((sum, l) => sum + Number(l.cantidadF || 0), 0);
     const hasExpired = p.lotes.some((l) => getDaysToExpiration(l.fechaVencimiento) < 0);
@@ -997,24 +1193,6 @@ export default function App() {
     };
   };
 
-  const getDaysToExpiration = (dateStr: string) => {
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
-    const expDate = new Date(dateStr + "T00:00:00");
-    return Math.ceil((expDate.getTime() - today.getTime()) / 86400000);
-  };
-
-  const getEarliestExpiration = (p: Producto) => {
-    if (!p.lotes || p.lotes.length === 0) return Infinity;
-    let earliest = Infinity;
-    p.lotes.forEach((l) => {
-      if (!l.fechaVencimiento) return;
-      const t = new Date(l.fechaVencimiento + "T00:00:00").getTime();
-      if (!isNaN(t) && t < earliest) earliest = t;
-    });
-    return earliest;
-  };
-
   const handleToggleMute = () => {
     setIsMuted((prev) => {
       const next = !prev;
@@ -1023,34 +1201,19 @@ export default function App() {
     });
   };
 
-  const getAvailableCatalogos = () => {
-    const activeCatalogos = catalogos.filter((c) => c.activo);
-    if (currentUser?.rol === "Administrador" || currentUser?.departamento === "Almacén y Suministro") {
-      return activeCatalogos;
-    }
-    if (currentUser?.departamento === "Laboratorio") {
-      return activeCatalogos.filter((c) => c.id === "laboratorio");
-    }
-    if (currentUser?.departamento === "Odontología") {
-      return activeCatalogos.filter((c) => c.id === "odontologia");
-    }
-    const userCats = currentUser?.catalogos || [];
-    if (userCats.length > 0) {
-      return activeCatalogos.filter((c) => userCats.includes(c.id));
-    }
-    return activeCatalogos;
-  };
+  const availableCatalogosMemo = useMemo(() => {
+    return getUserAvailableCatalogos(currentUser, catalogos);
+  }, [catalogos, currentUser]);
 
-  // Filter & Search Logic
-  const getFilteredProducts = () => {
+  const getAvailableCatalogos = () => availableCatalogosMemo;
+
+  // Memoized Filter & Search Logic
+  const filteredProductsMemo = useMemo(() => {
     const search = searchQuery.trim().toLowerCase();
     
     let filtered = products.filter((p) => {
-      // Filter by activeCatalogId
-      const pCatalogId = p.catalogId || "default-cat";
-      if (pCatalogId !== activeCatalogId) return false;
+      if (!matchesCatalog(p.catalogId, activeCatalogId, catalogos)) return false;
 
-      // 1. Search Query
       if (search) {
         const matchesMain =
           p.nombre.toLowerCase().includes(search) ||
@@ -1066,15 +1229,13 @@ export default function App() {
         if (!matchesMain && !matchesLotes) return false;
       }
 
-      // Filter by Unverified if toggled
       if (showUnverifiedOnly && p.verificado) {
         return false;
       }
 
-      // 2. Tab/View selection filters
       if (catalogFilter === "todos") return true;
 
-      const stats = getProductStats(p);
+      const stats = productStatsMap.get(p.codigo) || getProductStats(p);
       switch (catalogFilter) {
         case "bajo":
           return stats.lowStock;
@@ -1097,21 +1258,21 @@ export default function App() {
       }
     });
 
-    // Handle priority sorting (earliest expiration first)
     if (catalogFilter === "prioridad") {
       filtered = [...filtered].sort((a, b) => {
-        const timeA = getEarliestExpiration(a);
-        const timeB = getEarliestExpiration(b);
+        const timeA = productStatsMap.get(a.codigo)?.earliestExp ?? getEarliestExpiration(a);
+        const timeB = productStatsMap.get(b.codigo)?.earliestExp ?? getEarliestExpiration(b);
         if (timeA === timeB) return a.nombre.localeCompare(b.nombre);
         return timeA - timeB;
       });
     } else {
-      // Sort alphabetically by default
       filtered = [...filtered].sort((a, b) => a.nombre.localeCompare(b.nombre));
     }
 
     return filtered;
-  };
+  }, [products, activeCatalogId, searchQuery, showUnverifiedOnly, catalogFilter, productStatsMap]);
+
+  const getFilteredProducts = () => filteredProductsMemo;
 
   // Product verifications
   const handleToggleVerification = async (e: React.MouseEvent, productCode: string) => {
@@ -1159,16 +1320,15 @@ export default function App() {
         verificado: finalVerified,
         updatedAt: Date.now()
       };
-      if (isLocalFileMode) {
-        setProducts(prev => {
-          const exists = prev.some(p => p.codigo === prod.codigo);
-          if (exists) {
-            return prev.map(p => p.codigo === prod.codigo ? prodData : p);
-          } else {
-            return [...prev, prodData];
-          }
-        });
-      } else {
+      setProducts(prev => {
+        const exists = prev.some(p => p.codigo === prod.codigo);
+        if (exists) {
+          return prev.map(p => p.codigo === prod.codigo ? prodData : p);
+        } else {
+          return [...prev, prodData];
+        }
+      });
+      if (!isLocalFileMode) {
         await setDoc(ref, prodData);
       }
     } catch (err) {
@@ -1207,27 +1367,73 @@ export default function App() {
     }
   };
 
-  const getProductCoordinates = (productCode: string) => {
+  const productCoordinatesMap = useMemo(() => {
+    const map = new Map<string, string>();
     for (const b of blocks) {
-      const match = (b.items || []).find((item: any) => item.productCode === productCode);
-      if (match) {
-        return `Bloque ${b.id} • Nivel ${match.nivel}`;
+      for (const item of b.items || []) {
+        if (item.productCode && !map.has(item.productCode)) {
+          map.set(item.productCode, `Bloque ${b.id} • Nivel ${item.nivel}`);
+        }
       }
     }
-    return "No asignado";
+    return map;
+  }, [blocks]);
+
+  const getProductCoordinates = (productCode: string) => {
+    return productCoordinatesMap.get(productCode) || "No asignado";
+  };
+
+  // Comprime y optimiza la imagen en el navegador (~15-25 KB) para almacenarla directamente en Firebase Firestore sin costo extra
+  const compressImageForFirestore = (file: File, maxDimension = 420, quality = 0.78): Promise<string> => {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onerror = () => reject(new Error("No se pudo leer el archivo de imagen."));
+      reader.onload = () => {
+        const result = reader.result as string;
+        if (file.type === "image/svg+xml") {
+          resolve(result);
+          return;
+        }
+        const img = new Image();
+        img.onerror = () => reject(new Error("Formato de imagen no válido."));
+        img.onload = () => {
+          let width = img.width;
+          let height = img.height;
+          if (width > maxDimension || height > maxDimension) {
+            if (width > height) {
+              height = Math.round((height * maxDimension) / width);
+              width = maxDimension;
+            } else {
+              width = Math.round((width * maxDimension) / height);
+              height = maxDimension;
+            }
+          }
+          const canvas = document.createElement("canvas");
+          canvas.width = width;
+          canvas.height = height;
+          const ctx = canvas.getContext("2d");
+          if (!ctx) {
+            resolve(result);
+            return;
+          }
+          ctx.clearRect(0, 0, width, height);
+          ctx.drawImage(img, 0, 0, width, height);
+          // Intentar WebP primero por su alta compresión; si no, JPEG
+          let dataUrl = canvas.toDataURL("image/webp", quality);
+          if (!dataUrl.startsWith("data:image/webp")) {
+            dataUrl = canvas.toDataURL("image/jpeg", quality);
+          }
+          resolve(dataUrl);
+        };
+        img.src = result;
+      };
+      reader.readAsDataURL(file);
+    });
   };
 
   const Ni = async (file: File) => {
-    const r = new FormData();
-    r.append("file", file);
-    r.append("upload_preset", "react_cloudinary_stock");
-    const res = await fetch("https://api.cloudinary.com/v1_1/du4bco7by/image/upload", {
-      method: "POST",
-      body: r
-    });
-    if (!res.ok) throw new Error("Fallo al subir la imagen a la nube.");
-    const a = await res.json();
-    return a.secure_url as string;
+    // Almacenar directamente optimizado para Firebase Firestore (100% independiente de servicios externos)
+    return await compressImageForFirestore(file, 420, 0.78);
   };
 
   const handleAddUser = async (data: {
@@ -1238,7 +1444,12 @@ export default function App() {
     estado: "Activo" | "Inactivo";
     departamento: string;
     modulos?: string[];
+    catalogos?: string[];
   }) => {
+    if (!isModuleAuthorized(currentUser, "usuarios")) {
+      showToast("No tienes permisos para administrar usuarios.");
+      return;
+    }
     const isLocalFileMode = typeof window !== "undefined" && window.location.protocol === "file:";
     try {
       const hash = await hashPassword(data.passwordText);
@@ -1252,7 +1463,8 @@ export default function App() {
         updatedAt: Date.now(),
         departamento: data.departamento,
         farmaciaId: activeFarmaciaId,
-        modulos: data.modulos || (data.rol === "Administrador" ? ["inventory", "carga_masiva", "solicitudes", "historial", "usuarios", "configuracion"] : ["solicitudes", "historial"])
+        modulos: data.modulos || (data.rol === "Administrador" ? ["inventory", "carga_masiva", "solicitudes", "historial", "usuarios", "configuracion"] : ["solicitudes", "historial"]),
+        catalogos: data.catalogos || []
       };
       if (isLocalFileMode) {
         setUsers(prev => [...prev, newUser]);
@@ -1269,6 +1481,10 @@ export default function App() {
   };
 
   const handleUpdateUser = async (id: string, data: Partial<Usuario>) => {
+    if (!isModuleAuthorized(currentUser, "usuarios")) {
+      showToast("No tienes permisos para modificar usuarios.");
+      return;
+    }
     const isLocalFileMode = typeof window !== "undefined" && window.location.protocol === "file:";
     try {
       if (isLocalFileMode) {
@@ -1285,6 +1501,10 @@ export default function App() {
   };
 
   const handleChangeUserPassword = async (id: string, passwordText: string) => {
+    if (!isModuleAuthorized(currentUser, "usuarios")) {
+      showToast("No tienes permisos para cambiar contraseñas.");
+      return;
+    }
     const isLocalFileMode = typeof window !== "undefined" && window.location.protocol === "file:";
     try {
       const hash = await hashPassword(passwordText);
@@ -1306,6 +1526,10 @@ export default function App() {
   };
 
   const handleDeleteUser = async (id: string) => {
+    if (!isModuleAuthorized(currentUser, "usuarios")) {
+      showToast("No tienes permisos para eliminar usuarios.");
+      return;
+    }
     const isLocalFileMode = typeof window !== "undefined" && window.location.protocol === "file:";
     try {
       if (isLocalFileMode) {
@@ -1495,7 +1719,8 @@ export default function App() {
       ...prod,
       nombre: editName.trim() || prod.nombre,
       descripcion: editDesc.trim(),
-      lotes: editLotes
+      lotes: editLotes,
+      ...(pendingDetailPhoto ? { imagen: pendingDetailPhoto, imagenURL: pendingDetailPhoto } : {})
     };
 
     await saveProductDoc(updatedProduct);
@@ -1505,12 +1730,36 @@ export default function App() {
       await saveMovementLog(adj);
     }
 
+    setPendingDetailPhoto(null);
     setSelectedProductCode(null);
     playSound("positive");
     showToast("Los cambios del suministro se han guardado con éxito.");
   };
 
-  // Upload Photo reference to Cloudinary
+  // Confirm & Save Photo directly to Firebase Firestore (compressed WebP/JPEG)
+  const handleConfirmProductPhoto = async (compressedDataUrl: string) => {
+    if (!selectedProductCode) return;
+
+    setIsPhotoUploading(true);
+    try {
+      const prod = products.find((p) => p.codigo === selectedProductCode);
+      if (prod) {
+        const updated = { ...prod, imagen: compressedDataUrl, imagenURL: compressedDataUrl };
+        await saveProductDoc(updated);
+        setPendingDetailPhoto(null);
+        showToast("Foto confirmada y guardada en Firebase correctamente");
+        playSound("positive");
+      }
+    } catch (err) {
+      console.error(err);
+      showToast(err instanceof Error ? err.message : "Error al guardar la imagen");
+      playSound("negative");
+    } finally {
+      setIsPhotoUploading(false);
+    }
+  };
+
+  // Upload Photo directly to Firebase Firestore (compressed WebP/JPEG)
   const handlePhotoUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file || !selectedProductCode) return;
@@ -1519,38 +1768,40 @@ export default function App() {
     playSound("open");
 
     try {
-      const secureUrl = await Ni(file);
-      const prod = products.find((p) => p.codigo === selectedProductCode);
-      if (prod) {
-        const updated = { ...prod, imagen: secureUrl, imagenURL: secureUrl };
-        await saveProductDoc(updated);
-        showToast("Foto cargada correctamente");
-        playSound("positive");
-      }
+      const compressedDataUrl = await Ni(file);
+      await handleConfirmProductPhoto(compressedDataUrl);
     } catch (err) {
       console.error(err);
-      alert(err instanceof Error ? err.message : "Error al subir la imagen");
+      showToast(err instanceof Error ? err.message : "Error al procesar la imagen");
       playSound("negative");
     } finally {
       setIsPhotoUploading(false);
+      e.target.value = "";
     }
   };
 
-  const handlePhotoDelete = async (e: React.MouseEvent) => {
-    e.stopPropagation();
+  const handlePhotoDelete = async (e?: React.MouseEvent) => {
+    if (e) {
+      e.preventDefault();
+      e.stopPropagation();
+    }
     if (!selectedProductCode) return;
 
     const prod = products.find((p) => p.codigo === selectedProductCode);
-    if (prod && confirm("¿Deseas eliminar la foto de este producto?")) {
+    if (prod) {
       const { imagen, imagenURL, ...cleaned } = prod;
       await saveProductDoc(cleaned as Producto);
+      setPendingDetailPhoto(null);
+      if (fileInputRef.current) {
+        fileInputRef.current.value = "";
+      }
       showToast("Foto eliminada correctamente");
       playSound("negative");
     }
   };
 
   const generateNextCode = (currentCatalogId: string, customPrefix?: string): string => {
-    const catalogProducts = products.filter(p => (p.catalogId || "default-cat") === currentCatalogId);
+    const catalogProducts = products.filter(p => matchesCatalog(p.catalogId, currentCatalogId, catalogos));
     let prefix = customPrefix || "B";
 
     if (!customPrefix && catalogProducts.length > 0) {
@@ -1633,7 +1884,7 @@ export default function App() {
       // Check if an existing product matches by name or generate next code taking pending items into account
       const existingByName = products.find(
         (p) =>
-          (p.catalogId || "default-cat") === activeCatalogId &&
+          matchesCatalog(p.catalogId, activeCatalogId, catalogos) &&
           p.nombre.toLowerCase() === name.toLowerCase()
       );
       if (existingByName) {
@@ -1656,6 +1907,8 @@ export default function App() {
       }
     }
 
+    const finalPhoto = pendingNewProdPhoto || newProdPhoto || undefined;
+
     const newItem = {
       tempId: `pend-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
       codigo: code,
@@ -1667,7 +1920,8 @@ export default function App() {
       cantidadF: qtyF,
       precio: price,
       fechaVencimiento: exp,
-      fechaFisica: newProdLotPhysExpDate || exp
+      fechaFisica: newProdLotPhysExpDate || exp,
+      ...(finalPhoto ? { imagen: finalPhoto } : {})
     };
 
     setPendingEntryItems((prev) => [...prev, newItem]);
@@ -1683,6 +1937,8 @@ export default function App() {
     setNewProdLotExpDate("");
     setNewProdLotPhysExpDate("");
     setNewProdLotPrice("");
+    setNewProdPhoto("");
+    setPendingNewProdPhoto(null);
     playSound("action");
     showToast(`"${name}" añadido a la lista de entrada.`);
   };
@@ -1739,6 +1995,7 @@ export default function App() {
             nombre: item.nombre || existingProd.nombre,
             descripcion: item.descripcion || existingProd.descripcion || "",
             lotes: [...existingProd.lotes, newLot],
+            ...(item.imagen ? { imagen: item.imagen, imagenURL: item.imagen } : {}),
             updatedAt: Date.now()
           };
           updatedProductsMap.set(item.codigo, merged);
@@ -1748,6 +2005,7 @@ export default function App() {
             nombre: item.nombre,
             descripcion: item.descripcion,
             lotes: [newLot],
+            ...(item.imagen ? { imagen: item.imagen, imagenURL: item.imagen } : {}),
             updatedAt: Date.now(),
             catalogId: activeCatalogId
           };
@@ -1755,34 +2013,81 @@ export default function App() {
         }
       }
 
-      // Save all affected products
-      for (const prod of updatedProductsMap.values()) {
-        await saveProductDoc(prod);
-      }
+      const isLocalFileMode = typeof window !== "undefined" && window.location.protocol === "file:";
+      if (isLocalFileMode) {
+        for (const prod of updatedProductsMap.values()) {
+          await saveProductDoc(prod);
+        }
+        for (const item of pendingEntryItems) {
+          const movLog: Omit<Movimiento, "id"> = {
+            productoCodigo: item.codigo,
+            productoNombre: item.nombre,
+            descripcion: item.descripcion,
+            lote: item.numeroLote,
+            loteFisico: item.loteFisico,
+            cantidad: item.cantidad,
+            cantidadF: item.cantidadF,
+            fechaVencimiento: item.fechaVencimiento,
+            fechaFisica: item.fechaFisica,
+            precio: item.precio,
+            tipoMovimiento: "Entrada",
+            usuario: currentUser ? `${currentUser.nombre} (${currentUser.usuario})` : "Sistema",
+            fecha: new Date().toISOString(),
+            timestamp: Date.now(),
+            catalogId: activeCatalogId,
+            numeroFactura: cleanInvoiceNum,
+            fechaEntrada: cleanInvoiceDate,
+            proveedor: cleanSupplier
+          };
+          await saveMovementLog(movLog);
+        }
+      } else {
+        // Save all affected products and movement logs in a single atomic batch for instant response
+        const batch = writeBatch(db);
+        const nowTs = Date.now();
+        const nowIso = new Date(nowTs).toISOString();
+        const userLabel = currentUser ? `${currentUser.nombre} (${currentUser.usuario})` : "Sistema";
 
-      // Log each item as an "Entrada" movement grouped under numeroFactura
-      for (const item of pendingEntryItems) {
-        const movLog: Omit<Movimiento, "id"> = {
-          productoCodigo: item.codigo,
-          productoNombre: item.nombre,
-          descripcion: item.descripcion,
-          lote: item.numeroLote,
-          loteFisico: item.loteFisico,
-          cantidad: item.cantidad,
-          cantidadF: item.cantidadF,
-          fechaVencimiento: item.fechaVencimiento,
-          fechaFisica: item.fechaFisica,
-          precio: item.precio,
-          tipoMovimiento: "Entrada",
-          usuario: currentUser ? `${currentUser.nombre} (${currentUser.usuario})` : "Sistema",
-          fecha: new Date().toISOString(),
-          timestamp: Date.now(),
-          catalogId: activeCatalogId,
-          numeroFactura: cleanInvoiceNum,
-          fechaEntrada: cleanInvoiceDate,
-          proveedor: cleanSupplier
-        };
-        await saveMovementLog(movLog);
+        for (const prod of updatedProductsMap.values()) {
+          const ref = tenantDoc("productos", prod.codigo.replace(/\//g, "_"), activeFarmaciaId);
+          const allAdjusted = prod.lotes.length > 0 && prod.lotes.every((l) => !!l.articuloAjustado);
+          const finalVerified = allAdjusted ? false : (prod.verificado || false);
+          batch.set(ref, {
+            ...prod,
+            catalogId: prod.catalogId || activeCatalogId,
+            verificado: finalVerified,
+            updatedAt: nowTs
+          });
+        }
+
+        for (const item of pendingEntryItems) {
+          const movId = `mov-${item.codigo}-${nowTs}-${Math.random().toString(36).slice(2, 6)}`;
+          const movData: Movimiento = {
+            id: movId,
+            productoCodigo: item.codigo,
+            productoNombre: item.nombre,
+            descripcion: item.descripcion,
+            lote: item.numeroLote,
+            loteFisico: item.loteFisico,
+            cantidad: item.cantidad,
+            cantidadF: item.cantidadF,
+            fechaVencimiento: item.fechaVencimiento,
+            fechaFisica: item.fechaFisica,
+            precio: item.precio,
+            tipoMovimiento: "Entrada",
+            usuario: userLabel,
+            fecha: nowIso,
+            timestamp: nowTs,
+            catalogId: activeCatalogId,
+            numeroFactura: cleanInvoiceNum,
+            fechaEntrada: cleanInvoiceDate,
+            proveedor: cleanSupplier
+          };
+          batch.set(tenantDoc("movimientos", movId, activeFarmaciaId), movData);
+        }
+
+        await batch.commit();
+        logSystemEvent(`📦 **Movimiento de Inventario**: Se registró una **Entrada** de ${pendingEntryItems.length} producto(s) bajo la factura **${cleanInvoiceNum}** por el usuario ${userLabel}.`);
       }
 
       const count = pendingEntryItems.length;
@@ -1857,12 +2162,7 @@ export default function App() {
 
   // Order List item modifiers
   const handleSetOrderCatalogId = (catId: string) => {
-    // Check permissions
-    const activeCatalogos = (catalogos || []).filter((c: any) => c.activo);
-    const allowedCats = currentUser?.rol === "Administrador"
-      ? activeCatalogos
-      : activeCatalogos.filter((c: any) => (currentUser?.catalogos || []).includes(c.id));
-    
+    const allowedCats = getUserAvailableCatalogos(currentUser, catalogos);
     const allowed = allowedCats.some((c: any) => c.id === catId);
     if (catId && !allowed) {
       showToast("No tiene permisos para acceder a este catálogo.");
@@ -1891,15 +2191,28 @@ export default function App() {
 
     if (!prod || !lot) return;
 
-    const maxAvailable = Math.max(Number(lot.cantidad || 0), Number(lot.cantidadF || 0));
-
-    if (orderSelectedQuantity <= 0 || orderSelectedQuantity > maxAvailable) {
-      alert("La cantidad solicitada supera el stock disponible (sistema y físico) de este lote.");
+    if (orderItems.some((item) => item.productCode === prod.codigo && item.loteId === lot.id)) {
+      playSound("negative");
+      showToast("Este lote ya ha sido añadido al pedido actual. Puedes ajustar su cantidad en la tabla.");
       return;
     }
 
-    if (orderItems.some((item) => item.productCode === prod.codigo && item.loteId === lot.id)) {
-      alert("Este lote ya ha sido añadido al pedido actual.");
+    const stockSistema = Number(lot.cantidad || 0);
+    const stockFisico = Number(lot.cantidadF || 0);
+    const maxAvailableBoth = Math.min(stockSistema, stockFisico);
+
+    if (orderSelectedQuantity <= 0) {
+      playSound("negative");
+      showToast("La cantidad solicitada debe ser mayor a cero.");
+      return;
+    }
+
+    if (stockSistema <= 0 || stockFisico <= 0 || orderSelectedQuantity > stockSistema || orderSelectedQuantity > stockFisico) {
+      playSound("negative");
+      const msg =
+        `No se puede agregar "${prod.nombre}" (Lote ${lot.numeroLote}): cantidad solicitada (${orderSelectedQuantity} und.) supera las existencias disponibles. ` +
+        `Disponible en Sistema: ${stockSistema} und. | Disponible en Físico: ${stockFisico} und. (Máximo permitido: ${maxAvailableBoth} und.)`;
+      showToast(msg);
       return;
     }
 
@@ -1925,13 +2238,34 @@ export default function App() {
   const handleCompleteOrder = async () => {
     if (orderItems.length === 0) return;
 
-    // Validate stocks once more before committing
+    // 1. Validación en la interfaz (UI) verificando tanto inventario del sistema como inventario físico
+    const lotTotalsMap = new Map<string, { productCode: string; loteId: string; loteNumero: string; nombre: string; totalQty: number }>();
     for (const item of orderItems) {
-      const prod = products.find((p) => p.codigo === item.productCode);
-      const lot = prod?.lotes.find((l) => l.id === item.loteId);
-      const maxAvailable = lot ? Math.max(Number(lot.cantidad || 0), Number(lot.cantidadF || 0)) : 0;
-      if (!prod || !lot || maxAvailable < item.cantidadAprobada) {
-        alert(`Stock insuficiente en el lote "${item.loteNumero}" para el producto "${item.nombre}".`);
+      const key = `${item.productCode}::${item.loteId}`;
+      const prev = lotTotalsMap.get(key);
+      if (prev) {
+        prev.totalQty += Number(item.cantidadAprobada || 0);
+      } else {
+        lotTotalsMap.set(key, {
+          productCode: item.productCode,
+          loteId: item.loteId,
+          loteNumero: item.loteNumero,
+          nombre: item.nombre,
+          totalQty: Number(item.cantidadAprobada || 0)
+        });
+      }
+    }
+
+    for (const entry of lotTotalsMap.values()) {
+      const prod = products.find((p) => p.codigo === entry.productCode);
+      const lot = prod?.lotes.find((l) => l.id === entry.loteId);
+      const stockSistema = lot ? Number(lot.cantidad || 0) : 0;
+      const stockFisico = lot ? Number(lot.cantidadF || 0) : 0;
+      if (!prod || !lot || entry.totalQty <= 0 || entry.totalQty > stockSistema || entry.totalQty > stockFisico) {
+        playSound("negative");
+        showToast(
+          `Stock insuficiente en lote "${entry.loteNumero}" de "${entry.nombre}". Solicitado: ${entry.totalQty} und. | Disponible en Sistema: ${stockSistema} und. | Físico: ${stockFisico} und.`
+        );
         return;
       }
     }
@@ -1948,11 +2282,8 @@ export default function App() {
             for (const item of matchingItems) {
               nextLotes = nextLotes.map((l) => {
                 if (l.id === item.loteId) {
-                  const nextQty = Math.max(0, l.cantidad - item.cantidadAprobada);
-                  let nextQtyF = l.cantidadF;
-                  if (l.cantidadF !== undefined && l.cantidadF !== null) {
-                    nextQtyF = Math.max(0, l.cantidadF - item.cantidadAprobada);
-                  }
+                  const nextQty = Math.max(0, Number(l.cantidad || 0) - item.cantidadAprobada);
+                  const nextQtyF = Math.max(0, Number(l.cantidadF || 0) - item.cantidadAprobada);
                   return { ...l, cantidad: nextQty, cantidadF: nextQtyF };
                 }
                 return l;
@@ -1964,52 +2295,85 @@ export default function App() {
         });
         setProducts(updatedProducts);
       } else {
-        const batch = writeBatch(db);
-        const productsCol = tenantCollection("productos", activeFarmaciaId);
-        const movementsCol = tenantCollection("movimientos", activeFarmaciaId);
+        // 2. Validación e integridad transaccional en el servidor (Firestore runTransaction)
+        // Evita registros con cantidades superiores a las disponibles incluso ante solicitudes simultáneas
+        const uniqueProductCodes = Array.from(new Set<string>(orderItems.map((it) => it.productCode)));
+        const nowTs = Date.now();
+        const nowIso = new Date(nowTs).toISOString();
+        const userLabel = currentUser ? `${currentUser.nombre} (${currentUser.usuario})` : "Sistema";
 
-        const productsToUpdateMap = new Map<string, Producto>();
+        await runTransaction(db, async (transaction) => {
+          // Leer documentos actuales desde el servidor dentro de la transacción
+          const prodSnaps = await Promise.all(
+            uniqueProductCodes.map((code) =>
+              transaction.get(tenantDoc("productos", code.replace(/\//g, "_"), activeFarmaciaId))
+            )
+          );
 
-        for (const item of orderItems) {
-          const prod = productsToUpdateMap.get(item.productCode) || JSON.parse(JSON.stringify(products.find((p) => p.codigo === item.productCode)!));
-          
-          prod.lotes = prod.lotes.map((l: Lote) => {
-            if (l.id === item.loteId) {
-              const nextQty = Math.max(0, l.cantidad - item.cantidadAprobada);
-              let nextQtyF = l.cantidadF;
-              if (l.cantidadF !== undefined && l.cantidadF !== null) {
-                nextQtyF = Math.max(0, l.cantidadF - item.cantidadAprobada);
-              }
-              return { ...l, cantidad: nextQty, cantidadF: nextQtyF };
+          const serverProductsMap = new Map<string, Producto>();
+          prodSnaps.forEach((snap, idx) => {
+            const code = uniqueProductCodes[idx];
+            if (!snap.exists()) {
+              throw new Error(`El producto "${code}" ya no existe en el servidor.`);
             }
-            return l;
+            serverProductsMap.set(code, snap.data() as Producto);
           });
 
-          productsToUpdateMap.set(item.productCode, prod);
+          // Verificar existencias en tiempo real en ambos inventarios (Sistema y Físico) y descontar
+          for (const item of orderItems) {
+            const serverProd = serverProductsMap.get(item.productCode);
+            if (!serverProd) {
+              throw new Error(`Producto "${item.nombre}" no encontrado en el servidor.`);
+            }
+            const targetLot = (serverProd.lotes || []).find((l) => l.id === item.loteId);
+            if (!targetLot) {
+              throw new Error(`El lote "${item.loteNumero}" de "${item.nombre}" no se encontró en el servidor.`);
+            }
 
-          // Create movement log
-          const movId = `mov-${prod.codigo}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
-          const mov: Movimiento = {
-            id: movId,
-            productoCodigo: prod.codigo,
-            productoNombre: prod.nombre,
-            lote: item.loteNumero,
-            cantidad: item.cantidadAprobada,
-            precio: item.precio,
-            tipoMovimiento: "Salida",
-            usuario: currentUser ? `${currentUser.nombre} (${currentUser.usuario})` : "Sistema",
-            fecha: new Date().toISOString(),
-            timestamp: Date.now(),
-            catalogId: orderCatalogId || activeCatalogId
-          };
-          batch.set(doc(movementsCol, movId), mov);
-        }
+            const serverSistema = Number(targetLot.cantidad || 0);
+            const serverFisico = Number(targetLot.cantidadF || 0);
+            const reqQty = Number(item.cantidadAprobada || 0);
 
-        for (const [code, updatedProd] of productsToUpdateMap.entries()) {
-          batch.set(doc(productsCol, code.replace(/\//g, "_")), { ...updatedProd, verificado: false });
-        }
+            if (reqQty <= 0 || reqQty > serverSistema || reqQty > serverFisico) {
+              throw new Error(
+                `Stock insuficiente en el servidor para "${item.nombre}" (Lote ${item.loteNumero}). Solicitado: ${reqQty} und. | Disponible en Sistema: ${serverSistema} und. | Disponible en Físico: ${serverFisico} und.`
+              );
+            }
 
-        await batch.commit();
+            targetLot.cantidad = serverSistema - reqQty;
+            targetLot.cantidadF = serverFisico - reqQty;
+          }
+
+          // Escribir los productos actualizados y los movimientos de salida atómicamente
+          for (const [code, updatedProd] of serverProductsMap.entries()) {
+            const prodRef = tenantDoc("productos", code.replace(/\//g, "_"), activeFarmaciaId);
+            transaction.set(prodRef, {
+              ...updatedProd,
+              verificado: false,
+              updatedAt: nowTs
+            });
+          }
+
+          for (const item of orderItems) {
+            const movId = `mov-${item.productCode}-${nowTs}-${Math.random().toString(36).slice(2, 6)}`;
+            const movRef = tenantDoc("movimientos", movId, activeFarmaciaId);
+            const mov: Movimiento = {
+              id: movId,
+              productoCodigo: item.productCode,
+              productoNombre: item.nombre,
+              lote: item.loteNumero,
+              cantidad: item.cantidadAprobada,
+              cantidadF: item.cantidadAprobada,
+              precio: item.precio,
+              tipoMovimiento: "Salida",
+              usuario: userLabel,
+              fecha: nowIso,
+              timestamp: nowTs,
+              catalogId: orderCatalogId || activeCatalogId
+            };
+            transaction.set(movRef, mov);
+          }
+        });
       }
 
       // Download plain TXT file
@@ -2019,9 +2383,10 @@ export default function App() {
       setShowOrder(false);
       playSound("positive");
       showToast("Pedido completado e inventario actualizado.");
-    } catch (err) {
+    } catch (err: any) {
       console.error("Error completing order:", err);
-      showToast("Error al completar el pedido");
+      playSound("negative");
+      showToast(err?.message || "Error al completar el pedido");
     }
   };
 
@@ -2137,14 +2502,15 @@ export default function App() {
         }
 
         .card-tap {
-          transition: all 0.2s ease;
+          transition: transform 0.22s cubic-bezier(0.16, 1, 0.3, 1), box-shadow 0.22s cubic-bezier(0.16, 1, 0.3, 1), border-color 0.22s ease;
         }
         .card-tap:hover {
           transform: translateY(-2px);
-          box-shadow: 0 10px 20px -10px rgba(0,0,0,0.08);
+          box-shadow: 0 12px 24px -10px rgba(15, 23, 42, 0.1), 0 4px 8px -4px rgba(15, 23, 42, 0.05);
+          border-color: #cbd5e1;
         }
         .card-tap:active {
-          transform: translateY(1px);
+          transform: translateY(0px);
         }
         
         /* Custom scrollbar for chips filter */
@@ -2155,8 +2521,14 @@ export default function App() {
 
       {loading ? (
         <div className="bg-slate-100 text-slate-800 min-h-screen flex flex-col items-center justify-center p-6 font-sans">
-          <LoaderCircle className="w-10 h-10 animate-spin text-teal-600 mb-4" />
-          <p className="text-sm font-semibold text-slate-600">Conectando con el servidor de seguridad...</p>
+          <div className="bg-white p-8 rounded-3xl shadow-md border border-slate-200/80 flex flex-col items-center max-w-sm w-full text-center">
+            <div className="w-16 h-16 rounded-2xl bg-slate-50 border border-slate-200 p-2 mb-4 shadow-xs flex items-center justify-center">
+              <img src={APP_ICON_PATH} alt="Farmacia" className="w-full h-full object-contain" />
+            </div>
+            <LoaderCircle className="w-7 h-7 animate-spin text-teal-600 mb-3" />
+            <p className="text-base font-extrabold text-slate-800">Conectando con el sistema</p>
+            <p className="text-xs font-semibold text-slate-500 mt-1">Verificando credenciales y catálogo activo...</p>
+          </div>
         </div>
       ) : !currentUser ? (
         <Login
@@ -2177,28 +2549,41 @@ export default function App() {
           }}
         />
       ) : (
-        <div className="bg-slate-100 text-slate-800 min-h-screen pb-24 font-sans selection:bg-teal-500 selection:text-white">
-          <header className="sticky top-0 z-30 text-white shadow-md bg-custom-sidebar">
-            <div className="px-6 pt-4 pb-3 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-              <div>
-                <h1
-                  className="text-xl font-black leading-tight flex items-center gap-1.5 cursor-pointer"
+        <div className="bg-slate-100/90 text-slate-800 min-h-screen pb-28 font-sans selection:bg-teal-600 selection:text-white">
+          <header className="sticky top-0 z-30 text-white shadow-lg bg-custom-sidebar border-b border-white/10">
+            <div className="max-w-6xl mx-auto px-3.5 sm:px-6 pt-3 pb-2.5 flex flex-col md:flex-row md:items-center justify-between gap-2.5 sm:gap-3.5">
+              <div className="flex items-center justify-between gap-2">
+                <div
+                  className="cursor-pointer group flex items-center gap-2.5 min-w-0"
                   onClick={() => {
-                    setActiveTab(currentUser.rol === "Operador" ? "solicitudes" : "inventory");
+                    setActiveTab("dashboard");
                     setShowBlocks(false);
                     setSelectedBlock(null);
                   }}
                 >
-                  {farmaciaMeta.nombre || "Control de Stock"}
-                </h1>
-                <p className="text-teal-100 text-xs font-semibold opacity-90">
-                  {farmaciaMeta.subtitulo || "Suministros Hospitalarios • Dr. José Manuel Rodríguez"}
-                </p>
+                  <div className="w-10 h-10 sm:w-11 sm:h-11 rounded-xl bg-white p-1.5 shadow-sm flex items-center justify-center shrink-0 border border-white/20">
+                    <img
+                      src={APP_ICON_PATH}
+                      alt="Icono de la Aplicación"
+                      className="w-full h-full object-contain"
+                    />
+                  </div>
+                  <div className="min-w-0">
+                    <h1 className="text-base sm:text-2xl font-extrabold tracking-tight leading-tight flex items-center gap-2 group-hover:text-teal-200 transition-colors truncate">
+                      <span className="truncate">{farmaciaMeta.nombre || "Control de Stock"}</span>
+                    </h1>
+                    <p className="text-teal-100/95 text-[11px] sm:text-[13px] font-semibold mt-0.5 truncate">
+                      {farmaciaMeta.subtitulo || "Suministros Hospitalarios • Dr. José Manuel Rodríguez"}
+                    </p>
+                  </div>
+                </div>
               </div>
 
               {/* Selector Global de Catálogo */}
-              <div className="flex flex-col gap-1 sm:max-w-[240px] w-full sm:mx-4">
-                <label className="text-[9px] font-black uppercase text-teal-200 tracking-wider">Catálogo Activo</label>
+              <div className="flex flex-col gap-1 md:max-w-[280px] w-full md:mx-4 bg-black/15 px-3 py-1.5 sm:px-3.5 sm:py-2 rounded-2xl border border-white/15">
+                <label className="text-[10px] font-extrabold uppercase text-teal-200 tracking-wider">
+                  Catálogo Activo de Trabajo
+                </label>
                 <select
                   id="global-catalog-selector"
                   value={activeCatalogId}
@@ -2208,7 +2593,7 @@ export default function App() {
                     playSound("action");
                     showToast(`Catálogo: ${catalogos.find(c => c.id === e.target.value)?.nombre || "Cargando..."}`);
                   }}
-                  className="bg-teal-950/40 border border-teal-500/30 rounded-xl px-3 py-1.5 text-xs font-bold text-white outline-none focus:ring-1 focus:ring-teal-300 w-full cursor-pointer transition hover:bg-teal-950/50"
+                  className="bg-white/95 border border-white/40 rounded-xl px-3 py-1.5 text-xs sm:text-[13px] font-bold text-slate-900 outline-none focus:ring-2 focus:ring-teal-300 w-full cursor-pointer transition shadow-2xs"
                 >
                   {getAvailableCatalogos().map((cat) => (
                     <option key={cat.id} value={cat.id} className="text-slate-800 font-semibold bg-white">
@@ -2223,18 +2608,20 @@ export default function App() {
                 </select>
               </div>
 
-              <div className="flex items-center gap-3 self-end sm:self-auto">
-                <div className="text-right hidden sm:block">
-                  <p className="text-xs font-black leading-none text-white">{currentUser.nombre}</p>
-                  <p className="text-[10px] font-bold text-teal-200 uppercase tracking-wider mt-1">{currentUser.rol}</p>
+              <div className="flex items-center justify-end gap-1.5 sm:gap-2.5 flex-wrap self-end md:self-auto w-full md:w-auto">
+                <div className="text-left sm:text-right bg-black/15 px-2.5 py-1 sm:px-3.5 sm:py-1.5 rounded-xl border border-white/10 mr-auto md:mr-0">
+                  <p className="text-[11px] sm:text-xs font-extrabold leading-tight text-white truncate max-w-[120px] sm:max-w-none">{currentUser.nombre}</p>
+                  <p className="text-[9px] sm:text-[10px] font-bold text-teal-200 uppercase tracking-wider mt-0.5">{currentUser.rol}</p>
                 </div>
+
+                <PWAInstallButton variant="header" />
 
                 <button
                   onClick={handleToggleMute}
-                  className="p-2.5 bg-white/10 hover:bg-white/20 active:scale-95 transition rounded-xl text-white shadow-sm flex items-center justify-center cursor-pointer"
+                  className="p-2 sm:p-2.5 bg-white/10 hover:bg-white/20 active:scale-95 transition rounded-xl text-white border border-white/10 shadow-xs flex items-center justify-center cursor-pointer shrink-0"
                   title={isMuted ? "Activar Sonidos" : "Silenciar"}
                 >
-                  {isMuted ? <VolumeX className="w-4.5 h-4.5 text-rose-300" /> : <Volume2 className="w-4.5 h-4.5 text-emerald-300" />}
+                  {isMuted ? <VolumeX className="w-4 h-4 sm:w-4.5 sm:h-4.5 text-rose-300" /> : <Volume2 className="w-4 h-4 sm:w-4.5 sm:h-4.5 text-emerald-300" />}
                 </button>
 
                 {activeFarmaciaId !== DEFAULT_FARMACIA_ID &&
@@ -2257,14 +2644,14 @@ export default function App() {
                         playSound("positive");
                         showToast("Regresaste a la Sede Principal.");
                       }}
-                      className="flex items-center gap-1.5 bg-amber-500 hover:bg-amber-400 text-slate-950 active:scale-95 transition rounded-xl px-3.5 py-2.5 text-xs font-black uppercase tracking-wider shadow-sm cursor-pointer"
+                      className="flex items-center gap-1.5 bg-amber-400 hover:bg-amber-300 text-slate-950 active:scale-95 transition rounded-xl px-2.5 py-2 sm:px-3.5 sm:py-2.5 text-[11px] sm:text-xs font-extrabold uppercase tracking-wider shadow-sm cursor-pointer shrink-0"
                       title="Volver a la Sede Principal"
                     >
-                      <span>🏥 Sede Principal</span>
+                      <span>🏥 Principal</span>
                     </button>
                   )}
 
-                {currentUser.rol === "Administrador" && (
+                {enabledModules.includes("inventory") && (
                   <button
                     onClick={() => {
                       setCatalogFilter("todos");
@@ -2272,13 +2659,13 @@ export default function App() {
                       setSelectedBlock(null);
                       setShowBlocks(false);
                       setShowOrder(false);
-                      setActiveTab("inventory");
+                      navigateToTab("inventory");
                       playSound("click");
                     }}
-                    className="flex items-center gap-1.5 bg-teal-700 hover:bg-teal-600 active:scale-95 transition rounded-xl px-4 py-2.5 text-xs font-black uppercase tracking-wider shadow-sm cursor-pointer bg-custom-buttons"
+                    className="flex items-center gap-1.5 bg-teal-700 hover:bg-teal-600 active:scale-95 transition rounded-xl px-3 py-2 sm:px-4 sm:py-2.5 text-[11px] sm:text-xs font-extrabold uppercase tracking-wider shadow-sm border border-white/15 cursor-pointer bg-custom-buttons shrink-0"
                   >
-                    <Package className="w-4 h-4" />
-                    Inventario
+                    <Package className="w-3.5 h-3.5 sm:w-4 sm:h-4" />
+                    <span className="hidden sm:inline">Inventario</span>
                   </button>
                 )}
 
@@ -2295,68 +2682,78 @@ export default function App() {
                     showToast("Sesión cerrada correctamente");
                   }}
                   title="Cerrar Sesión"
-                  className="flex items-center justify-center bg-teal-950/60 hover:bg-rose-700 active:scale-95 transition rounded-xl p-2.5 text-white shadow-sm cursor-pointer"
+                  className="flex items-center justify-center bg-black/25 hover:bg-rose-600 active:scale-95 transition rounded-xl p-2 sm:p-2.5 text-white border border-white/10 shadow-xs cursor-pointer shrink-0"
                 >
-                  <LogOut className="w-4.5 h-4.5" />
+                  <LogOut className="w-4 h-4 sm:w-4.5 sm:h-4.5" />
                 </button>
               </div>
             </div>
 
             {/* Menu Tabs Navigation */}
-            <div className="px-6 pb-3 flex overflow-x-auto chip-scroll items-center gap-2.5 shrink-0">
+            <div className="max-w-6xl mx-auto px-4 sm:px-6 pb-3 pt-1 flex overflow-x-auto chip-scroll items-center gap-2 shrink-0">
+              <button
+                onClick={() => {
+                  navigateToTab("dashboard");
+                  playSound("click");
+                }}
+                className={`rounded-xl px-4 py-2 text-xs sm:text-[13px] font-bold transition active:scale-95 flex items-center gap-1.5 cursor-pointer whitespace-nowrap ${
+                  activeTab === "dashboard"
+                    ? "bg-white text-teal-900 font-extrabold shadow-sm"
+                    : "bg-white/10 text-teal-50 hover:bg-white/20"
+                }`}
+              >
+                <LayoutDashboard className="w-4 h-4" />
+                <span>Dashboard</span>
+              </button>
+
               {enabledModules.includes("inventory") && (
                 <button
                   onClick={() => {
-                    setActiveTab("inventory");
-                    setShowBlocks(false);
-                    setSelectedBlock(null);
+                    navigateToTab("inventory");
                     playSound("click");
                   }}
-                  className={`rounded-full px-5 py-2 text-xs font-bold shadow-sm transition active:scale-95 cursor-pointer ${
+                  className={`rounded-xl px-4 py-2 text-xs sm:text-[13px] font-bold transition active:scale-95 flex items-center gap-1.5 cursor-pointer whitespace-nowrap ${
                     activeTab === "inventory" && !selectedBlock && !showOrder
-                      ? "bg-white text-teal-800 font-extrabold"
-                      : "bg-teal-700/50 text-teal-100 hover:bg-teal-700/80"
+                      ? "bg-white text-teal-900 font-extrabold shadow-sm"
+                      : "bg-white/10 text-teal-50 hover:bg-white/20"
                   }`}
                 >
-                  Suministros
+                  <Package className="w-4 h-4" />
+                  <span>Suministros</span>
                 </button>
               )}
 
               {enabledModules.includes("venta") && (
                 <button
                   onClick={() => {
-                    setActiveTab("venta");
-                    setShowBlocks(false);
-                    setSelectedBlock(null);
+                    navigateToTab("venta");
                     playSound("click");
                   }}
-                  className={`rounded-full px-5 py-2 text-xs font-bold shadow-sm transition active:scale-95 flex items-center gap-1.5 cursor-pointer ${
+                  className={`rounded-xl px-4 py-2 text-xs sm:text-[13px] font-bold transition active:scale-95 flex items-center gap-1.5 cursor-pointer whitespace-nowrap ${
                     activeTab === "venta"
-                      ? "bg-white text-teal-800 font-extrabold"
-                      : "bg-teal-700/50 text-teal-100 hover:bg-teal-700/80"
+                      ? "bg-white text-teal-900 font-extrabold shadow-sm"
+                      : "bg-white/10 text-teal-50 hover:bg-white/20"
                   }`}
                 >
                   <Receipt className="w-4 h-4" />
-                  Venta
+                  <span>Venta</span>
                 </button>
               )}
 
               {enabledModules.includes("carga_masiva") && (
                 <button
                   onClick={() => {
-                    setActiveTab("carga_masiva");
-                    setShowBlocks(false);
-                    setSelectedBlock(null);
+                    navigateToTab("carga_masiva");
                     playSound("click");
                   }}
-                  className={`rounded-full px-5 py-2 text-xs font-bold shadow-sm transition active:scale-95 flex items-center gap-1.5 cursor-pointer ${
+                  className={`rounded-xl px-4 py-2 text-xs sm:text-[13px] font-bold transition active:scale-95 flex items-center gap-1.5 cursor-pointer whitespace-nowrap ${
                     activeTab === "carga_masiva"
-                      ? "bg-white text-teal-800 font-extrabold"
-                      : "bg-teal-700/50 text-teal-100 hover:bg-teal-700/80"
+                      ? "bg-white text-teal-900 font-extrabold shadow-sm"
+                      : "bg-white/10 text-teal-50 hover:bg-white/20"
                   }`}
                 >
                   <FileSpreadsheet className="w-4 h-4" />
-                  Carga Masiva
+                  <span>Carga Masiva</span>
                 </button>
               )}
 
@@ -2364,15 +2761,13 @@ export default function App() {
               {enabledModules.includes("solicitudes") && (
                 <button
                   onClick={() => {
-                    setActiveTab("solicitudes");
-                    setShowBlocks(false);
-                    setSelectedBlock(null);
+                    navigateToTab("solicitudes");
                     playSound("click");
                   }}
-                  className={`rounded-full px-5 py-2 text-xs font-bold shadow-sm transition active:scale-95 flex items-center gap-1.5 cursor-pointer ${
+                  className={`rounded-xl px-4 py-2 text-xs sm:text-[13px] font-bold transition active:scale-95 flex items-center gap-1.5 cursor-pointer whitespace-nowrap ${
                     activeTab === "solicitudes"
-                      ? "bg-white text-teal-800 font-extrabold"
-                      : "bg-teal-700/50 text-teal-100 hover:bg-teal-700/80"
+                      ? "bg-white text-teal-900 font-extrabold shadow-sm"
+                      : "bg-white/10 text-teal-50 hover:bg-white/20"
                   }`}
                 >
                   <ClipboardList className="w-4 h-4" />
@@ -2383,63 +2778,57 @@ export default function App() {
               {enabledModules.includes("historial") && (
                 <button
                   onClick={() => {
-                    setActiveTab("historial");
-                    setShowBlocks(false);
-                    setSelectedBlock(null);
+                    navigateToTab("historial");
                     playSound("click");
                   }}
-                  className={`rounded-full px-5 py-2 text-xs font-bold shadow-sm transition active:scale-95 flex items-center gap-1.5 cursor-pointer ${
+                  className={`rounded-xl px-4 py-2 text-xs sm:text-[13px] font-bold transition active:scale-95 flex items-center gap-1.5 cursor-pointer whitespace-nowrap ${
                     activeTab === "historial"
-                      ? "bg-white text-teal-800 font-extrabold"
-                      : "bg-teal-700/50 text-teal-100 hover:bg-teal-700/80"
+                      ? "bg-white text-teal-900 font-extrabold shadow-sm"
+                      : "bg-white/10 text-teal-50 hover:bg-white/20"
                   }`}
                 >
                   <History className="w-4 h-4" />
-                  Historial Movs
+                  <span>Historial Movs</span>
                 </button>
               )}
 
               {enabledModules.includes("usuarios") && (
                 <button
                   onClick={() => {
-                    setActiveTab("usuarios");
-                    setShowBlocks(false);
-                    setSelectedBlock(null);
+                    navigateToTab("usuarios");
                     playSound("click");
                   }}
-                  className={`rounded-full px-5 py-2 text-xs font-bold shadow-sm transition active:scale-95 flex items-center gap-1.5 cursor-pointer ${
+                  className={`rounded-xl px-4 py-2 text-xs sm:text-[13px] font-bold transition active:scale-95 flex items-center gap-1.5 cursor-pointer whitespace-nowrap ${
                     activeTab === "usuarios"
-                      ? "bg-white text-teal-800 font-extrabold"
-                      : "bg-teal-700/50 text-teal-100 hover:bg-teal-700/80"
+                      ? "bg-white text-teal-900 font-extrabold shadow-sm"
+                      : "bg-white/10 text-teal-50 hover:bg-white/20"
                   }`}
                 >
                   <Users className="w-4 h-4" />
-                  Personal
+                  <span>Personal</span>
                 </button>
               )}
 
               {enabledModules.includes("configuracion") && (
                 <button
                   onClick={() => {
-                    setActiveTab("configuracion");
-                    setShowBlocks(false);
-                    setSelectedBlock(null);
+                    navigateToTab("configuracion");
                     playSound("click");
                   }}
-                  className={`rounded-full px-5 py-2 text-xs font-bold shadow-sm transition active:scale-95 flex items-center gap-1.5 cursor-pointer ${
+                  className={`rounded-xl px-4 py-2 text-xs sm:text-[13px] font-bold transition active:scale-95 flex items-center gap-1.5 cursor-pointer whitespace-nowrap ${
                     activeTab === "configuracion"
-                      ? "bg-white text-teal-800 font-extrabold"
-                      : "bg-teal-700/50 text-teal-100 hover:bg-teal-700/80"
+                      ? "bg-white text-teal-900 font-extrabold shadow-sm"
+                      : "bg-white/10 text-teal-50 hover:bg-white/20"
                   }`}
                 >
                   <Settings className="w-4 h-4" />
-                  Configurar
+                  <span>Configurar</span>
                 </button>
               )}
 
               {enabledModules.includes("inventory") && (
                 <>
-                  <div className="h-6 w-px bg-teal-700/50 hidden sm:block"></div>
+                  <div className="h-6 w-px bg-white/20 hidden sm:block mx-1"></div>
 
                   <button
                     onClick={() => {
@@ -2448,12 +2837,14 @@ export default function App() {
                       setSelectedBlock(null);
                       playSound("click");
                     }}
-                    className={`inline-flex items-center gap-2 rounded-full px-4 py-2 border transition text-xs font-bold active:scale-95 cursor-pointer ${
-                      showBlocks ? "bg-white text-teal-800 border-teal-500" : "bg-teal-700/50 text-teal-100 border-transparent hover:bg-teal-700/80"
+                    className={`inline-flex items-center gap-1.5 rounded-xl px-4 py-2 border transition text-xs sm:text-[13px] font-bold active:scale-95 cursor-pointer whitespace-nowrap ${
+                      showBlocks
+                        ? "bg-white text-teal-900 border-white font-extrabold shadow-sm"
+                        : "bg-white/10 text-teal-50 border-white/15 hover:bg-white/20"
                     }`}
                   >
                     <Layers className="w-4 h-4" />
-                    Bloques
+                    <span>Bloques</span>
                   </button>
 
                   <button
@@ -2464,57 +2855,73 @@ export default function App() {
                       setShowOrder(!showOrder);
                       playSound("click");
                     }}
-                    className={`inline-flex items-center gap-2 rounded-full px-4 py-2 border transition text-xs font-bold active:scale-95 cursor-pointer ${
-                      showOrder ? "bg-white text-teal-800 border-teal-500" : "bg-teal-700/50 text-teal-100 border-transparent hover:bg-teal-700/80"
+                    className={`inline-flex items-center gap-1.5 rounded-xl px-4 py-2 border transition text-xs sm:text-[13px] font-bold active:scale-95 cursor-pointer whitespace-nowrap ${
+                      showOrder
+                        ? "bg-white text-teal-900 border-white font-extrabold shadow-sm"
+                        : "bg-white/10 text-teal-50 border-white/15 hover:bg-white/20"
                     }`}
                   >
                     <ShoppingCart className="w-4 h-4" />
-                    Pedido {orderItems.length > 0 && `(${orderItems.length})`}
+                    <span>Pedido {orderItems.length > 0 && `(${orderItems.length})`}</span>
                   </button>
                 </>
               )}
             </div>
 
-            {showBlocks && (
-              <div id="blockSelector" className="anim-card-in px-6 pb-4 pt-1 bg-teal-900 flex flex-wrap gap-2">
-                <span className="text-xs text-teal-200 font-bold self-center mr-2 uppercase tracking-wider">Módulos:</span>
-                {BLOQUES.map((id) => {
-                  const hasAssigned = blocks.find((b) => b.id === id)?.items.length > 0;
-                  const isSelected = selectedBlock === id;
-                  return (
-                    <button
-                      key={id}
-                      onClick={() => handleSelectBlock(isSelected ? null : id)}
-                      className={`rounded-lg px-3 py-1.5 text-xs font-black transition ${
-                        isSelected
-                          ? "bg-white text-teal-900 shadow-md scale-105"
-                          : hasAssigned
-                          ? "bg-teal-700 hover:bg-teal-600 text-white border border-teal-500/50"
-                          : "bg-teal-800/40 text-teal-300 hover:bg-teal-700/30"
-                      }`}
-                    >
-                      B.{id}
-                    </button>
-                  );
-                })}
+            {showBlocks && enabledModules.includes("inventory") && (
+              <div id="blockSelector" className="anim-card-in bg-black/20 border-t border-white/10">
+                <div className="max-w-6xl mx-auto px-4 sm:px-6 py-3 flex flex-wrap items-center gap-2">
+                  <span className="text-xs text-teal-200 font-extrabold self-center mr-2 uppercase tracking-wider">
+                    Módulos de Almacén:
+                  </span>
+                  {BLOQUES.map((id) => {
+                    const hasAssigned = blocks.find((b) => b.id === id)?.items.length > 0;
+                    const isSelected = selectedBlock === id;
+                    return (
+                      <button
+                        key={id}
+                        onClick={() => handleSelectBlock(isSelected ? null : id)}
+                        className={`rounded-xl px-3.5 py-1.5 text-xs font-extrabold transition cursor-pointer ${
+                          isSelected
+                            ? "bg-white text-teal-950 shadow-md scale-105"
+                            : hasAssigned
+                            ? "bg-teal-600/90 hover:bg-teal-500 text-white border border-teal-300/40"
+                            : "bg-white/10 text-teal-100 hover:bg-white/20 border border-white/10"
+                        }`}
+                      >
+                        B.{id}
+                      </button>
+                    );
+                  })}
+                </div>
               </div>
             )}
           </header>
 
           {/* Buscador y Filtros del Catálogo */}
-          {activeTab === "inventory" && !selectedBlock && !showOrder && (
-            <div className="bg-white border-b border-slate-200">
-              <div className="max-w-4xl mx-auto px-6 py-4 space-y-4">
+          {activeTab === "inventory" && enabledModules.includes("inventory") && !selectedBlock && !showOrder && (
+            <div className="bg-white border-b border-slate-200/90 shadow-2xs">
+              <div className="max-w-6xl mx-auto px-4 sm:px-6 py-4 space-y-3.5">
                 <div className="flex flex-col sm:flex-row gap-3">
                   <div className="relative flex-1">
-                    <Search className="w-5 h-5 absolute left-4 top-1/2 -translate-y-1/2 text-slate-400" />
+                    <Search className="w-5 h-5 absolute left-4 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none" />
                     <input
                       type="text"
-                      placeholder="Buscar medicamentos, insumos, lotes, descripción..."
+                      placeholder="Buscar medicamentos, insumos, códigos, lotes o presentación..."
                       value={searchQuery}
                       onChange={(e) => setSearchTerm(e.target.value)}
-                      className="w-full bg-slate-50 text-slate-800 text-sm rounded-2xl pl-12 pr-4 py-3 outline-none focus:ring-2 focus:ring-teal-400 placeholder:text-slate-400 shadow-inner font-semibold"
+                      className="w-full bg-slate-50/90 hover:bg-white focus:bg-white text-slate-900 text-sm rounded-2xl border border-slate-300 pl-12 pr-10 py-3 outline-none focus:ring-2 focus:ring-teal-500/30 focus:border-teal-600 placeholder:text-slate-400 font-semibold transition"
                     />
+                    {searchQuery && (
+                      <button
+                        type="button"
+                        onClick={() => setSearchTerm("")}
+                        className="absolute right-3.5 top-1/2 -translate-y-1/2 p-1 rounded-full text-slate-400 hover:text-slate-700 hover:bg-slate-200/60 transition cursor-pointer"
+                        title="Limpiar búsqueda"
+                      >
+                        <X className="w-4 h-4" />
+                      </button>
+                    )}
                   </div>
                   <button
                     type="button"
@@ -2522,14 +2929,14 @@ export default function App() {
                       setShowUnverifiedOnly(prev => !prev);
                       playSound("click");
                     }}
-                    className={`rounded-2xl px-4 py-3 text-xs font-black transition flex items-center justify-center gap-2 cursor-pointer border ${
+                    className={`rounded-2xl px-5 py-3 text-xs font-extrabold transition flex items-center justify-center gap-2.5 cursor-pointer border shrink-0 ${
                       showUnverifiedOnly
-                        ? "bg-amber-100 text-amber-800 border-amber-300 shadow-xs"
-                        : "bg-slate-50 hover:bg-slate-100 text-slate-600 border-slate-200"
+                        ? "bg-amber-100 text-amber-900 border-amber-400 shadow-xs"
+                        : "bg-slate-50 hover:bg-slate-100 text-slate-700 border-slate-300"
                     }`}
                   >
-                    <span className={`w-2.5 h-2.5 rounded-full ${showUnverifiedOnly ? "bg-amber-600 animate-pulse" : "bg-slate-300"}`}></span>
-                    Sin verificar
+                    <span className={`w-2.5 h-2.5 rounded-full ${showUnverifiedOnly ? "bg-amber-600 animate-pulse" : "bg-slate-400"}`}></span>
+                    <span>Sin verificar</span>
                   </button>
                 </div>
 
@@ -2543,8 +2950,10 @@ export default function App() {
                           setCatalogFilter(key);
                           playSound("click");
                         }}
-                        className={`whitespace-nowrap text-xs font-bold px-4 py-2 rounded-full transition cursor-pointer ${
-                          isSelected ? "bg-teal-700 text-white shadow-sm" : "bg-slate-100 hover:bg-slate-200 text-slate-600"
+                        className={`whitespace-nowrap text-xs font-extrabold px-4 py-2 rounded-xl border transition cursor-pointer ${
+                          isSelected
+                            ? "bg-teal-800 text-white border-teal-800 shadow-xs"
+                            : "bg-slate-100/90 hover:bg-slate-200/80 text-slate-700 border-slate-200/80"
                         }`}
                       >
                         {FILTROS_CATALOGO[key]}
@@ -2556,8 +2965,41 @@ export default function App() {
             </div>
           )}
 
-          <main className={`px-6 py-6 ${activeTab === "venta" ? "max-w-6xl" : "max-w-4xl"} mx-auto`}>
+          <main className="px-4 sm:px-6 py-6 max-w-6xl mx-auto">
             {/* Contenido Principal */}
+            {activeTab === "dashboard" && (
+              <DashboardPanel
+                currentUser={currentUser}
+                products={products}
+                catalogos={catalogos}
+                activeCatalogId={activeCatalogId}
+                activePeriod={activePeriod}
+                onSelectCatalog={(catId) => {
+                  setActiveCatalogId(catId);
+                  localStorage.setItem("active_catalog_id", catId);
+                  playSound("action");
+                }}
+                onNavigateTab={(tabId) => {
+                  navigateToTab(tabId);
+                  playSound("click");
+                }}
+                onNavigateInventoryFilter={(filterKey, catId) => {
+                  if (catId) {
+                    setActiveCatalogId(catId);
+                    localStorage.setItem("active_catalog_id", catId);
+                  }
+                  setCatalogFilter(filterKey);
+                  navigateToTab("inventory");
+                  playSound("click");
+                }}
+                onOpenProductDetail={(code) => {
+                  if (enabledModules.includes("inventory")) {
+                    handleOpenDetails(code);
+                  }
+                }}
+              />
+            )}
+
             {activeTab === "venta" && enabledModules.includes("venta") && (
               <VentaPanel
                 currentUser={currentUser}
@@ -2574,20 +3016,26 @@ export default function App() {
               />
             )}
 
-            {activeTab === "carga_masiva" && (
+            {activeTab === "carga_masiva" && enabledModules.includes("carga_masiva") && (
               <CargaMasiva
                 products={products}
                 currentUser={currentUser}
                 onImportComplete={(updated) => setProducts(updated)}
                 showToast={showToast}
                 activeCatalogId={activeCatalogId}
+                catalogos={getAvailableCatalogos()}
+                onSelectCatalog={(catId) => {
+                  setActiveCatalogId(catId);
+                  localStorage.setItem("active_catalog_id", catId);
+                }}
               />
             )}
 
-            {activeTab === "historial" && (
+            {activeTab === "historial" && enabledModules.includes("historial") && (
               <HistorialMovimientos
                 activeCatalogId={activeCatalogId}
                 currentUser={currentUser}
+                catalogos={catalogos}
               />
             )}
 
@@ -2604,7 +3052,7 @@ export default function App() {
               />
             )}
 
-            {activeTab === "solicitudes" && (
+            {activeTab === "solicitudes" && enabledModules.includes("solicitudes") && (
               <SolicitudesPanel
                 currentUser={currentUser}
                 activePeriod={activePeriod}
@@ -2613,6 +3061,10 @@ export default function App() {
                 departamentos={departamentos}
                 activeCatalogId={activeCatalogId}
                 catalogos={catalogos}
+                onSelectCatalog={(catId) => {
+                  setActiveCatalogId(catId);
+                  localStorage.setItem("active_catalog_id", catId);
+                }}
               />
             )}
 
@@ -2658,7 +3110,7 @@ export default function App() {
               />
             )}
 
-            {activeTab === "inventory" && (
+            {activeTab === "inventory" && enabledModules.includes("inventory") && (
               <div className="space-y-6">
                 <BlockPanel
                   products={products}
@@ -2705,11 +3157,18 @@ export default function App() {
                       const lot = prod?.lotes.find((l) => l.id === item.loteId);
                       if (!prod || !lot) return;
                       if (qty <= 0) {
+                        playSound("negative");
                         showToast("La cantidad debe ser mayor que 0.");
                         return;
                       }
-                      if (qty > lot.cantidad) {
-                        showToast(`El lote solo dispone de ${lot.cantidad} unidades.`);
+                      const stockSistema = Number(lot.cantidad || 0);
+                      const stockFisico = Number(lot.cantidadF || 0);
+                      const maxAvailableBoth = Math.min(stockSistema, stockFisico);
+                      if (qty > stockSistema || qty > stockFisico) {
+                        playSound("negative");
+                        showToast(
+                          `Stock insuficiente en lote ${lot.numeroLote} (${prod.nombre}). Disponible en Sistema: ${stockSistema} und. | Físico: ${stockFisico} und. (Máx: ${maxAvailableBoth} und.)`
+                        );
                         return;
                       }
                       setOrderItems((prev) =>
@@ -2732,13 +3191,18 @@ export default function App() {
                 {/* Vista del Catálogo de Insumos */}
                 {!selectedBlock && !showOrder && (
                   <div className="space-y-4">
-                    <div className="text-xs text-slate-500 font-bold uppercase tracking-wider flex justify-between items-center relative">
-                      <span>Catálogo de Suministros ({getFilteredProducts().length})</span>
+                    <div className="bg-white rounded-2xl border border-slate-200/90 px-4 sm:px-5 py-3 shadow-2xs flex flex-wrap justify-between items-center gap-3 relative">
+                      <div className="flex items-center gap-2.5">
+                        <span className="w-2.5 h-2.5 rounded-full bg-teal-600"></span>
+                        <span className="text-xs sm:text-sm text-slate-700 font-extrabold uppercase tracking-wider">
+                          Catálogo de Suministros ({getFilteredProducts().length})
+                        </span>
+                      </div>
                       
-                      <div className="flex items-center gap-2">
+                      <div className="flex items-center gap-2.5">
                         {catalogFilter === "prioridad" && (
-                          <span className="text-rose-700 bg-rose-50 px-2.5 py-1 rounded-full text-[10px] font-black tracking-normal normal-case">
-                            Orden de Prioridad Vencimiento
+                          <span className="text-rose-700 bg-rose-50 border border-rose-200 px-3 py-1 rounded-xl text-[11px] font-extrabold tracking-normal normal-case">
+                            Orden de Prioridad por Vencimiento
                           </span>
                         )}
                         
@@ -2749,24 +3213,24 @@ export default function App() {
                               setShowExportMenu(!showExportMenu);
                               playSound("click");
                             }}
-                            className="inline-flex items-center gap-1.5 bg-teal-50 border border-teal-200 text-teal-800 hover:bg-teal-100 active:scale-95 transition rounded-xl px-3 py-1.5 text-[11px] font-black cursor-pointer shadow-xs uppercase tracking-wider"
+                            className="inline-flex items-center gap-2 bg-teal-50 border border-teal-300 text-teal-900 hover:bg-teal-100 active:scale-95 transition rounded-xl px-3.5 py-2 text-xs font-extrabold cursor-pointer shadow-2xs uppercase tracking-wider"
                           >
-                            <FileDown className="w-3.5 h-3.5" />
+                            <FileDown className="w-4 h-4 text-teal-700" />
                             <span>Exportar</span>
                           </button>
                           
                           {showExportMenu && (
-                            <div className="absolute right-0 mt-1.5 w-48 bg-white border border-slate-200 rounded-xl shadow-lg z-20 py-1.5 normal-case tracking-normal text-slate-700 font-bold">
+                            <div className="absolute right-0 mt-2 w-52 bg-white border border-slate-200 rounded-2xl shadow-xl z-20 py-1.5 normal-case tracking-normal text-slate-700 font-bold anim-pop-in">
                               <button
                                 type="button"
                                 onClick={() => {
                                   handleExport("pdf");
                                   setShowExportMenu(false);
                                 }}
-                                className="w-full text-left px-4 py-2.5 text-xs font-bold text-slate-700 hover:bg-slate-50 hover:text-teal-700 transition flex items-center gap-2 cursor-pointer border-b border-slate-100/60"
+                                className="w-full text-left px-4 py-2.5 text-xs font-bold text-slate-700 hover:bg-slate-50 hover:text-teal-700 transition flex items-center gap-2.5 cursor-pointer border-b border-slate-100"
                               >
                                 <span className="w-2.5 h-2.5 rounded-full bg-rose-500 inline-block"></span>
-                                Documento PDF (.pdf)
+                                <span>Documento PDF (.pdf)</span>
                               </button>
                               <button
                                 type="button"
@@ -2774,10 +3238,10 @@ export default function App() {
                                   handleExport("word");
                                   setShowExportMenu(false);
                                 }}
-                                className="w-full text-left px-4 py-2.5 text-xs font-bold text-slate-700 hover:bg-slate-50 hover:text-teal-700 transition flex items-center gap-2 cursor-pointer"
+                                className="w-full text-left px-4 py-2.5 text-xs font-bold text-slate-700 hover:bg-slate-50 hover:text-teal-700 transition flex items-center gap-2.5 cursor-pointer"
                               >
                                 <span className="w-2.5 h-2.5 rounded-full bg-blue-500 inline-block"></span>
-                                Microsoft Word (.docx)
+                                <span>Microsoft Word (.docx)</span>
                               </button>
                             </div>
                           )}
@@ -2785,7 +3249,7 @@ export default function App() {
                       </div>
                     </div>
 
-                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                       {getFilteredProducts().map((p, idx) => {
                         const stats = getProductStats(p);
                         const coords = getProductCoordinates(p.codigo);
@@ -2794,118 +3258,126 @@ export default function App() {
                           <div
                             key={p.codigo}
                             onClick={() => handleOpenDetails(p.codigo)}
-                            className="anim-card-in card-tap bg-white rounded-2xl shadow-sm border border-slate-200 p-5 cursor-pointer relative"
-                            style={{ animationDelay: `${Math.min(idx, 15) * 25}ms` }}
+                            className="anim-card-in card-tap bg-white rounded-2xl shadow-xs border border-slate-200/90 p-4 sm:p-5 cursor-pointer relative flex flex-col justify-between"
+                            style={{ animationDelay: `${Math.min(idx, 15) * 20}ms` }}
                           >
-                            <div className="flex justify-between items-start gap-4">
-                              <div className="flex items-start gap-3.5 min-w-0">
+                            <div className="flex flex-col xs:flex-row sm:flex-row justify-between items-start gap-3 sm:gap-4">
+                              <div className="flex items-start gap-3 min-w-0 flex-1 w-full">
                                 {p.imagen || p.imagenURL ? (
                                   <img
                                     src={p.imagen || p.imagenURL}
                                     alt={p.nombre}
-                                    className="w-14 h-14 rounded-xl object-cover border border-slate-200 shrink-0 shadow-sm"
+                                    className="w-12 h-12 sm:w-14 sm:h-14 rounded-2xl object-cover border border-slate-200 shrink-0 shadow-2xs"
                                   />
                                 ) : (
-                                  <div className="w-14 h-14 rounded-xl bg-slate-50 border border-slate-200 flex items-center justify-center shrink-0 text-slate-300 shadow-sm">
-                                    <Package className="w-6 h-6" />
+                                  <div className="w-12 h-12 sm:w-14 sm:h-14 rounded-2xl bg-slate-50 border border-slate-200/90 flex items-center justify-center shrink-0 text-teal-600/70 shadow-2xs">
+                                    <Package className="w-5 h-5 sm:w-6 sm:h-6" />
                                   </div>
                                 )}
-                                <div className="min-w-0">
-                                  <span className="block text-[10px] font-black text-teal-700 tracking-wider uppercase">
+                                <div className="min-w-0 flex-1">
+                                  <span className="inline-block font-mono text-[11px] font-extrabold text-teal-800 bg-teal-50 border border-teal-200/80 px-2 py-0.5 rounded-md tracking-wider uppercase mb-1">
                                     {p.codigo}
                                   </span>
                                   <MarqueeText
                                     text={p.nombre}
                                     className="w-full"
-                                    textClassName="font-extrabold text-slate-800 text-[15px] leading-tight"
+                                    textClassName="font-extrabold text-slate-900 text-sm sm:text-base leading-snug"
                                   />
-                                  <p className="text-xs text-slate-500 mt-1 line-clamp-1">
+                                  <p className="text-xs text-slate-500 mt-1 line-clamp-1 font-medium">
                                     {p.descripcion || "Sin descripción adicional"}
                                   </p>
                                   {coords !== "No asignado" && (
-                                    <div className="flex items-center gap-1.5 mt-2 text-[10px] font-bold text-slate-400 uppercase tracking-wider">
-                                      <MapPin className="w-3.5 h-3.5 text-slate-300" />
+                                    <div className="inline-flex items-center gap-1.5 mt-2 text-[11px] font-bold text-slate-600 bg-slate-100 px-2.5 py-0.5 rounded-lg uppercase tracking-wider">
+                                      <MapPin className="w-3.5 h-3.5 text-teal-600" />
                                       <span>{coords}</span>
                                     </div>
                                   )}
                                 </div>
                               </div>
 
-                              <div className="text-right shrink-0">
-                                <p className="text-xl font-black text-slate-800 leading-none">{stats.totalStock}</p>
-                                <span className="text-[9px] text-slate-400 font-bold uppercase tracking-wider">Sistema</span>
-                                <p className="text-sm font-bold text-slate-600 mt-2 leading-none">{stats.physicalStock}</p>
-                                <span className="text-[9px] text-slate-400 font-bold uppercase tracking-wider">Físico</span>
+                              <div className="flex items-center gap-2 shrink-0 self-end xs:self-start sm:self-start">
+                                <div className="text-center bg-slate-50 border border-slate-200/90 rounded-xl px-2.5 py-1.5 sm:px-3 sm:py-2 min-w-[58px] sm:min-w-[64px]">
+                                  <p className="text-base sm:text-lg font-black text-slate-900 leading-none tabular-nums">{stats.totalStock}</p>
+                                  <span className="block text-[9px] text-slate-500 font-extrabold uppercase tracking-wider mt-1">
+                                    Sistema
+                                  </span>
+                                </div>
+                                <div className="text-center bg-amber-50/60 border border-amber-200/80 rounded-xl px-2.5 py-1.5 sm:px-3 sm:py-2 min-w-[58px] sm:min-w-[64px]">
+                                  <p className="text-base sm:text-lg font-black text-amber-900 leading-none tabular-nums">{stats.physicalStock}</p>
+                                  <span className="block text-[9px] text-amber-700 font-extrabold uppercase tracking-wider mt-1">
+                                    Físico
+                                  </span>
+                                </div>
                               </div>
                             </div>
 
-                            <div className="flex flex-wrap gap-1.5 mt-4 pt-4 border-t border-slate-100">
-                              <span className="inline-flex items-center gap-1 text-[10px] font-extrabold px-3 py-1.5 rounded-full bg-slate-100 text-slate-600 border border-slate-200/60 shadow-inner">
-                                <Layers className="w-3.5 h-3.5 text-slate-400" />
+                            <div className="flex flex-wrap items-center gap-1.5 mt-4 pt-3.5 border-t border-slate-100">
+                              <span className="inline-flex items-center gap-1 text-[11px] font-extrabold px-3 py-1 rounded-xl bg-slate-100 text-slate-700 border border-slate-200/80 tabular-nums">
+                                <Layers className="w-3.5 h-3.5 text-slate-500" />
                                 {p.lotes.length} {p.lotes.length === 1 ? "lote" : "lotes"}
                               </span>
 
                               <button
                                 type="button"
                                 onClick={(e) => handleToggleVerification(e, p.codigo)}
-                                className={`inline-flex items-center gap-1 text-[10px] font-extrabold px-3 py-1.5 rounded-full transition shadow-inner cursor-pointer ${
+                                className={`inline-flex items-center gap-1 text-[11px] font-extrabold px-3 py-1 rounded-xl transition cursor-pointer ${
                                   p.verificado
-                                    ? "bg-emerald-500 text-white"
-                                    : "bg-slate-50 text-slate-400 border border-dashed border-slate-300 hover:border-emerald-400 hover:text-emerald-600 hover:bg-emerald-50/20"
+                                    ? "bg-emerald-600 text-white shadow-2xs"
+                                    : "bg-slate-50 text-slate-600 border border-dashed border-slate-300 hover:border-emerald-500 hover:text-emerald-700 hover:bg-emerald-50/40"
                                 }`}
                               >
                                 {p.verificado ? (
                                   <>
                                     <CheckCircle2 className="w-3.5 h-3.5" />
-                                    Verificado
+                                    <span>Verificado</span>
                                   </>
                                 ) : (
                                   <>
                                     <X className="w-3.5 h-3.5" />
-                                    Verificar
+                                    <span>Verificar</span>
                                   </>
                                 )}
                               </button>
 
                               {stats.hasExpired && (
-                                <span className="inline-flex items-center gap-1 text-[10px] font-extrabold px-3 py-1.5 rounded-full bg-red-50 text-red-600 border border-red-100 shadow-inner animate-pulse">
+                                <span className="inline-flex items-center gap-1 text-[11px] font-extrabold px-3 py-1 rounded-xl bg-rose-50 text-rose-700 border border-rose-200 animate-pulse">
                                   <TriangleAlert className="w-3.5 h-3.5" />
-                                  Vencido
+                                  <span>Vencido</span>
                                 </span>
                               )}
 
                               {stats.hasSoonToExpire && (
-                                <span className="inline-flex items-center gap-1 text-[10px] font-extrabold px-3 py-1.5 rounded-full bg-amber-50 text-amber-600 border border-amber-100 shadow-inner">
-                                  <Clock className="w-3.5 h-3.5 text-amber-500" />
-                                  Por vencer (≤30d)
+                                <span className="inline-flex items-center gap-1 text-[11px] font-extrabold px-3 py-1 rounded-xl bg-amber-50 text-amber-800 border border-amber-200">
+                                  <Clock className="w-3.5 h-3.5 text-amber-600" />
+                                  <span>Por vencer (≤30d)</span>
                                 </span>
                               )}
 
                               {stats.hasNextToExpire && (
-                                <span className="inline-flex items-center gap-1 text-[10px] font-extrabold px-3 py-1.5 rounded-full bg-yellow-50 text-yellow-700 border border-yellow-200 shadow-inner">
-                                  <Clock className="w-3.5 h-3.5 text-yellow-500" />
-                                  Próx. a vencer (≤90d)
+                                <span className="inline-flex items-center gap-1 text-[11px] font-extrabold px-3 py-1 rounded-xl bg-yellow-50 text-yellow-800 border border-yellow-300">
+                                  <Clock className="w-3.5 h-3.5 text-yellow-600" />
+                                  <span>Próx. a vencer (≤90d)</span>
                                 </span>
                               )}
 
                               {stats.lowStock && (
-                                <span className="inline-flex items-center gap-1 text-[10px] font-extrabold px-3 py-1.5 rounded-full bg-orange-50 text-orange-600 border border-orange-100 shadow-inner">
+                                <span className="inline-flex items-center gap-1 text-[11px] font-extrabold px-3 py-1 rounded-xl bg-orange-50 text-orange-700 border border-orange-200">
                                   <TrendingDown className="w-3.5 h-3.5" />
-                                  Bajo
+                                  <span>Stock Bajo</span>
                                 </span>
                               )}
 
                               {stats.wideMismatch && (
-                                <span className="inline-flex items-center gap-1 text-[10px] font-extrabold px-3 py-1.5 rounded-full bg-indigo-50 text-indigo-700 border border-indigo-100 shadow-inner">
+                                <span className="inline-flex items-center gap-1 text-[11px] font-extrabold px-3 py-1 rounded-xl bg-indigo-50 text-indigo-700 border border-indigo-200">
                                   <AlertCircle className="w-3.5 h-3.5" />
-                                  Diferencia
+                                  <span>Diferencia</span>
                                 </span>
                               )}
 
                               {stats.hasAdjusted && (
-                                <span className="inline-flex items-center gap-1 text-[10px] font-extrabold px-3 py-1.5 rounded-full bg-amber-50 text-amber-700 border border-amber-100 shadow-inner">
+                                <span className="inline-flex items-center gap-1 text-[11px] font-extrabold px-3 py-1 rounded-xl bg-amber-50 text-amber-800 border border-amber-200">
                                   <CheckCircle2 className="w-3.5 h-3.5 text-amber-600" />
-                                  Ajustado
+                                  <span>Ajustado</span>
                                 </span>
                               )}
                             </div>
@@ -2926,108 +3398,88 @@ export default function App() {
                 setShowProductAdd(true);
                 playSound("open");
               }}
-              className="fixed bottom-6 right-6 z-30 bg-teal-600 hover:bg-teal-700 active:scale-95 transition text-white rounded-full shadow-lg shadow-teal-900/30 px-6 py-4 flex items-center gap-2 font-black uppercase text-xs tracking-wider cursor-pointer bg-custom-buttons"
+              className="fixed bottom-5 right-4 sm:bottom-6 sm:right-6 z-30 bg-teal-700 hover:bg-teal-600 active:scale-95 transition text-white rounded-2xl shadow-xl shadow-teal-950/25 border border-white/15 px-4 py-3.5 sm:px-6 sm:py-4 flex items-center gap-2 font-extrabold uppercase text-[11px] sm:text-xs tracking-wider cursor-pointer bg-custom-buttons"
             >
-              <Plus className="w-5 h-5" />
-              Registrar Producto
+              <Plus className="w-5 h-5 shrink-0" />
+              <span>Registrar Entrada</span>
             </button>
           )}
 
+          {/* Offline Connectivity Indicator */}
+          <OfflineIndicator />
+
           {/* Global Toast Alert */}
           {toastMessage && (
-            <div className="fixed bottom-24 left-1/2 -translate-x-1/2 z-[60] bg-slate-900 text-white text-xs font-extrabold px-5 py-3.5 rounded-xl shadow-xl border border-slate-800 flex items-center gap-2 anim-toast">
-              <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
-              <span>{toastMessage}</span>
+            <div className="fixed bottom-24 left-1/2 -translate-x-1/2 z-[60] w-[92vw] sm:w-auto max-w-md bg-slate-900 text-white text-xs sm:text-sm font-extrabold px-4 py-3.5 sm:px-5 rounded-2xl shadow-2xl border border-slate-700 flex items-center gap-2.5 anim-toast">
+              <CheckCircle2 className="w-4.5 h-4.5 text-emerald-400 shrink-0" />
+              <span className="leading-snug">{toastMessage}</span>
             </div>
           )}
 
           {/* Modal Detalles / Edición de Producto */}
           {selectedProductCode && (
-            <div className="fixed inset-0 z-40 flex items-end sm:items-center justify-center">
-              <div className="absolute inset-0 bg-black/40 backdrop-blur-xs" onClick={() => setSelectedProductCode(null)}></div>
-              <div className="absolute inset-x-0 bottom-0 top-12 sm:relative sm:inset-auto sm:w-full sm:max-w-2xl sm:h-[85vh] bg-slate-50 rounded-t-3xl sm:rounded-3xl shadow-xl flex flex-col overflow-hidden anim-slide-up sm:anim-pop-in">
+            <div className="fixed inset-0 z-40 flex items-end sm:items-center justify-center p-0 sm:p-4">
+              <div className="absolute inset-0 bg-slate-950/55 backdrop-blur-xs" onClick={() => setSelectedProductCode(null)}></div>
+              <div className="relative w-full sm:max-w-2xl h-[90vh] sm:h-[86vh] bg-slate-50 rounded-t-3xl sm:rounded-3xl shadow-2xl border border-slate-200 flex flex-col overflow-hidden anim-slide-up sm:anim-pop-in">
                 <div className="flex items-center justify-between px-6 py-4 border-b border-slate-200 bg-white shrink-0">
-                  <button onClick={() => setSelectedProductCode(null)} className="p-1.5 -ml-1.5 text-slate-500 active:scale-90 transition cursor-pointer">
-                    <X className="w-6 h-6" />
+                  <button
+                    onClick={() => setSelectedProductCode(null)}
+                    className="p-2 -ml-1.5 text-slate-500 hover:text-slate-800 hover:bg-slate-100 rounded-xl active:scale-90 transition cursor-pointer"
+                  >
+                    <X className="w-5 h-5" />
                   </button>
-                  <span className="text-xs font-black text-teal-700 bg-teal-50 px-3 py-1.5 rounded-full border border-teal-100 uppercase tracking-widest">
+                  <span className="font-mono text-xs font-extrabold text-teal-800 bg-teal-50 px-3.5 py-1.5 rounded-xl border border-teal-200 uppercase tracking-wider">
                     Suministro: {selectedProductCode}
                   </span>
-                  <button onClick={handleDeleteProduct} className="p-1.5 text-rose-400 hover:text-rose-600 active:scale-90 transition cursor-pointer">
+                  <button
+                    onClick={handleDeleteProduct}
+                    className="p-2 text-rose-500 hover:text-rose-700 hover:bg-rose-50 rounded-xl active:scale-90 transition cursor-pointer"
+                    title="Eliminar suministro"
+                  >
                     <Trash2 className="w-5 h-5" />
                   </button>
                 </div>
 
                 <div className="flex-1 overflow-y-auto px-6 py-6 space-y-6">
-                  {/* Photo Upload Card */}
+                  {/* Photo Capture & Selection Card */}
                   <div>
-                    <div
-                      onClick={triggerFileInput}
-                      className="relative w-full h-52 rounded-2xl overflow-hidden bg-white border border-slate-200 flex items-center justify-center cursor-pointer group shadow-inner"
-                    >
-                      {isPhotoUploading ? (
-                        <div className="flex flex-col items-center gap-2 text-slate-400">
-                          <LoaderCircle className="w-8 h-8 animate-spin text-teal-600" />
-                          <span className="text-xs font-semibold">Subiendo foto...</span>
-                        </div>
-                      ) : products.find((p) => p.codigo === selectedProductCode)?.imagen ||
-                        products.find((p) => p.codigo === selectedProductCode)?.imagenURL ? (
-                        <>
-                          <img
-                            src={
-                              products.find((p) => p.codigo === selectedProductCode)?.imagen ||
-                              products.find((p) => p.codigo === selectedProductCode)?.imagenURL
-                            }
-                            alt="Foto del suministro"
-                            className="w-full h-full object-cover"
-                          />
-                          <button
-                            type="button"
-                            onClick={handlePhotoDelete}
-                            className="absolute top-3.5 right-3.5 bg-black/60 hover:bg-rose-600 text-white rounded-full w-8 h-8 flex items-center justify-center transition active:scale-95 shadow-md"
-                          >
-                            <X className="w-4 h-4" />
-                          </button>
-                        </>
-                      ) : (
-                        <div className="flex flex-col items-center gap-2 text-slate-400 p-4 text-center">
-                          <Upload className="w-8 h-8 text-slate-300 group-hover:text-teal-500 transition-colors" />
-                          <span className="text-xs font-semibold group-hover:text-teal-600 transition-colors">
-                            Agregar una foto de referencia
-                          </span>
-                        </div>
-                      )}
-                    </div>
-                    <input
-                      ref={fileInputRef}
-                      type="file"
-                      accept="image/*"
-                      onChange={handlePhotoUpload}
-                      className="hidden"
+                    <PhotoCaptureField
+                      label="Fotografía del Suministro"
+                      currentImageUrl={
+                        products.find((p) => p.codigo === selectedProductCode)?.imagen ||
+                        products.find((p) => p.codigo === selectedProductCode)?.imagenURL
+                      }
+                      onConfirmImage={handleConfirmProductPhoto}
+                      onDeleteImage={() => handlePhotoDelete()}
+                      onPendingChange={setPendingDetailPhoto}
+                      isSaving={isPhotoUploading}
+                      placeholderText="Toma una fotografía al momento o selecciona una imagen desde tu dispositivo"
+                      heightClass="h-52"
+                      objectFit="cover"
                     />
                   </div>
 
-                  <div className="bg-white rounded-2xl p-5 border border-slate-200 space-y-4 shadow-sm">
+                  <div className="bg-white rounded-2xl p-5 border border-slate-200/90 space-y-4 shadow-2xs">
                     <div>
-                      <label className="text-xs font-bold text-slate-500 uppercase tracking-wider">
+                      <label className="block text-xs font-extrabold text-slate-700 uppercase tracking-wider mb-1.5">
                         Nombre del Suministro
                       </label>
                       <input
                         type="text"
                         value={editName}
                         onChange={(e) => setEditName(e.target.value)}
-                        className="mt-1.5 w-full text-sm rounded-xl border border-slate-200 px-3.5 py-3 outline-none focus:ring-2 focus:ring-teal-400 font-semibold"
+                        className="w-full text-sm rounded-xl border border-slate-300 bg-white px-3.5 py-2.5 outline-none focus:ring-2 focus:ring-teal-500/30 font-bold text-slate-900"
                       />
                     </div>
                     <div>
-                      <label className="text-xs font-bold text-slate-500 uppercase tracking-wider">
+                      <label className="block text-xs font-extrabold text-slate-700 uppercase tracking-wider mb-1.5">
                         Descripción o Presentación
                       </label>
                       <input
                         type="text"
                         value={editDesc}
                         onChange={(e) => setEditDesc(e.target.value)}
-                        className="mt-1.5 w-full text-sm rounded-xl border border-slate-200 px-3.5 py-3 outline-none focus:ring-2 focus:ring-teal-400"
+                        className="w-full text-sm rounded-xl border border-slate-300 bg-white px-3.5 py-2.5 outline-none focus:ring-2 focus:ring-teal-500/30 font-medium text-slate-800"
                       />
                     </div>
                   </div>
@@ -3035,15 +3487,18 @@ export default function App() {
                   {/* Lotes de este medicamento */}
                   <div className="space-y-4">
                     <div className="flex items-center justify-between">
-                      <h3 className="text-sm font-black text-slate-700 uppercase tracking-wider">Lotes Registrados</h3>
+                      <h3 className="text-sm font-extrabold text-slate-800 uppercase tracking-wider">
+                        Lotes Registrados ({editLotes.length})
+                      </h3>
                       <button
                         onClick={() => {
                           setShowLotAdd(true);
                           playSound("open");
                         }}
-                        className="flex items-center gap-1.5 text-xs font-bold text-teal-700 bg-teal-50 px-3 py-2 rounded-xl active:scale-95 transition border border-teal-100 shadow-inner cursor-pointer"
+                        className="flex items-center gap-1.5 text-xs font-extrabold text-teal-800 bg-teal-50 hover:bg-teal-100 px-3.5 py-2 rounded-xl active:scale-95 transition border border-teal-200 cursor-pointer"
                       >
-                        <Plus className="w-4 h-4" /> Agregar Lote
+                        <Plus className="w-4 h-4" />
+                        <span>Agregar Lote</span>
                       </button>
                     </div>
 
@@ -3052,94 +3507,95 @@ export default function App() {
                         const daysTo = getDaysToExpiration(l.fechaVencimiento);
                         const status = daysTo < 0 ? "vencido" : daysTo <= 30 ? "proximo" : (daysTo <= 90 ? "pronto" : "ok");
 
-                        let cardBgClass = "bg-white border-slate-200";
+                        let cardBgClass = "bg-white border-slate-200/90";
                         if (status === "vencido") {
-                          cardBgClass = "bg-rose-50/70 border-rose-200 shadow-rose-100/30";
+                          cardBgClass = "bg-rose-50/70 border-rose-200";
                         } else if (status === "proximo") {
-                          cardBgClass = "bg-amber-50/70 border-amber-200 shadow-amber-100/30";
+                          cardBgClass = "bg-amber-50/70 border-amber-200";
                         } else if (status === "pronto") {
-                          cardBgClass = "bg-yellow-50/40 border-yellow-200 shadow-yellow-100/20";
+                          cardBgClass = "bg-yellow-50/50 border-yellow-200";
                         }
 
                         return (
                           <div
                             key={l.id}
-                            className={`rounded-2xl border p-4 space-y-3.5 shadow-sm transition-all ${cardBgClass}`}
+                            className={`rounded-2xl border p-4 sm:p-5 space-y-4 shadow-2xs transition-all ${cardBgClass}`}
                           >
-                            <div className="flex flex-col gap-2.5 sm:flex-row sm:justify-between sm:items-center pb-2.5 border-b border-slate-100">
-                              <span className="text-xs font-bold text-slate-500 uppercase tracking-wider">
+                            <div className="flex flex-col gap-2.5 sm:flex-row sm:justify-between sm:items-center pb-3 border-b border-slate-200/70">
+                              <span className="font-mono text-xs font-extrabold text-slate-800 uppercase tracking-wider">
                                 N.º Lote: {l.numeroLote}
                               </span>
                               <div className="flex flex-wrap items-center gap-2.5 sm:gap-3">
                                 {status === "vencido" && (
-                                  <span className="text-[10px] font-bold text-rose-600 bg-rose-50 px-2.5 py-1 rounded-full border border-rose-100">
+                                  <span className="text-[11px] font-extrabold text-rose-700 bg-rose-100 px-2.5 py-1 rounded-lg border border-rose-200">
                                     Vencido ({Math.abs(daysTo)} días atrás)
                                   </span>
                                 )}
                                 {status === "proximo" && (
-                                  <span className="text-[10px] font-bold text-amber-700 bg-amber-50 px-2.5 py-1 rounded-full border border-amber-200 animate-pulse">
+                                  <span className="text-[11px] font-extrabold text-amber-800 bg-amber-100 px-2.5 py-1 rounded-lg border border-amber-300 animate-pulse">
                                     Por vencer (en {daysTo} días)
                                   </span>
                                 )}
                                 {status === "pronto" && (
-                                  <span className="text-[10px] font-bold text-yellow-700 bg-yellow-50 px-2.5 py-1 rounded-full border border-yellow-200">
+                                  <span className="text-[11px] font-extrabold text-yellow-800 bg-yellow-100 px-2.5 py-1 rounded-lg border border-yellow-300">
                                     Vence pronto (en {daysTo} días)
                                   </span>
                                 )}
                                 {status === "ok" && (
-                                  <span className="text-[10px] font-bold text-emerald-600 bg-emerald-50 px-2.5 py-1 rounded-full border border-emerald-100">
+                                  <span className="text-[11px] font-extrabold text-emerald-700 bg-emerald-50 px-2.5 py-1 rounded-lg border border-emerald-200">
                                     Vigente ({daysTo} días rest.)
                                   </span>
                                 )}
                                 {l.articuloAjustado && (
-                                  <span className="text-[10px] font-bold text-amber-700 bg-amber-50 px-2 py-0.5 rounded-full border border-amber-200">
+                                  <span className="text-[11px] font-extrabold text-amber-800 bg-amber-100 px-2.5 py-0.5 rounded-lg border border-amber-200">
                                     Ajustado
                                   </span>
                                 )}
 
-                                <label className="flex items-center gap-1.5 text-xs font-semibold text-slate-500 cursor-pointer">
+                                <label className="flex items-center gap-1.5 text-xs font-bold text-slate-600 cursor-pointer">
                                   <input
                                     type="checkbox"
                                     checked={!!coincidenLotesMap[l.id]}
                                     onChange={(e) => handleToggleCoincide(l.id, e.target.checked)}
-                                    className="rounded text-teal-600 focus:ring-teal-400"
+                                    className="w-4 h-4 rounded text-teal-600 focus:ring-teal-500"
                                   />
                                   <span>Coincide</span>
                                 </label>
 
-                                <label className="flex items-center gap-1.5 text-xs font-semibold text-slate-500 cursor-pointer">
+                                <label className="flex items-center gap-1.5 text-xs font-bold text-slate-600 cursor-pointer">
                                   <input
                                     type="checkbox"
                                     checked={!!l.articuloAjustado}
                                     onChange={(e) => handleEditLotField(l.id, "articuloAjustado", e.target.checked)}
-                                    className="rounded text-amber-600 focus:ring-amber-400"
+                                    className="w-4 h-4 rounded text-amber-600 focus:ring-amber-500"
                                   />
-                                  <span className="text-amber-800 font-bold">Ajustado</span>
+                                  <span className="text-amber-800 font-extrabold">Ajustado</span>
                                 </label>
 
                                 <button
                                   onClick={() => handleDeleteLot(l.id)}
-                                  className="text-slate-300 hover:text-rose-600 active:scale-95 transition cursor-pointer"
+                                  className="p-1 text-slate-400 hover:text-rose-600 active:scale-95 transition cursor-pointer"
+                                  title="Eliminar lote"
                                 >
                                   <Trash2 className="w-4.5 h-4.5" />
                                 </button>
                               </div>
                             </div>
 
-                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
+                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5 text-xs">
                               <div>
-                                <label className="text-[10px] font-bold text-slate-400 uppercase">
+                                <label className="block text-[11px] font-extrabold text-slate-600 uppercase mb-1">
                                   Lote (Sistema)
                                 </label>
                                 <input
                                   type="text"
                                   value={l.numeroLote}
                                   onChange={(e) => handleEditLotField(l.id, "numeroLote", e.target.value)}
-                                  className="mt-1 w-full rounded-lg border border-slate-200 px-2.5 py-2 font-bold text-slate-800 bg-slate-50"
+                                  className="w-full rounded-xl border border-slate-300 px-3 py-2 font-mono font-bold text-slate-900 bg-white"
                                 />
                               </div>
                               <div>
-                                <label className="text-[10px] font-bold text-amber-600 uppercase flex items-center gap-1">
+                                <label className="text-[11px] font-extrabold text-amber-700 uppercase flex items-center gap-1 mb-1">
                                   <MapPin className="w-3.5 h-3.5" /> Lote F (Físico)
                                 </label>
                                 <input
@@ -3148,23 +3604,23 @@ export default function App() {
                                   disabled={!!coincidenLotesMap[l.id]}
                                   onChange={(e) => handleEditLotField(l.id, "loteFisico", e.target.value)}
                                   placeholder="Ej. Estante B"
-                                  className="mt-1 w-full rounded-lg border border-amber-200 bg-amber-50/50 disabled:bg-slate-100 disabled:border-slate-200 px-2.5 py-2 font-bold text-slate-800"
+                                  className="w-full rounded-xl border border-amber-300 bg-amber-50/50 disabled:bg-slate-100 disabled:border-slate-200 px-3 py-2 font-bold text-slate-900"
                                 />
                               </div>
 
                               <div>
-                                <label className="text-[10px] font-bold text-slate-400 uppercase">
+                                <label className="block text-[11px] font-extrabold text-slate-600 uppercase mb-1">
                                   Cantidad (Sistema)
                                 </label>
                                 <input
                                   type="number"
                                   value={l.cantidad}
                                   onChange={(e) => handleEditLotField(l.id, "cantidad", Number(e.target.value))}
-                                  className="mt-1 w-full rounded-lg border border-slate-200 px-2.5 py-2 font-bold text-slate-800 bg-slate-50"
+                                  className="w-full rounded-xl border border-slate-300 px-3 py-2 font-bold text-slate-900 bg-white tabular-nums"
                                 />
                               </div>
                               <div>
-                                <label className="text-[10px] font-bold text-amber-600 uppercase flex items-center gap-1">
+                                <label className="text-[11px] font-extrabold text-amber-700 uppercase flex items-center gap-1 mb-1">
                                   <MapPin className="w-3.5 h-3.5" /> Cantidad F (Física)
                                 </label>
                                 <input
@@ -3172,23 +3628,23 @@ export default function App() {
                                   value={l.cantidadF || 0}
                                   disabled={!!coincidenLotesMap[l.id]}
                                   onChange={(e) => handleEditLotField(l.id, "cantidadF", Number(e.target.value))}
-                                  className="mt-1 w-full rounded-lg border border-amber-200 bg-amber-50/50 disabled:bg-slate-100 disabled:border-slate-200 px-2.5 py-2 font-bold text-slate-800"
+                                  className="w-full rounded-xl border border-amber-300 bg-amber-50/50 disabled:bg-slate-100 disabled:border-slate-200 px-3 py-2 font-bold text-slate-900 tabular-nums"
                                 />
                               </div>
 
                               <div>
-                                <label className="text-[10px] font-bold text-slate-400 uppercase">
+                                <label className="block text-[11px] font-extrabold text-slate-600 uppercase mb-1">
                                   Vencimiento (Sistema)
                                 </label>
                                 <input
                                   type="date"
                                   value={l.fechaVencimiento}
                                   onChange={(e) => handleEditLotField(l.id, "fechaVencimiento", e.target.value)}
-                                  className="mt-1 w-full rounded-lg border border-slate-200 px-2.5 py-2 font-bold text-slate-800 bg-slate-50 text-xs"
+                                  className="w-full rounded-xl border border-slate-300 px-3 py-2 font-bold text-slate-900 bg-white text-xs"
                                 />
                               </div>
                               <div>
-                                <label className="text-[10px] font-bold text-amber-600 uppercase flex items-center gap-1">
+                                <label className="text-[11px] font-extrabold text-amber-700 uppercase flex items-center gap-1 mb-1">
                                   <MapPin className="w-3.5 h-3.5" /> Vencimiento F (Física)
                                 </label>
                                 <input
@@ -3196,19 +3652,19 @@ export default function App() {
                                   value={l.fechaFisica || ""}
                                   disabled={!!coincidenLotesMap[l.id]}
                                   onChange={(e) => handleEditLotField(l.id, "fechaFisica", e.target.value)}
-                                  className="mt-1 w-full rounded-lg border border-amber-200 bg-amber-50/50 disabled:bg-slate-100 disabled:border-slate-200 px-2.5 py-2 font-bold text-slate-800 text-xs"
+                                  className="w-full rounded-xl border border-amber-300 bg-amber-50/50 disabled:bg-slate-100 disabled:border-slate-200 px-3 py-2 font-bold text-slate-900 text-xs"
                                 />
                               </div>
 
                               <div className="sm:col-span-2">
-                                <label className="text-[10px] font-bold text-slate-400 uppercase">
-                                  Costo Adquisición (RD$)
+                                <label className="block text-[11px] font-extrabold text-slate-600 uppercase mb-1">
+                                  Costo Adquisición Unitario (RD$)
                                 </label>
                                 <input
                                   type="number"
                                   value={l.precio}
                                   onChange={(e) => handleEditLotField(l.id, "precio", Number(e.target.value))}
-                                  className="mt-1 w-full rounded-lg border border-slate-200 px-2.5 py-2 font-bold text-slate-800 bg-slate-50"
+                                  className="w-full rounded-xl border border-slate-300 px-3 py-2 font-bold text-slate-900 bg-white tabular-nums"
                                 />
                               </div>
                             </div>
@@ -3222,7 +3678,7 @@ export default function App() {
                 <div className="px-6 py-4 border-t border-slate-200 bg-white shrink-0">
                   <button
                     onClick={handleSaveDetails}
-                    className="w-full bg-teal-600 hover:bg-teal-700 active:scale-95 transition text-white font-extrabold text-sm rounded-xl py-3.5 uppercase tracking-wider flex items-center justify-center gap-2 shadow-sm cursor-pointer"
+                    className="w-full bg-teal-700 hover:bg-teal-600 active:scale-95 transition text-white font-extrabold text-sm rounded-xl py-3.5 uppercase tracking-wider flex items-center justify-center gap-2 shadow-sm cursor-pointer"
                   >
                     Guardar Cambios
                   </button>
@@ -3233,86 +3689,103 @@ export default function App() {
 
           {/* Modal Añadir Lote */}
           {showLotAdd && (
-            <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center">
-              <div className="absolute inset-0 bg-black/40 backdrop-blur-xs" onClick={() => setShowLotAdd(false)}></div>
-              <div className="relative w-full sm:max-w-md bg-white rounded-t-3xl sm:rounded-3xl shadow-xl flex flex-col overflow-hidden anim-slide-up sm:anim-pop-in max-h-[85vh]">
-                <div className="px-6 py-4 flex items-center justify-between border-b border-slate-100 shrink-0 bg-slate-50">
-                  <h2 className="font-bold text-slate-800">Agregar Nuevo Lote</h2>
-                  <button onClick={() => setShowLotAdd(false)} className="p-1.5 text-slate-500 hover:text-slate-700 transition cursor-pointer">
+            <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center p-0 sm:p-4">
+              <div className="absolute inset-0 bg-slate-950/55 backdrop-blur-xs" onClick={() => setShowLotAdd(false)}></div>
+              <div className="relative w-full sm:max-w-md bg-white rounded-t-3xl sm:rounded-3xl shadow-2xl border border-slate-200 flex flex-col overflow-hidden anim-slide-up sm:anim-pop-in max-h-[88vh]">
+                <div className="px-6 py-4 flex items-center justify-between border-b border-slate-200 shrink-0 bg-slate-50">
+                  <h2 className="font-extrabold text-slate-900 text-base">Agregar Nuevo Lote</h2>
+                  <button
+                    onClick={() => setShowLotAdd(false)}
+                    className="p-1.5 text-slate-500 hover:text-slate-800 hover:bg-slate-200/60 rounded-xl transition cursor-pointer"
+                  >
                     <X className="w-5 h-5" />
                   </button>
                 </div>
                 <div className="flex-1 overflow-y-auto px-6 py-5 space-y-4">
                   <div>
-                    <label className="text-xs font-bold text-slate-500 uppercase tracking-wider">Lote (Sistema) *</label>
+                    <label className="block text-xs font-extrabold text-slate-700 uppercase tracking-wider mb-1.5">
+                      Lote (Sistema) *
+                    </label>
                     <input
                       type="text"
                       placeholder="Ej. AB-202"
                       value={newLotNum}
                       onChange={(e) => setNewLotNum(e.target.value)}
-                      className="mt-1.5 w-full rounded-xl border border-slate-200 px-3.5 py-2.5 text-sm outline-none focus:ring-2 focus:ring-teal-400 bg-slate-50"
+                      className="w-full rounded-xl border border-slate-300 px-3.5 py-2.5 text-sm font-mono font-bold outline-none focus:ring-2 focus:ring-teal-500/30 bg-white"
                     />
                   </div>
 
                   <div className="grid grid-cols-2 gap-4">
                     <div>
-                      <label className="text-xs font-bold text-slate-500 uppercase tracking-wider">Cantidad (Sistema) *</label>
+                      <label className="block text-xs font-extrabold text-slate-700 uppercase tracking-wider mb-1.5">
+                        Cantidad (Sistema) *
+                      </label>
                       <input
                         type="number"
                         min="1"
                         placeholder="0"
                         value={newLotQty}
                         onChange={(e) => setNewLotQty(e.target.value)}
-                        className="mt-1.5 w-full rounded-xl border border-slate-200 px-3.5 py-2.5 text-sm outline-none focus:ring-2 focus:ring-teal-400 bg-slate-50"
+                        className="w-full rounded-xl border border-slate-300 px-3.5 py-2.5 text-sm font-bold outline-none focus:ring-2 focus:ring-teal-500/30 bg-white tabular-nums"
                       />
                     </div>
                     <div>
-                      <label className="text-xs font-bold text-amber-600 uppercase tracking-wider">Cantidad F (Física)</label>
+                      <label className="block text-xs font-extrabold text-amber-700 uppercase tracking-wider mb-1.5">
+                        Cantidad F (Física)
+                      </label>
                       <input
                         type="number"
                         min="0"
-                        placeholder="Dejar vacío para igualar"
+                        placeholder="Vacío = igualar"
                         value={newLotQtyF}
                         onChange={(e) => setNewLotQtyF(e.target.value)}
-                        className="mt-1.5 w-full rounded-xl border border-amber-200 bg-amber-50/50 px-3.5 py-2.5 text-sm outline-none focus:ring-2 focus:ring-amber-400"
+                        className="w-full rounded-xl border border-amber-300 bg-amber-50/50 px-3.5 py-2.5 text-sm font-bold outline-none focus:ring-2 focus:ring-amber-400 tabular-nums"
                       />
                     </div>
                   </div>
 
                   <div className="grid grid-cols-2 gap-4">
                     <div>
-                      <label className="text-xs font-bold text-slate-500 uppercase tracking-wider">Vencimiento (Sistema) *</label>
+                      <label className="block text-xs font-extrabold text-slate-700 uppercase tracking-wider mb-1.5">
+                        Vencimiento (Sistema) *
+                      </label>
                       <input
                         type="date"
                         value={newLotExpDate}
                         onChange={(e) => setNewLotExpDate(e.target.value)}
-                        className="mt-1.5 w-full rounded-xl border border-slate-200 px-3.5 py-2.5 text-xs font-semibold outline-none focus:ring-2 focus:ring-teal-400 bg-slate-50"
+                        className="w-full rounded-xl border border-slate-300 px-3.5 py-2.5 text-xs font-bold outline-none focus:ring-2 focus:ring-teal-500/30 bg-white"
                       />
                     </div>
                     <div>
-                      <label className="text-xs font-bold text-amber-600 uppercase tracking-wider">Vencimiento F (Física)</label>
+                      <label className="block text-xs font-extrabold text-amber-700 uppercase tracking-wider mb-1.5">
+                        Vencimiento F (Física)
+                      </label>
                       <input
                         type="date"
                         value={newLotPhysExpDate}
                         onChange={(e) => setNewLotPhysExpDate(e.target.value)}
-                        className="mt-1.5 w-full rounded-xl border border-amber-200 bg-amber-50/50 px-3.5 py-2.5 text-xs font-semibold outline-none focus:ring-2 focus:ring-amber-400"
+                        className="w-full rounded-xl border border-amber-300 bg-amber-50/50 px-3.5 py-2.5 text-xs font-bold outline-none focus:ring-2 focus:ring-amber-400"
                       />
                     </div>
                   </div>
 
                   <div>
-                    <label className="text-xs font-bold text-amber-600 uppercase tracking-wider">Lote F (Físico) / Ubicación</label>
+                    <label className="block text-xs font-extrabold text-amber-700 uppercase tracking-wider mb-1.5">
+                      Lote F (Físico) / Ubicación
+                    </label>
                     <input
                       type="text"
                       placeholder="Ej. Estante B"
                       value={newLotLocation}
                       onChange={(e) => setNewLotLocation(e.target.value)}
-                      className="mt-1.5 w-full rounded-xl border border-amber-200 bg-amber-50/50 px-3.5 py-2.5 text-sm outline-none focus:ring-2 focus:ring-amber-400"
+                      className="w-full rounded-xl border border-amber-300 bg-amber-50/50 px-3.5 py-2.5 text-sm font-bold outline-none focus:ring-2 focus:ring-amber-400"
                     />
                   </div>
 
                   <div>
-                    <label className="text-xs font-bold text-slate-500 uppercase tracking-wider">Costo Adquisición (RD$) *</label>
+                    <label className="block text-xs font-extrabold text-slate-700 uppercase tracking-wider mb-1.5">
+                      Costo Adquisición (RD$) *
+                    </label>
                     <input
                       type="number"
                       min="0"
@@ -3320,15 +3793,15 @@ export default function App() {
                       placeholder="0.00"
                       value={newLotPrice}
                       onChange={(e) => setNewLotPrice(e.target.value)}
-                      className="mt-1.5 w-full rounded-xl border border-slate-200 px-3.5 py-2.5 text-sm outline-none focus:ring-2 focus:ring-teal-400 bg-slate-50"
+                      className="w-full rounded-xl border border-slate-300 px-3.5 py-2.5 text-sm font-bold outline-none focus:ring-2 focus:ring-teal-500/30 bg-white tabular-nums"
                     />
                   </div>
                 </div>
 
-                <div className="px-6 py-4 border-t border-slate-100 bg-slate-50 shrink-0">
+                <div className="px-6 py-4 border-t border-slate-200 bg-slate-50 shrink-0">
                   <button
                     onClick={handleAddLot}
-                    className="w-full bg-teal-600 hover:bg-teal-700 text-white font-extrabold text-xs py-3.5 rounded-xl uppercase tracking-wider transition shadow-sm cursor-pointer"
+                    className="w-full bg-teal-700 hover:bg-teal-600 text-white font-extrabold text-xs py-3.5 rounded-xl uppercase tracking-wider transition shadow-sm cursor-pointer"
                   >
                     Añadir Lote
                   </button>
@@ -3340,48 +3813,48 @@ export default function App() {
           {/* Modal Registro de Entrada de Productos (Diseño Exacto Imagen 3) */}
           {showProductAdd && (
             <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center p-0 sm:p-4">
-              <div className="absolute inset-0 bg-black/50 backdrop-blur-xs" onClick={() => setShowProductAdd(false)}></div>
+              <div className="absolute inset-0 bg-slate-950/55 backdrop-blur-xs" onClick={() => setShowProductAdd(false)}></div>
               <div className="relative w-full sm:max-w-3xl bg-slate-50 rounded-t-3xl sm:rounded-3xl shadow-2xl flex flex-col overflow-hidden anim-slide-up sm:anim-pop-in max-h-[92vh] border border-slate-200">
                 {/* Cabecera del Modal (Imagen 3) */}
                 <div className="px-6 py-4 flex items-center justify-between border-b border-slate-200 bg-white shrink-0">
                   <div className="flex items-center gap-3.5">
-                    <div className="w-10 h-10 rounded-full bg-teal-50 border border-teal-100 flex items-center justify-center text-teal-600 shrink-0">
+                    <div className="w-11 h-11 rounded-2xl bg-teal-50 border border-teal-200 flex items-center justify-center text-teal-700 shrink-0">
                       <FileText className="w-5 h-5" />
                     </div>
                     <div>
-                      <h2 className="font-black text-slate-900 text-base uppercase tracking-wide leading-tight">
+                      <h2 className="font-extrabold text-slate-900 text-base uppercase tracking-wide leading-tight">
                         REGISTRO DE ENTRADA DE PRODUCTOS
                       </h2>
-                      <p className="text-xs text-slate-500 font-medium mt-0.5">
+                      <p className="text-xs text-slate-500 font-semibold mt-0.5">
                         Agrega los productos a la lista temporal de la factura y confirma la entrada en un solo paso
                       </p>
                     </div>
                   </div>
                   <button
                     onClick={() => setShowProductAdd(false)}
-                    className="p-2 text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded-xl transition cursor-pointer"
+                    className="p-2 text-slate-400 hover:text-slate-700 hover:bg-slate-100 rounded-xl transition cursor-pointer"
                   >
                     <X className="w-5 h-5" />
                   </button>
                 </div>
 
                 {/* Cuerpo con Scroll */}
-                <div className="flex-1 overflow-y-auto px-5 sm:px-6 py-5 space-y-5 bg-slate-50/60">
+                <div className="flex-1 overflow-y-auto px-5 sm:px-6 py-5 space-y-5 bg-slate-50">
                   {/* SECCIÓN 1: INFORMACIÓN DE LA FACTURA / COMPROBANTE */}
                   <div className="bg-white rounded-2xl border border-slate-200/90 p-5 shadow-2xs space-y-4">
-                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-1">
-                      <h3 className="flex items-center gap-2 text-xs font-black uppercase tracking-wider text-teal-800">
+                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-1 border-b border-slate-100 pb-3">
+                      <h3 className="flex items-center gap-2 text-xs font-extrabold uppercase tracking-wider text-teal-800">
                         <FileText className="w-4 h-4 text-teal-600" />
                         <span>1. INFORMACIÓN DE LA FACTURA / COMPROBANTE</span>
                       </h3>
-                      <span className="text-[11px] font-semibold text-slate-400">
+                      <span className="text-[11px] font-semibold text-slate-500">
                         Los productos registrados quedarán agrupados bajo esta factura
                       </span>
                     </div>
 
                     <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
                       <div>
-                        <label className="block text-[11px] font-black text-slate-600 uppercase tracking-wider mb-1.5">
+                        <label className="block text-[11px] font-extrabold text-slate-700 uppercase tracking-wider mb-1.5">
                           N.º DE FACTURA *
                         </label>
                         <input
@@ -3389,24 +3862,24 @@ export default function App() {
                           placeholder="EJ. F100094"
                           value={invoiceNum}
                           onChange={(e) => setInvoiceNum(e.target.value)}
-                          className="w-full rounded-xl border border-slate-200 px-3.5 py-2.5 text-xs font-bold uppercase text-slate-800 bg-slate-50/70 focus:bg-white outline-none focus:ring-2 focus:ring-teal-400 transition"
+                          className="w-full rounded-xl border border-slate-300 px-3.5 py-2.5 text-xs font-mono font-bold uppercase text-slate-900 bg-white outline-none focus:ring-2 focus:ring-teal-500/30 transition"
                         />
                       </div>
 
                       <div>
-                        <label className="block text-[11px] font-black text-slate-600 uppercase tracking-wider mb-1.5">
+                        <label className="block text-[11px] font-extrabold text-slate-700 uppercase tracking-wider mb-1.5">
                           FECHA DE ENTRADA *
                         </label>
                         <input
                           type="date"
                           value={invoiceDate}
                           onChange={(e) => setInvoiceDate(e.target.value)}
-                          className="w-full rounded-xl border border-slate-200 px-3.5 py-2.5 text-xs font-bold text-slate-800 bg-slate-50/70 focus:bg-white outline-none focus:ring-2 focus:ring-teal-400 transition"
+                          className="w-full rounded-xl border border-slate-300 px-3.5 py-2.5 text-xs font-bold text-slate-900 bg-white outline-none focus:ring-2 focus:ring-teal-500/30 transition"
                         />
                       </div>
 
                       <div>
-                        <label className="block text-[11px] font-black text-slate-600 uppercase tracking-wider mb-1.5">
+                        <label className="block text-[11px] font-extrabold text-slate-700 uppercase tracking-wider mb-1.5">
                           PROVEEDOR / OBSERVACIÓN (OPCIONAL)
                         </label>
                         <input
@@ -3414,7 +3887,7 @@ export default function App() {
                           placeholder="Ej. Laboratorio Central / Compra"
                           value={invoiceSupplier}
                           onChange={(e) => setInvoiceSupplier(e.target.value)}
-                          className="w-full rounded-xl border border-slate-200 px-3.5 py-2.5 text-xs font-semibold text-slate-800 bg-slate-50/70 focus:bg-white outline-none focus:ring-2 focus:ring-teal-400 transition"
+                          className="w-full rounded-xl border border-slate-300 px-3.5 py-2.5 text-xs font-semibold text-slate-900 bg-white outline-none focus:ring-2 focus:ring-teal-500/30 transition"
                         />
                       </div>
                     </div>
@@ -3422,12 +3895,12 @@ export default function App() {
 
                   {/* SECCIÓN 2: CARGAR PRODUCTO A LA ENTRADA */}
                   <div className="bg-white rounded-2xl border border-slate-200/90 p-5 shadow-2xs space-y-4">
-                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-1">
-                      <h3 className="flex items-center gap-2 text-xs font-black uppercase tracking-wider text-slate-800">
+                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-1 border-b border-slate-100 pb-3">
+                      <h3 className="flex items-center gap-2 text-xs font-extrabold uppercase tracking-wider text-slate-800">
                         <Package className="w-4 h-4 text-teal-600" />
                         <span>2. CARGAR PRODUCTO A LA ENTRADA</span>
                       </h3>
-                      <span className="text-[11px] font-semibold text-slate-400">
+                      <span className="text-[11px] font-semibold text-slate-500">
                         Completa los datos y presiona "+ Añadir a la Lista"
                       </span>
                     </div>
@@ -3435,7 +3908,7 @@ export default function App() {
                     {/* Fila 1: Código + Nombre del Medicamento */}
                     <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
                       <div className="sm:col-span-1">
-                        <label className="block text-[11px] font-black text-slate-500 uppercase tracking-wider mb-1.5">
+                        <label className="block text-[11px] font-extrabold text-slate-700 uppercase tracking-wider mb-1.5">
                           CÓDIGO (OPCIONAL)
                         </label>
                         <input
@@ -3443,12 +3916,12 @@ export default function App() {
                           placeholder="AUTO O EJ. A100"
                           value={newProdCode}
                           onChange={(e) => setNewProdCode(e.target.value)}
-                          className="w-full rounded-xl border border-slate-200 px-3.5 py-2.5 text-xs outline-none focus:ring-2 focus:ring-teal-400 bg-slate-50/60 focus:bg-white font-bold uppercase text-slate-800"
+                          className="w-full rounded-xl border border-slate-300 px-3.5 py-2.5 text-xs outline-none focus:ring-2 focus:ring-teal-500/30 bg-white font-mono font-bold uppercase text-slate-900"
                         />
                       </div>
 
                       <div ref={nameSuggestionsRef} className="sm:col-span-2 relative">
-                        <label className="block text-[11px] font-black text-slate-500 uppercase tracking-wider mb-1.5">
+                        <label className="block text-[11px] font-extrabold text-slate-700 uppercase tracking-wider mb-1.5">
                           NOMBRE DEL MEDICAMENTO / INSUMO *
                         </label>
                         <input
@@ -3460,7 +3933,7 @@ export default function App() {
                             setShowNameSuggestions(true);
                           }}
                           onFocus={() => setShowNameSuggestions(true)}
-                          className="w-full rounded-xl border border-slate-200 px-3.5 py-2.5 text-xs font-semibold outline-none focus:ring-2 focus:ring-teal-400 bg-slate-50/60 focus:bg-white text-slate-800"
+                          className="w-full rounded-xl border border-slate-300 px-3.5 py-2.5 text-xs font-semibold outline-none focus:ring-2 focus:ring-teal-500/30 bg-white text-slate-900"
                         />
                         {showNameSuggestions && newProdName.trim().length > 0 && (() => {
                           const filteredSuggestions = products.filter(
@@ -3471,7 +3944,7 @@ export default function App() {
                           if (filteredSuggestions.length === 0) return null;
 
                           return (
-                            <div className="absolute left-0 right-0 mt-1 bg-white border border-slate-200 rounded-xl shadow-lg z-50 max-h-48 overflow-y-auto">
+                            <div className="absolute left-0 right-0 mt-1.5 bg-white border border-slate-200 rounded-xl shadow-xl z-50 max-h-52 overflow-y-auto">
                               {filteredSuggestions.map((prod) => (
                                 <button
                                   key={prod.codigo}
@@ -3483,10 +3956,10 @@ export default function App() {
                                     setShowNameSuggestions(false);
                                     playSound("click");
                                   }}
-                                  className="w-full text-left px-4 py-2.5 text-xs hover:bg-teal-50 hover:text-teal-700 transition font-bold border-b border-slate-100 last:border-0 flex justify-between items-center cursor-pointer"
+                                  className="w-full text-left px-4 py-2.5 text-xs hover:bg-teal-50 hover:text-teal-800 transition font-bold border-b border-slate-100 last:border-0 flex justify-between items-center cursor-pointer"
                                 >
                                   <span>{prod.nombre}</span>
-                                  <span className="text-[10px] text-slate-400 font-mono">{prod.codigo}</span>
+                                  <span className="text-[11px] text-teal-700 font-mono bg-teal-50 px-2 py-0.5 rounded">{prod.codigo}</span>
                                 </button>
                               ))}
                             </div>
@@ -3497,7 +3970,7 @@ export default function App() {
 
                     {/* Fila 2: Descripción o Presentación */}
                     <div>
-                      <label className="block text-[11px] font-black text-slate-500 uppercase tracking-wider mb-1.5">
+                      <label className="block text-[11px] font-extrabold text-slate-700 uppercase tracking-wider mb-1.5">
                         DESCRIPCIÓN O PRESENTACIÓN
                       </label>
                       <input
@@ -3505,14 +3978,14 @@ export default function App() {
                         placeholder="Ej. Caja por 100 cápsulas / Frasco 60ml"
                         value={newProdDesc}
                         onChange={(e) => setNewProdDesc(e.target.value)}
-                        className="w-full rounded-xl border border-slate-200 px-3.5 py-2.5 text-xs font-semibold outline-none focus:ring-2 focus:ring-teal-400 bg-slate-50/60 focus:bg-white text-slate-800"
+                        className="w-full rounded-xl border border-slate-300 px-3.5 py-2.5 text-xs font-semibold outline-none focus:ring-2 focus:ring-teal-500/30 bg-white text-slate-900"
                       />
                     </div>
 
                     {/* Fila 3: Lote (Sistema) + Lote F / Ubicación Física */}
                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                       <div>
-                        <label className="block text-[11px] font-black text-slate-500 uppercase tracking-wider mb-1.5">
+                        <label className="block text-[11px] font-extrabold text-slate-700 uppercase tracking-wider mb-1.5">
                           LOTE (SISTEMA) *
                         </label>
                         <input
@@ -3520,12 +3993,12 @@ export default function App() {
                           placeholder="EJ. LOT-8942"
                           value={newProdLotNum}
                           onChange={(e) => setNewProdLotNum(e.target.value)}
-                          className="w-full rounded-xl border border-slate-200 px-3.5 py-2.5 text-xs font-bold uppercase outline-none focus:ring-2 focus:ring-teal-400 bg-slate-50/60 focus:bg-white text-slate-800"
+                          className="w-full rounded-xl border border-slate-300 px-3.5 py-2.5 text-xs font-mono font-bold uppercase outline-none focus:ring-2 focus:ring-teal-500/30 bg-white text-slate-900"
                         />
                       </div>
 
                       <div>
-                        <label className="block text-[11px] font-black text-amber-600 uppercase tracking-wider mb-1.5">
+                        <label className="block text-[11px] font-extrabold text-amber-700 uppercase tracking-wider mb-1.5">
                           LOTE F / UBICACIÓN FÍSICA
                         </label>
                         <input
@@ -3533,7 +4006,7 @@ export default function App() {
                           placeholder="EJ. ESTANTE A-2"
                           value={newProdLotLocation}
                           onChange={(e) => setNewProdLotLocation(e.target.value)}
-                          className="w-full rounded-xl border border-amber-300 bg-amber-50/40 px-3.5 py-2.5 text-xs font-bold uppercase outline-none focus:ring-2 focus:ring-amber-400 text-slate-800"
+                          className="w-full rounded-xl border border-amber-300 bg-amber-50/40 px-3.5 py-2.5 text-xs font-bold uppercase outline-none focus:ring-2 focus:ring-amber-400 text-slate-900"
                         />
                       </div>
                     </div>
@@ -3541,7 +4014,7 @@ export default function App() {
                     {/* Fila 4: Cantidad (Sistema) + Cantidad F (Física) + Costo Adquisición Unit. (RD$) */}
                     <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
                       <div>
-                        <label className="block text-[11px] font-black text-slate-500 uppercase tracking-wider mb-1.5">
+                        <label className="block text-[11px] font-extrabold text-slate-700 uppercase tracking-wider mb-1.5">
                           CANTIDAD (SISTEMA) *
                         </label>
                         <input
@@ -3550,12 +4023,12 @@ export default function App() {
                           placeholder="Ej. 10"
                           value={newProdLotQty}
                           onChange={(e) => setNewProdLotQty(e.target.value)}
-                          className="w-full rounded-xl border border-slate-200 px-3.5 py-2.5 text-xs font-bold outline-none focus:ring-2 focus:ring-teal-400 bg-slate-50/60 focus:bg-white text-slate-800"
+                          className="w-full rounded-xl border border-slate-300 px-3.5 py-2.5 text-xs font-bold outline-none focus:ring-2 focus:ring-teal-500/30 bg-white text-slate-900 tabular-nums"
                         />
                       </div>
 
                       <div>
-                        <label className="block text-[11px] font-black text-amber-600 uppercase tracking-wider mb-1.5">
+                        <label className="block text-[11px] font-extrabold text-amber-700 uppercase tracking-wider mb-1.5">
                           CANTIDAD F (FÍSICA)
                         </label>
                         <input
@@ -3564,12 +4037,12 @@ export default function App() {
                           placeholder="Dejar vacío para igualar"
                           value={newProdLotQtyF}
                           onChange={(e) => setNewProdLotQtyF(e.target.value)}
-                          className="w-full rounded-xl border border-amber-300 bg-amber-50/40 px-3.5 py-2.5 text-xs font-bold outline-none focus:ring-2 focus:ring-amber-400 text-slate-800"
+                          className="w-full rounded-xl border border-amber-300 bg-amber-50/40 px-3.5 py-2.5 text-xs font-bold outline-none focus:ring-2 focus:ring-amber-400 text-slate-900 tabular-nums"
                         />
                       </div>
 
                       <div>
-                        <label className="block text-[11px] font-black text-slate-500 uppercase tracking-wider mb-1.5">
+                        <label className="block text-[11px] font-extrabold text-slate-700 uppercase tracking-wider mb-1.5">
                           COSTO ADQUISICIÓN UNIT. (RD$) *
                         </label>
                         <input
@@ -3579,7 +4052,7 @@ export default function App() {
                           placeholder="0.00"
                           value={newProdLotPrice}
                           onChange={(e) => setNewProdLotPrice(e.target.value)}
-                          className="w-full rounded-xl border border-slate-200 px-3.5 py-2.5 text-xs font-bold outline-none focus:ring-2 focus:ring-teal-400 bg-slate-50/60 focus:bg-white text-slate-800"
+                          className="w-full rounded-xl border border-slate-300 px-3.5 py-2.5 text-xs font-bold outline-none focus:ring-2 focus:ring-teal-500/30 bg-white text-slate-900 tabular-nums"
                         />
                       </div>
                     </div>
@@ -3587,36 +4060,58 @@ export default function App() {
                     {/* Fila 5: Fecha Vencimiento (Sistema) + Fecha Vencimiento F (Física) */}
                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                       <div>
-                        <label className="block text-[11px] font-black text-slate-500 uppercase tracking-wider mb-1.5">
+                        <label className="block text-[11px] font-extrabold text-slate-700 uppercase tracking-wider mb-1.5">
                           FECHA VENCIMIENTO (SISTEMA) *
                         </label>
                         <input
                           type="date"
                           value={newProdLotExpDate}
                           onChange={(e) => setNewProdLotExpDate(e.target.value)}
-                          className="w-full rounded-xl border border-slate-200 px-3.5 py-2.5 text-xs font-bold outline-none focus:ring-2 focus:ring-teal-400 bg-slate-50/60 focus:bg-white text-slate-800"
+                          className="w-full rounded-xl border border-slate-300 px-3.5 py-2.5 text-xs font-bold outline-none focus:ring-2 focus:ring-teal-500/30 bg-white text-slate-900"
                         />
                       </div>
 
                       <div>
-                        <label className="block text-[11px] font-black text-amber-600 uppercase tracking-wider mb-1.5">
+                        <label className="block text-[11px] font-extrabold text-amber-700 uppercase tracking-wider mb-1.5">
                           FECHA VENCIMIENTO F (FÍSICA)
                         </label>
                         <input
                           type="date"
                           value={newProdLotPhysExpDate}
                           onChange={(e) => setNewProdLotPhysExpDate(e.target.value)}
-                          className="w-full rounded-xl border border-amber-300 bg-amber-50/40 px-3.5 py-2.5 text-xs font-bold outline-none focus:ring-2 focus:ring-amber-400 text-slate-800"
+                          className="w-full rounded-xl border border-amber-300 bg-amber-50/40 px-3.5 py-2.5 text-xs font-bold outline-none focus:ring-2 focus:ring-amber-400 text-slate-900"
                         />
                       </div>
                     </div>
 
-                    {/* Botón + AÑADIR A LA LISTA DE ENTRADA */}
+                    {/* Fila 6: Fotografía del Producto (Opcional) */}
+                    <div className="pt-1">
+                      <PhotoCaptureField
+                        label="FOTOGRAFÍA DEL PRODUCTO (OPCIONAL)"
+                        currentImageUrl={newProdPhoto || undefined}
+                        onConfirmImage={(dataUrl) => {
+                          setNewProdPhoto(dataUrl);
+                          setPendingNewProdPhoto(null);
+                          showToast("Fotografía confirmada para el producto.");
+                          playSound("positive");
+                        }}
+                        onDeleteImage={() => {
+                          setNewProdPhoto("");
+                          setPendingNewProdPhoto(null);
+                          playSound("negative");
+                        }}
+                        onPendingChange={setPendingNewProdPhoto}
+                        placeholderText="Toma una fotografía al momento o selecciona una desde el dispositivo"
+                        heightClass="h-40"
+                        objectFit="cover"
+                        compact
+                      />
+                    </div>
                     <div className="pt-2 flex justify-end">
                       <button
                         type="button"
                         onClick={handleAddPendingEntryItem}
-                        className="px-5 py-2.5 bg-teal-900 hover:bg-teal-800 active:scale-95 text-white font-black text-xs uppercase tracking-wider rounded-xl transition flex items-center gap-2 shadow-xs cursor-pointer"
+                        className="px-5 py-3 bg-teal-900 hover:bg-teal-800 active:scale-95 text-white font-extrabold text-xs uppercase tracking-wider rounded-xl transition flex items-center gap-2 shadow-sm cursor-pointer"
                       >
                         <Plus className="w-4 h-4" />
                         <span>+ AÑADIR A LA LISTA DE ENTRADA</span>
@@ -3626,18 +4121,18 @@ export default function App() {
 
                   {/* SECCIÓN 3: PRODUCTOS PENDIENTES DE ENTRADA */}
                   <div className="space-y-3">
-                    <h3 className="flex items-center gap-2 text-xs font-black uppercase tracking-wider text-slate-800 px-1">
+                    <h3 className="flex items-center gap-2 text-xs font-extrabold uppercase tracking-wider text-slate-800 px-1">
                       <Layers className="w-4 h-4 text-teal-600" />
                       <span>3. PRODUCTOS PENDIENTES DE ENTRADA ({pendingEntryItems.length})</span>
                     </h3>
 
                     {pendingEntryItems.length === 0 ? (
-                      <div className="bg-white/80 rounded-2xl border-2 border-dashed border-slate-200 p-8 text-center space-y-2">
-                        <Package className="w-9 h-9 text-slate-300 mx-auto stroke-[1.5]" />
+                      <div className="bg-white rounded-2xl border-2 border-dashed border-slate-300 p-8 text-center space-y-2">
+                        <Package className="w-9 h-9 text-slate-400 mx-auto stroke-[1.5]" />
                         <p className="text-xs font-extrabold text-slate-700">
                           Aún no has agregado productos a esta entrada
                         </p>
-                        <p className="text-[11px] text-slate-400 max-w-md mx-auto leading-relaxed">
+                        <p className="text-[11px] text-slate-500 max-w-md mx-auto leading-relaxed">
                           Completa los campos del formulario superior y haz clic en "+ Añadir a la Lista de Entrada". Los productos se mantendrán en esta tabla antes de aplicarse a la base de datos.
                         </p>
                       </div>
@@ -3646,7 +4141,7 @@ export default function App() {
                         <div className="overflow-x-auto">
                           <table className="min-w-[640px] w-full text-left border-collapse text-xs">
                             <thead>
-                              <tr className="bg-slate-100 border-b border-slate-200 text-[10px] font-black uppercase text-slate-500 tracking-wider">
+                              <tr className="bg-slate-100 border-b border-slate-200 text-[10px] font-extrabold uppercase text-slate-600 tracking-wider">
                                 <th className="px-4 py-3">Código</th>
                                 <th className="px-4 py-3">Medicamento / Insumo</th>
                                 <th className="px-4 py-3">Lote / Ubic.</th>
@@ -3662,26 +4157,26 @@ export default function App() {
                                 const sub = it.cantidad * it.precio;
                                 return (
                                   <tr key={it.tempId} className="hover:bg-slate-50/80">
-                                    <td className="px-4 py-3 font-mono font-black text-teal-700">{it.codigo}</td>
+                                    <td className="px-4 py-3 font-mono font-extrabold text-teal-800">{it.codigo}</td>
                                     <td className="px-4 py-3">
-                                      <p className="font-bold text-slate-800">{it.nombre}</p>
-                                      {it.descripcion && <p className="text-[10px] text-slate-400">{it.descripcion}</p>}
+                                      <p className="font-bold text-slate-900">{it.nombre}</p>
+                                      {it.descripcion && <p className="text-[10px] text-slate-500">{it.descripcion}</p>}
                                     </td>
-                                    <td className="px-4 py-3 font-mono font-bold text-slate-700">
+                                    <td className="px-4 py-3 font-mono font-bold text-slate-800">
                                       {it.numeroLote}
                                       <span className="block text-[10px] text-amber-700 font-sans">
                                         {it.loteFisico}
                                       </span>
                                     </td>
-                                    <td className="px-4 py-3 text-right font-bold text-slate-800">
+                                    <td className="px-4 py-3 text-right font-bold text-slate-900 tabular-nums">
                                       {it.cantidad}{" "}
                                       <span className="text-[10px] text-amber-700">({it.cantidadF})</span>
                                     </td>
-                                    <td className="px-4 py-3 text-slate-600 font-semibold">{it.fechaVencimiento}</td>
-                                    <td className="px-4 py-3 text-right font-semibold text-slate-600">
+                                    <td className="px-4 py-3 text-slate-700 font-semibold tabular-nums">{it.fechaVencimiento}</td>
+                                    <td className="px-4 py-3 text-right font-semibold text-slate-700 tabular-nums">
                                       RD$ {it.precio.toFixed(2)}
                                     </td>
-                                    <td className="px-4 py-3 text-right font-black text-teal-800">
+                                    <td className="px-4 py-3 text-right font-extrabold text-teal-800 tabular-nums">
                                       RD$ {sub.toFixed(2)}
                                     </td>
                                     <td className="px-3 py-3 text-center">
@@ -3710,7 +4205,7 @@ export default function App() {
                   <button
                     type="button"
                     onClick={() => setShowProductAdd(false)}
-                    className="w-full sm:w-auto px-6 py-3 rounded-xl border border-slate-200 bg-white hover:bg-slate-50 text-slate-700 font-bold text-xs transition cursor-pointer"
+                    className="w-full sm:w-auto px-6 py-3 rounded-xl border border-slate-300 bg-white hover:bg-slate-50 text-slate-700 font-extrabold text-xs transition cursor-pointer"
                   >
                     Cerrar
                   </button>
@@ -3719,7 +4214,7 @@ export default function App() {
                     type="button"
                     disabled={pendingEntryItems.length === 0 || confirmingEntry}
                     onClick={handleAddProductSubmit}
-                    className={`w-full sm:w-auto px-7 py-3.5 rounded-xl font-black text-xs uppercase tracking-wider transition flex items-center justify-center gap-2 ${
+                    className={`w-full sm:w-auto px-7 py-3.5 rounded-xl font-extrabold text-xs uppercase tracking-wider transition flex items-center justify-center gap-2 ${
                       pendingEntryItems.length === 0 || confirmingEntry
                         ? "bg-slate-200 text-slate-500 cursor-not-allowed"
                         : "bg-teal-700 hover:bg-teal-800 text-white shadow-sm active:scale-95 cursor-pointer"

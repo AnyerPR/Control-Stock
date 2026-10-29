@@ -2,9 +2,9 @@ import React, { useRef, useState } from "react";
 import * as XLSX from "xlsx";
 import { doc, writeBatch } from "firebase/firestore";
 import { db, tenantCollection } from "../firebase";
-import { Producto, Usuario, Lote, Movimiento } from "../types";
+import { Producto, Usuario, Lote, Movimiento, Catalogo, matchesCatalog } from "../types";
 import { playSound } from "../utils/audio";
-import { FileSpreadsheet, Upload, AlertCircle, CheckCircle, HelpCircle, X } from "lucide-react";
+import { FileSpreadsheet, Upload, AlertCircle, CheckCircle, HelpCircle, X, Layers } from "lucide-react";
 
 interface CargaMasivaProps {
   products: Producto[];
@@ -12,6 +12,8 @@ interface CargaMasivaProps {
   onImportComplete: (updatedProducts: Producto[]) => void;
   showToast: (message: string) => void;
   activeCatalogId: string;
+  catalogos?: Catalogo[];
+  onSelectCatalog?: (catalogId: string) => void;
 }
 
 interface ImportSummary {
@@ -22,7 +24,7 @@ interface ImportSummary {
   errors: string[];
 }
 
-export default function CargaMasiva({ products, currentUser, onImportComplete, showToast, activeCatalogId }: CargaMasivaProps) {
+export default function CargaMasiva({ products, currentUser, onImportComplete, showToast, activeCatalogId, catalogos = [], onSelectCatalog }: CargaMasivaProps) {
   const [isDragging, setIsDragging] = useState(false);
   const [loading, setLoading] = useState(false);
   const [summary, setSummary] = useState<ImportSummary | null>(null);
@@ -128,12 +130,11 @@ export default function CargaMasiva({ products, currentUser, onImportComplete, s
         const errors: string[] = [];
         let importedCount = 0;
 
-        // Map existing products by name and code for fast lookup (filtered by activeCatalogId)
+        // Map existing products by name and code for fast lookup (filtered by activeCatalogId using canonical matching)
         const productsMapByName = new Map<string, Producto>();
         const productsMapByCode = new Map<string, Producto>();
         products.forEach((p) => {
-          const prodCatalogId = p.catalogId || "default-cat";
-          if (prodCatalogId === activeCatalogId) {
+          if (matchesCatalog(p.catalogId, activeCatalogId, catalogos)) {
             const cleanName = p.nombre.toLowerCase().replace(/\s+/g, "");
             productsMapByName.set(cleanName, p);
             productsMapByCode.set(p.codigo.toLowerCase(), p);
@@ -307,12 +308,38 @@ export default function CargaMasiva({ products, currentUser, onImportComplete, s
   return (
     <div className="space-y-6">
       <div className="bg-white rounded-3xl p-6 border border-slate-200 shadow-sm">
-        <h3 className="text-lg font-bold text-slate-900 mb-2">Importar Inventario desde Excel</h3>
-        <p className="text-slate-500 text-sm mb-6">
-          Sube un archivo de Excel (.xlsx o .xls) para registrar y crear nuevos lotes de medicamentos y suministros.
-          El archivo debe incluir columnas como:{" "}
-          <span className="font-semibold text-teal-800">Medicamento (o Nombre), Lote, Fecha Vencimiento, Cantidad, Precio</span>.
-        </p>
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-4">
+          <div>
+            <h3 className="text-lg font-bold text-slate-900 mb-1">Importar Inventario desde Excel</h3>
+            <p className="text-slate-500 text-sm">
+              Sube un archivo de Excel (.xlsx o .xls) para registrar y crear nuevos lotes de medicamentos y suministros.
+              El archivo debe incluir columnas como:{" "}
+              <span className="font-semibold text-teal-800">Medicamento (o Nombre), Lote, Fecha Vencimiento, Cantidad, Precio</span>.
+            </p>
+          </div>
+          {catalogos.length > 0 && (
+            <div className="bg-teal-50/70 border border-teal-200 rounded-2xl px-4 py-2.5 shrink-0">
+              <label className="block text-[10px] font-black uppercase text-teal-800 tracking-wider mb-1 flex items-center gap-1">
+                <Layers className="w-3.5 h-3.5 text-teal-600" />
+                Catálogo Destino de Importación
+              </label>
+              <select
+                value={activeCatalogId}
+                onChange={(e) => {
+                  if (onSelectCatalog) onSelectCatalog(e.target.value);
+                  playSound("click");
+                }}
+                className="w-full bg-white border border-teal-300 rounded-xl px-3 py-1.5 text-xs font-extrabold text-teal-950 outline-none focus:ring-2 focus:ring-teal-500 cursor-pointer"
+              >
+                {catalogos.map((cat) => (
+                  <option key={cat.id} value={cat.id}>
+                    {cat.nombre}
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
+        </div>
 
         <form
           onDragEnter={handleDrag}

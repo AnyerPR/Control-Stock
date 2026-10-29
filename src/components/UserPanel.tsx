@@ -98,9 +98,19 @@ export default function UserPanel({
       setEditModulos(["solicitudes", "historial"]);
     }
 
-    // Set catalogos
-    if (user.catalogos && Array.isArray(user.catalogos)) {
-      setEditCatalogos(user.catalogos);
+    // Set catalogos (normalizados por ID para que coincidan siempre con las casillas)
+    if (user.catalogos && Array.isArray(user.catalogos) && user.catalogos.length > 0) {
+      const normalizedIds = catalogos
+        .filter((cat) =>
+          user.catalogos!.some(
+            (uc) =>
+              uc === cat.id ||
+              String(uc).trim().toLowerCase() === String(cat.id).trim().toLowerCase() ||
+              String(uc).trim().toLowerCase() === String(cat.nombre).trim().toLowerCase()
+          )
+        )
+        .map((cat) => cat.id);
+      setEditCatalogos(normalizedIds.length > 0 ? normalizedIds : user.catalogos);
     } else {
       setEditCatalogos([]);
     }
@@ -305,12 +315,21 @@ export default function UserPanel({
                     <td className="px-4 py-3 font-semibold text-slate-700">
                       {u.departamento || "Almacén y Suministro"}
                     </td>
-                    <td className="px-4 py-3 max-w-[220px]">
+                    <td className="px-4 py-3 max-w-[240px]">
                       <div className="flex flex-wrap gap-1">
                         {(() => {
-                          const mods = u.modulos && Array.isArray(u.modulos) ? u.modulos : (u.rol === "Administrador" ? ["inventory", "carga_masiva", "solicitudes", "historial", "usuarios", "configuracion"] : ["solicitudes", "historial"]);
+                          const mods =
+                            u.modulos && Array.isArray(u.modulos)
+                              ? u.modulos
+                              : u.rol === "Administrador"
+                              ? u.usuario?.toLowerCase() === "anyer"
+                                ? ["inventory", "venta", "carga_masiva", "solicitudes", "historial", "usuarios", "configuracion"]
+                                : ["inventory", "carga_masiva", "solicitudes", "historial", "usuarios", "configuracion"]
+                              : ["solicitudes", "historial"];
                           const mapModNames: Record<string, string> = {
+                            dashboard: "Dashboard",
                             inventory: "Suministros",
+                            venta: "Venta",
                             carga_masiva: "Carga Masiva",
                             solicitudes: u.rol === "Administrador" ? "Órdenes" : "Solicitudes",
                             historial: "Historial",
@@ -318,12 +337,39 @@ export default function UserPanel({
                             configuracion: "Configurar"
                           };
                           return mods.map((m) => (
-                            <span key={m} className="text-[10px] bg-teal-50 border border-teal-100 text-teal-800 px-2 py-0.5 rounded-full font-extrabold whitespace-nowrap">
+                            <span
+                              key={m}
+                              className={`text-[10px] border px-2 py-0.5 rounded-full font-extrabold whitespace-nowrap ${
+                                m === "venta"
+                                  ? "bg-emerald-50 border-emerald-200 text-emerald-800"
+                                  : "bg-teal-50 border-teal-100 text-teal-800"
+                              }`}
+                            >
                               {mapModNames[m] || m}
                             </span>
                           ));
                         })()}
                       </div>
+                      {u.catalogos && u.catalogos.length > 0 && (
+                        <div className="flex flex-wrap gap-1 mt-1.5 pt-1 border-t border-slate-100">
+                          {u.catalogos.map((cId) => {
+                            const catObj = catalogos.find(
+                              (c) =>
+                                c.id === cId ||
+                                c.id.toLowerCase() === String(cId).toLowerCase() ||
+                                c.nombre.toLowerCase() === String(cId).toLowerCase()
+                            );
+                            return (
+                              <span
+                                key={cId}
+                                className="text-[9px] bg-slate-100 border border-slate-200 text-slate-600 px-1.5 py-0.5 rounded-md font-bold whitespace-nowrap"
+                              >
+                                📚 {catObj ? catObj.nombre : cId}
+                              </span>
+                            );
+                          })}
+                        </div>
+                      )}
                     </td>
                     <td className="px-4 py-3">
                       <button

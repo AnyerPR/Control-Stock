@@ -23,6 +23,7 @@ import {
   DEFAULT_CONCEPTOS_FACTURA
 } from "../types";
 import { hashPassword } from "./Login";
+import PhotoCaptureField from "./PhotoCaptureField";
 import { playSound } from "../utils/audio";
 import {
   RefreshCw,
@@ -1440,62 +1441,29 @@ export default function ConfiguracionPanel({
                 </p>
               </div>
 
-              <div
-                onClick={() => logoInputRef.current?.click()}
-                className="relative h-44 rounded-2xl border-2 border-dashed border-slate-200 bg-white flex flex-col items-center justify-center p-4 text-center cursor-pointer hover:border-teal-400 transition group overflow-hidden"
-              >
-                {instLogoUrl ? (
-                  <>
-                    <img
-                      src={instLogoUrl}
-                      alt="Logotipo Institucional"
-                      className="max-h-36 max-w-full object-contain"
-                    />
-                    <button
-                      type="button"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        setInstLogoUrl("");
-                        playSound("negative");
-                      }}
-                      className="absolute top-2.5 right-2.5 bg-slate-900/70 hover:bg-rose-600 text-white rounded-full p-1.5 transition shadow-xs"
-                      title="Quitar logotipo"
-                    >
-                      <X className="w-3.5 h-3.5" />
-                    </button>
-                  </>
-                ) : (
-                  <div className="flex flex-col items-center justify-center space-y-1.5">
-                    <div className="w-11 h-11 rounded-xl bg-slate-50 border border-slate-200 flex items-center justify-center text-slate-300 group-hover:text-teal-500 transition">
-                      <ImageIcon className="w-6 h-6" />
-                    </div>
-                    <p className="text-xs font-bold text-slate-600">Sin logotipo asignado</p>
-                    <p className="text-[11px] text-slate-400">Haga clic abajo para cargar el logo</p>
-                  </div>
-                )}
-              </div>
-
-              <input
-                ref={logoInputRef}
-                type="file"
-                accept="image/png,image/jpeg,image/svg+xml,image/webp"
-                onChange={handleLogoFileChange}
-                className="hidden"
+              <PhotoCaptureField
+                currentImageUrl={instLogoUrl || undefined}
+                onConfirmImage={(dataUrl) => {
+                  setInstLogoUrl(dataUrl);
+                  showToast("Logotipo confirmado. Pulsa Guardar Datos de la Institución para aplicar.");
+                  playSound("positive");
+                }}
+                onDeleteImage={() => {
+                  setInstLogoUrl("");
+                  playSound("negative");
+                }}
+                onPendingChange={(pendingUrl) => {
+                  if (pendingUrl) {
+                    setInstLogoUrl(pendingUrl);
+                  }
+                }}
+                placeholderText="Sin logotipo asignado. Toma una foto o selecciona una imagen desde tu dispositivo"
+                helperText="Formatos recomendados: PNG, SVG o foto nítida (máx. 2.5 MB)."
+                heightClass="h-44"
+                objectFit="contain"
+                preserveSvg={true}
+                maxDimension={360}
               />
-
-              <div className="pt-1 space-y-2 text-center">
-                <button
-                  type="button"
-                  onClick={() => logoInputRef.current?.click()}
-                  className="w-full bg-white hover:bg-teal-50/50 text-teal-700 border border-slate-200 hover:border-teal-300 font-extrabold text-xs py-2.5 px-4 rounded-xl transition flex items-center justify-center gap-2 shadow-2xs cursor-pointer"
-                >
-                  <Upload className="w-4 h-4" />
-                  <span>Subir Logotipo</span>
-                </button>
-                <p className="text-[10px] text-slate-400 font-medium">
-                  Formatos recomendados: PNG o SVG con fondo transparente (máx. 2.5 MB).
-                </p>
-              </div>
             </div>
           </div>
 

@@ -55,6 +55,11 @@ export default function ChatLateral({ currentUser }: ChatLateralProps) {
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
   const firstLoadRef = useRef(true);
   const isLoadingMoreRef = useRef(false);
+  const isOpenRef = useRef(isOpen);
+
+  useEffect(() => {
+    isOpenRef.current = isOpen;
+  }, [isOpen]);
 
   const isAnyer = 
     currentUser?.usuario?.trim().toLowerCase() === "anyer" || 
@@ -170,7 +175,7 @@ export default function ChatLateral({ currentUser }: ChatLateralProps) {
         const isRecent = Date.now() - lastMsg.timestamp < 10000;
         if (isRecent && lastMsg.usuarioId !== currentUser.id) {
           playSound("notify");
-          if (!isOpen) {
+          if (!isOpenRef.current) {
             setUnreadCount((prev) => prev + 1);
           }
         }
@@ -182,7 +187,7 @@ export default function ChatLateral({ currentUser }: ChatLateralProps) {
     });
 
     return () => unsubscribe();
-  }, [currentUser.id, isOpen, limitAmount, isLocalFileMode]);
+  }, [currentUser.id, currentUser.farmaciaId, limitAmount, isLocalFileMode]);
 
   // Handle auto-scroll to bottom
   const scrollToBottom = () => {
