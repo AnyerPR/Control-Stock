@@ -10,6 +10,7 @@ import {
   Lote,
   Movimiento,
   SolicitudItem,
+  DespachoLote,
   Departamento,
   getUserAvailableCatalogos,
   isCatalogAllowedForUser,
@@ -494,6 +495,18 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
 
   const [deliveryItems, setDeliveryItems] = useState<SolicitudItem[]>([]);
 
+  const getItemDeliveryLots = (item: SolicitudItem): DespachoLote[] => {
+    if (item.despachoLotes?.length) return item.despachoLotes;
+    if (item.loteId && item.cantidadEntregada > 0) {
+      return [{
+        loteId: item.loteId,
+        loteNumero: item.loteNumero || "",
+        cantidad: item.cantidadEntregada
+      }];
+    }
+    return [];
+  };
+
   const getExportItems = (sol: Solicitud) => {
     if (selectedSolicitud && selectedSolicitud.id === sol.id && deliveryItems && deliveryItems.length > 0) {
       return deliveryItems;
@@ -509,10 +522,18 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
         motivoDiferencia: ""
       }];
     }
-    return itemsList.map(item => ({
-      ...item,
-      cantidadEntregada: item.cantidadEntregada !== undefined ? item.cantidadEntregada : item.cantidadSolicitada
-    }));
+    return itemsList.map(item => {
+      const cantidadEntregada = item.cantidadEntregada !== undefined ? item.cantidadEntregada : item.cantidadSolicitada;
+      return {
+        ...item,
+        cantidadEntregada,
+        despachoLotes: item.despachoLotes?.length
+          ? item.despachoLotes
+          : item.loteId && cantidadEntregada > 0
+            ? [{ loteId: item.loteId, loteNumero: item.loteNumero || "", cantidad: cantidadEntregada }]
+            : []
+      };
+    });
   };
 
   const exportToWord = (sol: Solicitud) => {
@@ -521,11 +542,16 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
     
     const itemsRows = items.map((item, idx) => {
       const prod = products?.find(p => p.codigo === item.productoCodigo);
-      const price = item.loteId && prod 
-        ? prod.lotes?.find((l: Lote) => l.id === item.loteId)?.precio || prod.lotes?.[0]?.precio || 0
-        : prod?.lotes?.[0]?.precio || 0;
+      const deliveryLots = getItemDeliveryLots(item);
       const qty = item.cantidadEntregada;
-      const sub = qty * price;
+      const sub = deliveryLots.length && prod
+        ? deliveryLots.reduce((sum, allocation) => {
+            const lot = prod.lotes?.find((entry: Lote) => entry.id === allocation.loteId);
+            return sum + allocation.cantidad * Number(lot?.precio || 0);
+          }, 0)
+        : qty * Number(prod?.lotes?.[0]?.precio || 0);
+      const price = qty > 0 ? sub / qty : 0;
+      const lotDetails = deliveryLots.map(allocation => `Lote ${allocation.loteNumero || allocation.loteId}: ${allocation.cantidad}`).join("<br/>") || "—";
       total += sub;
       
       return `
@@ -535,6 +561,7 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
           <td style="border: 1px solid #cbd5e1; padding: 10px; text-align: left; font-size: 11px;">${item.productoNombre}</td>
           <td style="border: 1px solid #cbd5e1; padding: 10px; text-align: center; font-size: 11px;">${item.cantidadSolicitada}</td>
           <td style="border: 1px solid #cbd5e1; padding: 10px; text-align: center; font-size: 11px; font-weight: bold;">${qty}</td>
+          <td style="border: 1px solid #cbd5e1; padding: 10px; text-align: left; font-size: 11px;">${lotDetails}</td>
           <td style="border: 1px solid #cbd5e1; padding: 10px; text-align: right; font-size: 11px;">RD$ ${price.toFixed(2)}</td>
           <td style="border: 1px solid #cbd5e1; padding: 10px; text-align: right; font-size: 11px; font-weight: bold;">RD$ ${sub.toFixed(2)}</td>
         </tr>
@@ -610,6 +637,7 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
               <th style="width: 35%;">Nombre del Insumo / Medicamento</th>
               <th style="width: 10%; text-align: center;">Cant. Sol.</th>
               <th style="width: 10%; text-align: center;">Cant. Ent.</th>
+              <th style="width: 20%;">Lotes despachados</th>
               <th style="width: 12%; text-align: right;">Precio Unit.</th>
               <th style="width: 13%; text-align: right;">Importe</th>
             </tr>
@@ -678,11 +706,16 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
     
     const itemsRows = items.map((item, idx) => {
       const prod = products?.find(p => p.codigo === item.productoCodigo);
-      const price = item.loteId && prod 
-        ? prod.lotes?.find((l: Lote) => l.id === item.loteId)?.precio || prod.lotes?.[0]?.precio || 0
-        : prod?.lotes?.[0]?.precio || 0;
+      const deliveryLots = getItemDeliveryLots(item);
       const qty = item.cantidadEntregada;
-      const sub = qty * price;
+      const sub = deliveryLots.length && prod
+        ? deliveryLots.reduce((sum, allocation) => {
+            const lot = prod.lotes?.find((entry: Lote) => entry.id === allocation.loteId);
+            return sum + allocation.cantidad * Number(lot?.precio || 0);
+          }, 0)
+        : qty * Number(prod?.lotes?.[0]?.precio || 0);
+      const price = qty > 0 ? sub / qty : 0;
+      const lotDetails = deliveryLots.map(allocation => `Lote ${allocation.loteNumero || allocation.loteId}: ${allocation.cantidad}`).join("<br/>") || "—";
       total += sub;
       
       return `
@@ -692,6 +725,7 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
           <td class="py-3 px-4 font-medium text-slate-800">${item.productoNombre}</td>
           <td class="py-3 px-4 text-center font-bold text-slate-600">${item.cantidadSolicitada}</td>
           <td class="py-3 px-4 text-center font-extrabold text-slate-800">${qty}</td>
+          <td class="py-3 px-4 text-slate-700">${lotDetails}</td>
           <td class="py-3 px-4 text-right font-semibold text-slate-600">RD$ ${price.toFixed(2)}</td>
           <td class="py-3 px-4 text-right font-bold text-teal-900">RD$ ${sub.toFixed(2)}</td>
         </tr>
@@ -770,6 +804,7 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
                       <th class="py-3 px-4">Descripción del Insumo</th>
                       <th class="py-3 px-4 text-center w-20">Cant. Sol.</th>
                       <th class="py-3 px-4 text-center w-20">Cant. Ent.</th>
+                      <th class="py-3 px-4">Lotes despachados</th>
                       <th class="py-3 px-4 text-right w-28">Precio Unit.</th>
                       <th class="py-3 px-4 text-right w-32">Importe</th>
                     </tr>
@@ -859,6 +894,15 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
           ...item,
           cantidadAprobada: item.cantidadAprobada !== undefined ? item.cantidadAprobada : item.cantidadSolicitada,
           cantidadEntregada: item.cantidadEntregada !== undefined ? item.cantidadEntregada : item.cantidadSolicitada,
+          despachoLotes: item.despachoLotes?.length
+            ? item.despachoLotes
+            : item.loteId && (item.cantidadEntregada ?? item.cantidadSolicitada) > 0
+              ? [{
+                  loteId: item.loteId,
+                  loteNumero: item.loteNumero || "",
+                  cantidad: item.cantidadEntregada ?? item.cantidadSolicitada
+                }]
+              : [],
           motivoDiferencia: item.motivoDiferencia || ""
         }))
       );
@@ -883,10 +927,37 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
     );
   };
 
-  const handleUpdateDeliveryLot = (itemId: string, lotId: string, lotNum: string) => {
-    setDeliveryItems(prev =>
-      prev.map(item => (item.id === itemId ? { ...item, loteId: lotId, loteNumero: lotNum } : item))
-    );
+  const updateDeliveryLots = (itemId: string, update: (lots: DespachoLote[]) => DespachoLote[]) => {
+    setDeliveryItems(prev => prev.map(item => {
+      if (item.id !== itemId) return item;
+      const despachoLotes = update(getItemDeliveryLots(item));
+      const cantidadEntregada = despachoLotes.reduce((sum, allocation) => sum + Number(allocation.cantidad || 0), 0);
+      return {
+        ...item,
+        despachoLotes,
+        cantidadEntregada,
+        loteId: despachoLotes[0]?.loteId || "",
+        loteNumero: despachoLotes[0]?.loteNumero || ""
+      };
+    }));
+  };
+
+  const handleAddDeliveryLot = (itemId: string) => {
+    updateDeliveryLots(itemId, lots => [...lots, { loteId: "", loteNumero: "", cantidad: 0 }]);
+  };
+
+  const handleUpdateDeliveryLotAllocation = (
+    itemId: string,
+    allocationIndex: number,
+    allocation: Partial<DespachoLote>
+  ) => {
+    updateDeliveryLots(itemId, lots => lots.map((lot, index) =>
+      index === allocationIndex ? { ...lot, ...allocation } : lot
+    ));
+  };
+
+  const handleRemoveDeliveryLot = (itemId: string, allocationIndex: number) => {
+    updateDeliveryLots(itemId, lots => lots.filter((_, index) => index !== allocationIndex));
   };
 
   const handleUpdateStatusSubmit = async (e: React.FormEvent) => {
@@ -911,24 +982,51 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
           showToast(`Por favor ingrese el motivo de la diferencia para el producto: ${item.productoNombre}`);
           return;
         }
-        if (item.productoCodigo !== "Gral" && item.cantidadEntregada > 0) {
+        if (item.productoCodigo !== "Gral") {
           const matchingProduct = products?.find(p => p.codigo === item.productoCodigo);
           if (matchingProduct && matchingProduct.lotes.length > 0) {
-            if (!item.loteId) {
+            const allocations = getItemDeliveryLots(item);
+            const allocatedQty = allocations.reduce((sum, allocation) => sum + Number(allocation.cantidad || 0), 0);
+            if (allocations.some(allocation => allocation.cantidad < 0)) {
               playSound("negative");
-              showToast(`Por favor seleccione el lote de despacho para el producto: ${item.productoNombre}`);
+              showToast(`La cantidad asignada al lote no puede ser negativa para "${item.productoNombre}".`);
               return;
             }
-            const lot = matchingProduct.lotes.find(l => l.id === item.loteId);
-            const stockSistema = lot ? Number(lot.cantidad || 0) : 0;
-            const stockFisico = lot ? Number(lot.cantidadF || 0) : 0;
-            const maxAvailableBoth = Math.min(stockSistema, stockFisico);
-            if (!lot || item.cantidadEntregada > stockSistema || item.cantidadEntregada > stockFisico) {
+            if (allocatedQty !== item.cantidadEntregada) {
               playSound("negative");
-              showToast(
-                `Stock insuficiente en el lote seleccionado para "${item.productoNombre}". Solicitado: ${item.cantidadEntregada} und. | Disponible en Sistema: ${stockSistema} und. | Físico: ${stockFisico} und. (Máx: ${maxAvailableBoth} und.)`
-              );
+              showToast(`La suma de cantidades por lote no coincide con la cantidad despachada de "${item.productoNombre}".`);
               return;
+            }
+            if (item.cantidadEntregada > 0 && allocations.length === 0) {
+              playSound("negative");
+              showToast(`Por favor agregue al menos un lote para el producto: ${item.productoNombre}`);
+              return;
+            }
+            const quantitiesByLot = new Map<string, number>();
+            for (const allocation of allocations) {
+              if (allocation.cantidad === 0) continue;
+              if (!allocation.loteId) {
+                playSound("negative");
+                showToast(`Seleccione un lote para cada cantidad despachada de "${item.productoNombre}".`);
+                return;
+              }
+              quantitiesByLot.set(
+                allocation.loteId,
+                (quantitiesByLot.get(allocation.loteId) || 0) + allocation.cantidad
+              );
+            }
+            for (const [lotId, quantity] of quantitiesByLot) {
+              const lot = matchingProduct.lotes.find(l => l.id === lotId);
+              const stockSistema = lot ? Number(lot.cantidad || 0) : 0;
+              const stockFisico = lot ? Number(lot.cantidadF || 0) : 0;
+              const maxAvailableBoth = Math.min(stockSistema, stockFisico);
+              if (!lot || quantity > stockSistema || quantity > stockFisico) {
+                playSound("negative");
+                showToast(
+                  `Stock insuficiente en el lote seleccionado para "${item.productoNombre}". Solicitado: ${quantity} und. | Disponible en Sistema: ${stockSistema} und. | Físico: ${stockFisico} und. (Máx: ${maxAvailableBoth} und.)`
+                );
+                return;
+              }
             }
           }
         }
@@ -991,40 +1089,41 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
           }
 
           for (const item of deliveryItems) {
-            if (item.productoCodigo !== "Gral" && item.cantidadEntregada > 0 && item.loteId) {
-              prodList = prodList.map(prod => {
-                if (prod.codigo === item.productoCodigo) {
-                  const nextLotes = prod.lotes.map((l: Lote) => {
-                    if (l.id === item.loteId) {
-                      const nextQty = Math.max(0, Number(l.cantidad || 0) - item.cantidadEntregada);
-                      const nextQtyF = Math.max(0, Number(l.cantidadF || 0) - item.cantidadEntregada);
-                      return { ...l, cantidad: nextQty, cantidadF: nextQtyF };
-                    }
-                    return l;
-                  });
-                  return { ...prod, lotes: nextLotes, verificado: false, updatedAt: Date.now() };
-                }
-                return prod;
-              });
+            const matchingProd = products?.find(p => p.codigo === item.productoCodigo);
+            for (const allocation of getItemDeliveryLots(item)) {
+              if (item.productoCodigo !== "Gral" && allocation.cantidad > 0 && allocation.loteId) {
+                prodList = prodList.map(prod => {
+                  if (prod.codigo === item.productoCodigo) {
+                    const nextLotes = prod.lotes.map((l: Lote) => {
+                      if (l.id === allocation.loteId) {
+                        const nextQty = Math.max(0, Number(l.cantidad || 0) - allocation.cantidad);
+                        const nextQtyF = Math.max(0, Number(l.cantidadF || 0) - allocation.cantidad);
+                        return { ...l, cantidad: nextQty, cantidadF: nextQtyF };
+                      }
+                      return l;
+                    });
+                    return { ...prod, lotes: nextLotes, verificado: false, updatedAt: Date.now() };
+                  }
+                  return prod;
+                });
 
-              // Create movement log
-              const matchingProd = products?.find(p => p.codigo === item.productoCodigo);
-              const movId = `mov-${item.productoCodigo}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
-              const mov: Movimiento = {
-                id: movId,
-                productoCodigo: item.productoCodigo,
-                productoNombre: item.productoNombre,
-                lote: item.loteNumero || "S/L",
-                cantidad: item.cantidadEntregada,
-                cantidadF: item.cantidadEntregada,
-                precio: matchingProd?.lotes.find((l: Lote) => l.id === item.loteId)?.precio || 0,
-                tipoMovimiento: "Salida",
-                usuario: `${currentUser.nombre} (${currentUser.usuario})`,
-                fecha: new Date().toISOString(),
-                timestamp: Date.now(),
-                catalogId: selectedSolicitud.catalogId || matchingProd?.catalogId || activeCatalogId
-              };
-              movList.unshift(mov);
+                const movId = `mov-${item.productoCodigo}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+                const mov: Movimiento = {
+                  id: movId,
+                  productoCodigo: item.productoCodigo,
+                  productoNombre: item.productoNombre,
+                  lote: allocation.loteNumero || "S/L",
+                  cantidad: allocation.cantidad,
+                  cantidadF: allocation.cantidad,
+                  precio: matchingProd?.lotes.find((l: Lote) => l.id === allocation.loteId)?.precio || 0,
+                  tipoMovimiento: "Salida",
+                  usuario: `${currentUser.nombre} (${currentUser.usuario})`,
+                  fecha: new Date().toISOString(),
+                  timestamp: Date.now(),
+                  catalogId: selectedSolicitud.catalogId || matchingProd?.catalogId || activeCatalogId
+                };
+                movList.unshift(mov);
+              }
             }
           }
 
@@ -1087,8 +1186,15 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
       const updatedHistory = [...selectedSolicitud.historialCambios, nuevoCambio];
       const docRef = tenantDoc("solicitudes", selectedSolicitud.id);
       const validItemsToDeduct = shouldDeductStock
-        ? deliveryItems.filter(
-            (item) => item.productoCodigo !== "Gral" && item.cantidadEntregada > 0 && item.loteId
+        ? deliveryItems.flatMap(item =>
+            getItemDeliveryLots(item)
+              .filter(allocation => item.productoCodigo !== "Gral" && allocation.cantidad > 0 && allocation.loteId)
+              .map(allocation => ({
+                ...item,
+                loteId: allocation.loteId,
+                loteNumero: allocation.loteNumero,
+                cantidadEntregada: allocation.cantidad
+              }))
           )
         : [];
       const uniqueProdCodes = Array.from(new Set<string>(validItemsToDeduct.map((it) => it.productoCodigo)));
@@ -2620,9 +2726,7 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
                           <th className="px-3 py-3 text-center w-28">Cant. Aprobada</th>
                           <th className="px-3 py-3 text-center w-28">Cant. Despachada</th>
                           <th className="px-3 py-3 text-center">Cant. Pendiente</th>
-                          {isWarehouseOrAdmin && selectedSolicitud.estado !== "Entregada" && selectedSolicitud.estado !== "Cancelada" && (
-                            <th className="px-3 py-3 w-40">Lote Despacho</th>
-                          )}
+                          {isWarehouseOrAdmin && <th className="px-3 py-3 min-w-72">Lotes de despacho</th>}
                           <th className="px-4 py-3">Observación / Motivo Diferencia</th>
                         </tr>
                       </thead>
@@ -2631,9 +2735,13 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
                           const matchingProduct = products?.find(p => p.codigo === item.productoCodigo);
                           const availableLots = matchingProduct?.lotes || [];
                           const isEditable = isWarehouseOrAdmin && selectedSolicitud.estado !== "Entregada" && selectedSolicitud.estado !== "Cancelada";
+                          const hasLotTracking = item.productoCodigo !== "Gral" && availableLots.length > 0;
+                          const deliveryLots = getItemDeliveryLots(item);
 
                           const approvedVal = item.cantidadAprobada !== undefined ? item.cantidadAprobada : item.cantidadSolicitada;
-                          const deliveredVal = item.cantidadEntregada !== undefined ? item.cantidadEntregada : item.cantidadSolicitada;
+                          const deliveredVal = hasLotTracking && deliveryLots.length
+                            ? deliveryLots.reduce((sum, allocation) => sum + Number(allocation.cantidad || 0), 0)
+                            : item.cantidadEntregada !== undefined ? item.cantidadEntregada : item.cantidadSolicitada;
                           const pendingVal = Math.max(0, approvedVal - deliveredVal);
 
                           return (
@@ -2661,7 +2769,7 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
                                 )}
                               </td>
                               <td className="px-3 py-3 text-center">
-                                {isEditable ? (
+                                {isEditable && !hasLotTracking ? (
                                   <input
                                     type="number"
                                     min="0"
@@ -2670,7 +2778,10 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
                                     className="w-20 text-center rounded-lg border border-slate-200 px-2 py-1.5 font-bold text-slate-800 bg-slate-50 focus:ring-1 focus:ring-teal-400"
                                   />
                                 ) : (
-                                  <span className="font-extrabold text-slate-700 text-sm">{deliveredVal}</span>
+                                  <span className="font-extrabold text-slate-700 text-sm">
+                                    {deliveredVal}
+                                    {hasLotTracking && <span className="block text-[9px] font-semibold text-slate-400">en {deliveryLots.filter(lot => lot.cantidad > 0).length} lote(s)</span>}
+                                  </span>
                                 )}
                               </td>
                               <td className="px-3 py-3 text-center">
@@ -2678,39 +2789,85 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
                                   {pendingVal}
                                 </span>
                               </td>
-                              {isWarehouseOrAdmin && selectedSolicitud.estado !== "Entregada" && selectedSolicitud.estado !== "Cancelada" && (
+                              {isWarehouseOrAdmin && (
                                 <td className="px-3 py-3">
-                                  {item.productoCodigo !== "Gral" && availableLots.length > 0 ? (
-                                    <select
-                                      value={item.loteId || ""}
-                                      onChange={(e) => {
-                                        const selectedLot = availableLots.find(l => l.id === e.target.value);
-                                        handleUpdateDeliveryLot(item.id, e.target.value, selectedLot?.numeroLote || "");
-                                      }}
-                                      className="w-full rounded-lg border border-slate-200 bg-white px-2 py-1.5 text-[10px] font-semibold text-slate-700 outline-none"
-                                    >
-                                      <option value="">-- Seleccione Lote --</option>
-                                      {availableLots.map(l => {
-                                        const daysTo = getDaysToExpiration(l.fechaVencimiento);
-                                        let prefix = "🟢";
-                                        let suffix = "";
-                                        if (daysTo < 0) {
-                                          prefix = "🔴 [VENCIDO]";
-                                          suffix = ` (HACE ${Math.abs(daysTo)} DÍAS)`;
-                                        } else if (daysTo <= 30) {
-                                          prefix = "⚠️ [POR VENCER]";
-                                          suffix = ` (EN ${daysTo} DÍAS)`;
-                                        } else if (daysTo <= 90) {
-                                          prefix = "🟡 [PRÓXIMO]";
-                                          suffix = ` (EN ${daysTo} DÍAS)`;
-                                        }
-                                        return (
-                                          <option key={l.id} value={l.id}>
-                                            {prefix} Lote: {l.numeroLote} (Stock: {l.cantidad}){suffix}
-                                          </option>
-                                        );
-                                      })}
-                                    </select>
+                                  {hasLotTracking ? (
+                                    <div className="min-w-64 space-y-2">
+                                      {deliveryLots.map((allocation, allocationIndex) => (
+                                        <div key={`${item.id}-lot-${allocationIndex}`} className="flex items-center gap-1.5">
+                                          {isEditable ? (
+                                            <>
+                                              <select
+                                                value={allocation.loteId}
+                                                onChange={(e) => {
+                                                  const selectedLot = availableLots.find(l => l.id === e.target.value);
+                                                  handleUpdateDeliveryLotAllocation(item.id, allocationIndex, {
+                                                    loteId: e.target.value,
+                                                    loteNumero: selectedLot?.numeroLote || ""
+                                                  });
+                                                }}
+                                                className="min-w-0 flex-1 rounded-lg border border-slate-200 bg-white px-2 py-1.5 text-[10px] font-semibold text-slate-700 outline-none"
+                                              >
+                                                <option value="">-- Seleccione lote --</option>
+                                                {availableLots.map(l => {
+                                                  const daysTo = getDaysToExpiration(l.fechaVencimiento);
+                                                  let prefix = "🟢";
+                                                  let suffix = "";
+                                                  if (daysTo < 0) {
+                                                    prefix = "🔴 [VENCIDO]";
+                                                    suffix = ` (HACE ${Math.abs(daysTo)} DÍAS)`;
+                                                  } else if (daysTo <= 30) {
+                                                    prefix = "⚠️ [POR VENCER]";
+                                                    suffix = ` (EN ${daysTo} DÍAS)`;
+                                                  } else if (daysTo <= 90) {
+                                                    prefix = "🟡 [PRÓXIMO]";
+                                                    suffix = ` (EN ${daysTo} DÍAS)`;
+                                                  }
+                                                  return (
+                                                    <option key={l.id} value={l.id}>
+                                                      {prefix} {l.numeroLote} (Sis: {l.cantidad} / Fís: {l.cantidadF || 0}){suffix}
+                                                    </option>
+                                                  );
+                                                })}
+                                              </select>
+                                              <input
+                                                type="number"
+                                                min="0"
+                                                step="1"
+                                                value={allocation.cantidad}
+                                                onChange={(e) => handleUpdateDeliveryLotAllocation(item.id, allocationIndex, { cantidad: Number(e.target.value) })}
+                                                aria-label={`Cantidad del lote ${allocation.loteNumero || allocationIndex + 1}`}
+                                                className="w-16 rounded-lg border border-slate-200 px-1.5 py-1.5 text-center text-[10px] font-bold text-slate-700"
+                                              />
+                                              <button
+                                                type="button"
+                                                onClick={() => handleRemoveDeliveryLot(item.id, allocationIndex)}
+                                                aria-label="Quitar lote"
+                                                className="rounded-md p-1 text-slate-400 hover:bg-red-50 hover:text-red-600"
+                                              >
+                                                <Trash2 className="h-3.5 w-3.5" />
+                                              </button>
+                                            </>
+                                          ) : (
+                                            <span className="text-[10px] font-semibold text-slate-700">
+                                              Lote {allocation.loteNumero || allocation.loteId}: {allocation.cantidad}
+                                            </span>
+                                          )}
+                                        </div>
+                                      ))}
+                                      {isEditable && (
+                                        <button
+                                          type="button"
+                                          onClick={() => handleAddDeliveryLot(item.id)}
+                                          className="inline-flex items-center gap-1 rounded-md px-1.5 py-1 text-[10px] font-bold text-teal-700 hover:bg-teal-50"
+                                        >
+                                          <Plus className="h-3 w-3" /> Agregar lote
+                                        </button>
+                                      )}
+                                      {!isEditable && deliveryLots.length === 0 && (
+                                        <span className="text-[10px] text-slate-400">Sin lotes registrados</span>
+                                      )}
+                                    </div>
                                   ) : (
                                     <span className="text-[10px] text-slate-400 font-medium">No requiere lote</span>
                                   )}

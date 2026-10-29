@@ -447,6 +447,12 @@ export interface CambioEstado {
   hora: string; // HH:MM
 }
 
+export interface DespachoLote {
+  loteId: string;
+  loteNumero: string;
+  cantidad: number;
+}
+
 export interface SolicitudItem {
   id: string;
   productoCodigo: string;
@@ -457,6 +463,7 @@ export interface SolicitudItem {
   motivoDiferencia?: string;
   loteId?: string;
   loteNumero?: string;
+  despachoLotes?: DespachoLote[];
 }
 
 export interface Solicitud {
