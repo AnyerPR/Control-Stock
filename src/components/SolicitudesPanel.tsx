@@ -18,6 +18,7 @@ import {
 } from "../types";
 import { playSound } from "../utils/audio";
 import { logSystemEvent } from "../utils/chatHelper";
+import { isLotExpiredWithStock } from "../utils/inventoryStatus";
 import { FileText, ClipboardList, Plus, Search, Filter, AlertCircle, Calendar, Clock, RefreshCw, Layers, LoaderCircle, User, X, PlusCircle, Trash2 } from "lucide-react";
 
 interface SolicitudesPanelProps {
@@ -2813,9 +2814,13 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
                                                   const daysTo = getDaysToExpiration(l.fechaVencimiento);
                                                   let prefix = "🟢";
                                                   let suffix = "";
-                                                  if (daysTo < 0) {
-                                                    prefix = "🔴 [VENCIDO]";
-                                                    suffix = ` (HACE ${Math.abs(daysTo)} DÍAS)`;
+                                                  if (Number(l.cantidad || 0) <= 0) {
+                                                    prefix = "⚪ [SIN EXISTENCIAS]";
+                                                  } else if (daysTo < 0) {
+                                                    if (isLotExpiredWithStock(l)) {
+                                                      prefix = "🔴 [VENCIDO]";
+                                                      suffix = ` (HACE ${Math.abs(daysTo)} DÍAS)`;
+                                                    }
                                                   } else if (daysTo <= 30) {
                                                     prefix = "⚠️ [POR VENCER]";
                                                     suffix = ` (EN ${daysTo} DÍAS)`;

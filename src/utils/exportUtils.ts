@@ -1,6 +1,7 @@
 import jsPDF from "jspdf";
 import autoTable from "jspdf-autotable";
 import { Producto, Movimiento, InstitucionInfo, FacturaVenta } from "../types";
+import { isLotExpiredWithStock } from "./inventoryStatus";
 
 export const getActiveInstitucionInfo = (): InstitucionInfo => {
   if (typeof window !== "undefined") {
@@ -41,12 +42,14 @@ const getDaysToExpiration = (dateStr: string): number => {
 const getProductStats = (p: Producto) => {
   const totalStock = p.lotes.reduce((sum, l) => sum + Number(l.cantidad || 0), 0);
   const physicalStock = p.lotes.reduce((sum, l) => sum + Number(l.cantidadF || 0), 0);
-  const hasExpired = p.lotes.some((l) => getDaysToExpiration(l.fechaVencimiento) < 0);
+  const hasExpired = p.lotes.some((l) => isLotExpiredWithStock(l));
   const hasSoonToExpire = p.lotes.some((l) => {
+    if (Number(l.cantidad || 0) <= 0) return false;
     const days = getDaysToExpiration(l.fechaVencimiento);
     return days >= 0 && days <= 30;
   });
   const hasNextToExpire = p.lotes.some((l) => {
+    if (Number(l.cantidad || 0) <= 0) return false;
     const days = getDaysToExpiration(l.fechaVencimiento);
     return days > 30 && days <= 90;
   });
@@ -152,7 +155,10 @@ export const exportToWord = (products: Producto[], filterName: string, catalogNa
       let statusStyle = "color: #065f46; font-weight: bold;";
       let statusLabel = "Vigente";
 
-      if (days < 0) {
+      if (Number(l.cantidad || 0) <= 0) {
+        statusStyle = "color: #64748b; font-weight: bold;";
+        statusLabel = "Sin existencias";
+      } else if (days < 0 && isLotExpiredWithStock(l)) {
         statusStyle = "color: #991b1b; font-weight: bold;";
         statusLabel = `Vencido (${Math.abs(days)} días atrás)`;
       } else if (days <= 30) {
@@ -315,7 +321,8 @@ export const exportToPDF = (products: Producto[], filterName: string, catalogNam
       .map((l) => {
         const days = getDaysToExpiration(l.fechaVencimiento);
         let statusStr = "Vigente";
-        if (days < 0) statusStr = "Vencido";
+        if (Number(l.cantidad || 0) <= 0) statusStr = "Sin existencias";
+        else if (days < 0 && isLotExpiredWithStock(l)) statusStr = "Vencido";
         else if (days <= 30) statusStr = "Por vencer";
         else if (days <= 90) statusStr = "Próximo";
 
@@ -1318,4 +1325,3 @@ export const shareSaleInvoiceViaWhatsApp = (
   document.body.removeChild(link);
   return true;
 };
-

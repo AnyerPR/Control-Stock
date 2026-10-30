@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import * as XLSX from "@keep-lts/xlsx";
 import { createAdjustedLot, getProductImages, addProductImage, removeProductImage, replaceProductImage } from "./productPhotos";
+import { isLotExpiredWithStock } from "./inventoryStatus";
 import type { Lote } from "../types";
 
 for (const bookType of ["xlsx", "xls"] as const) {
@@ -20,6 +21,16 @@ for (const bookType of ["xlsx", "xls"] as const) {
     assert.deepEqual(rows, [{ Medicamento: "Prueba", Lote: "L-01", Cantidad: 20 }]);
   });
 }
+
+test("expired lot warning requires positive system stock", () => {
+  const referenceDate = new Date(2026, 9, 30);
+  const expiredDate = "2026-10-29";
+
+  assert.equal(isLotExpiredWithStock({ cantidad: 0, fechaVencimiento: expiredDate }, referenceDate), false);
+  assert.equal(isLotExpiredWithStock({ cantidad: -1, fechaVencimiento: expiredDate }, referenceDate), false);
+  assert.equal(isLotExpiredWithStock({ cantidad: 1, fechaVencimiento: expiredDate }, referenceDate), true);
+  assert.equal(isLotExpiredWithStock({ cantidad: 1, fechaVencimiento: "2026-10-30" }, referenceDate), false);
+});
 
 test("legacy product photo is returned when the photo array is missing", () => {
   assert.deepEqual(getProductImages({ imagen: "legacy" }), ["legacy"]);

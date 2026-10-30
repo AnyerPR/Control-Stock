@@ -2,6 +2,7 @@ import { Producto, matchesCatalog } from "../types";
 import MarqueeText from "./MarqueeText";
 import { ShoppingCart, Send, Trash2, Search, Plus, X, FileText, FileDown } from "lucide-react";
 import { exportOrderToPDF, exportOrderToWord } from "../utils/exportUtils";
+import { isLotExpiredWithStock } from "../utils/inventoryStatus";
 
 interface OrderItem {
   productCode: string;
@@ -112,6 +113,7 @@ export default function OrderPanel({
   const getNearestExpirationDate = (prod: Producto) => {
     if (!prod.lotes || prod.lotes.length === 0) return "—";
     const sortedDates = prod.lotes
+      .filter((lot) => Number(lot.cantidad || 0) > 0)
       .map((l) => l.fechaVencimiento)
       .filter(Boolean)
       .sort((a, b) => new Date(a).getTime() - new Date(b).getTime());
@@ -393,7 +395,7 @@ export default function OrderPanel({
                         let suffix = "";
                         if (sisQty <= 0 || fisQty <= 0) {
                           prefix = "⛔ [STOCK INCOMPLETO]";
-                        } else if (daysTo < 0) {
+                        } else if (daysTo < 0 && isLotExpiredWithStock(l)) {
                           prefix = "🔴 [VENCIDO]";
                           suffix = ` (HACE ${Math.abs(daysTo)} DÍAS)`;
                         } else if (daysTo <= 30) {
@@ -430,7 +432,8 @@ export default function OrderPanel({
                     <div className="anim-card-in space-y-3">
                       <div className={`border p-3 rounded-xl ${(() => {
                         const dTo = getDaysToExpiration(selectedLotObj.fechaVencimiento);
-                        if (dTo < 0) return "bg-rose-50 border-rose-200 shadow-sm";
+                        if (Number(selectedLotObj.cantidad || 0) <= 0) return "bg-white border-slate-200";
+                        if (dTo < 0 && isLotExpiredWithStock(selectedLotObj)) return "bg-rose-50 border-rose-200 shadow-sm";
                         if (dTo <= 30) return "bg-amber-50 border-amber-200 shadow-sm animate-pulse";
                         if (dTo <= 90) return "bg-yellow-50 border-yellow-200 shadow-sm";
                         return "bg-white border-slate-200";
@@ -439,14 +442,16 @@ export default function OrderPanel({
                           <span className="text-slate-500 font-bold uppercase tracking-wider text-[10px]">Expiración:</span>
                           <span className={(() => {
                             const dTo = getDaysToExpiration(selectedLotObj.fechaVencimiento);
-                            if (dTo < 0) return "text-rose-700 font-extrabold";
+                            if (Number(selectedLotObj.cantidad || 0) <= 0) return "text-slate-600 font-semibold";
+                            if (dTo < 0 && isLotExpiredWithStock(selectedLotObj)) return "text-rose-700 font-extrabold";
                             if (dTo <= 30) return "text-amber-700 font-extrabold";
                             if (dTo <= 90) return "text-yellow-700 font-bold";
                             return "text-emerald-700 font-bold";
                           })()}>
                             {(() => {
                               const dTo = getDaysToExpiration(selectedLotObj.fechaVencimiento);
-                              if (dTo < 0) return `¡VENCIDO! (${Math.abs(dTo)}d atrás)`;
+                              if (Number(selectedLotObj.cantidad || 0) <= 0) return "Sin existencias";
+                              if (dTo < 0 && isLotExpiredWithStock(selectedLotObj)) return `¡VENCIDO! (${Math.abs(dTo)}d atrás)`;
                               if (dTo <= 30) return `¡POR VENCER! (en ${dTo}d)`;
                               if (dTo <= 90) return `Vence pronto (en ${dTo}d)`;
                               return `Vigente (en ${dTo}d)`;

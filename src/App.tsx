@@ -48,6 +48,7 @@ import { PWAInstallButton, OfflineIndicator, APP_ICON_PATH } from "./components/
 import { logSystemEvent } from "./utils/chatHelper";
 import { exportToWord, exportToPDF } from "./utils/exportUtils";
 import { createAdjustedLot, getProductImages } from "./utils/productPhotos";
+import { isLotExpiredWithStock } from "./utils/inventoryStatus";
 
 // Suministros predefinidos para autosembrado (si la base de datos está vacía)
 import { bH as DEFAULT_PRODUCTS } from "./defaultProducts";
@@ -1091,7 +1092,7 @@ export default function App() {
     if (!p.lotes || p.lotes.length === 0) return Infinity;
     let earliest = Infinity;
     p.lotes.forEach((l) => {
-      if (!l.fechaVencimiento) return;
+      if (Number(l.cantidad || 0) <= 0 || !l.fechaVencimiento) return;
       const t = new Date(l.fechaVencimiento + "T00:00:00").getTime();
       if (!isNaN(t) && t < earliest) earliest = t;
     });
@@ -1140,11 +1141,12 @@ export default function App() {
         if (l.fechaVencimiento) {
           const expMs = new Date(l.fechaVencimiento + "T00:00:00").getTime();
           if (!isNaN(expMs)) {
-            if (expMs < earliestExp) earliestExp = expMs;
+            if (Number(l.cantidad || 0) > 0 && expMs < earliestExp) earliestExp = expMs;
             const days = Math.ceil((expMs - todayMs) / 86400000);
-            if (days < 0) hasExpired = true;
-            else if (days <= 30) hasSoonToExpire = true;
-            else if (days <= 90) hasNextToExpire = true;
+            if (days < 0) {
+              if (isLotExpiredWithStock(l, today)) hasExpired = true;
+            } else if (cSys > 0 && days <= 30) hasSoonToExpire = true;
+            else if (cSys > 0 && days <= 90) hasNextToExpire = true;
           }
         }
       }
@@ -1175,12 +1177,14 @@ export default function App() {
 
     const totalStock = p.lotes.reduce((sum, l) => sum + Number(l.cantidad || 0), 0);
     const physicalStock = p.lotes.reduce((sum, l) => sum + Number(l.cantidadF || 0), 0);
-    const hasExpired = p.lotes.some((l) => getDaysToExpiration(l.fechaVencimiento) < 0);
+    const hasExpired = p.lotes.some((l) => isLotExpiredWithStock(l));
     const hasSoonToExpire = p.lotes.some((l) => {
+      if (Number(l.cantidad || 0) <= 0) return false;
       const days = getDaysToExpiration(l.fechaVencimiento);
       return days >= 0 && days <= 30;
     });
     const hasNextToExpire = p.lotes.some((l) => {
+      if (Number(l.cantidad || 0) <= 0) return false;
       const days = getDaysToExpiration(l.fechaVencimiento);
       return days > 30 && days <= 90;
     });
@@ -3717,7 +3721,8 @@ export default function App() {
                     <div className="space-y-4">
                       {editLotes.map((l) => {
                         const daysTo = getDaysToExpiration(l.fechaVencimiento);
-                        const status = daysTo < 0 ? "vencido" : daysTo <= 30 ? "proximo" : (daysTo <= 90 ? "pronto" : "ok");
+                        const hasStock = Number(l.cantidad || 0) > 0;
+                        const status = !hasStock ? "sinStock" : daysTo < 0 ? "vencido" : daysTo <= 30 ? "proximo" : (daysTo <= 90 ? "pronto" : "ok");
 
                         let cardBgClass = "bg-white border-slate-200/90";
                         if (status === "vencido") {
@@ -3756,6 +3761,11 @@ export default function App() {
                                 {status === "ok" && (
                                   <span className="text-[11px] font-extrabold text-emerald-700 bg-emerald-50 px-2.5 py-1 rounded-lg border border-emerald-200">
                                     Vigente ({daysTo} días rest.)
+                                  </span>
+                                )}
+                                {status === "sinStock" && (
+                                  <span className="text-[11px] font-extrabold text-slate-600 bg-slate-100 px-2.5 py-1 rounded-lg border border-slate-200">
+                                    Sin existencias
                                   </span>
                                 )}
                                 {l.articuloAjustado && (

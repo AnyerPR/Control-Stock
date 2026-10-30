@@ -14,6 +14,7 @@ import {
   matchesCatalog
 } from "../types";
 import { playSound } from "../utils/audio";
+import { isLotExpiredWithStock } from "../utils/inventoryStatus";
 import {
   LayoutDashboard,
   Package,
@@ -302,10 +303,11 @@ export default function DashboardPanel({
           const expMs = new Date(l.fechaVencimiento + "T00:00:00").getTime();
           if (!isNaN(expMs)) {
             const days = Math.ceil((expMs - todayMs) / 86400000);
-            if (days < earliestDays) earliestDays = days;
-            if (days < 0) pExpired = true;
-            else if (days <= 30) pSoon = true;
-            else if (days <= 90) pNext = true;
+            if (cSys > 0 && days < earliestDays) earliestDays = days;
+            if (days < 0) {
+              if (isLotExpiredWithStock(l, today)) pExpired = true;
+            } else if (cSys > 0 && days <= 30) pSoon = true;
+            else if (cSys > 0 && days <= 90) pNext = true;
           }
         }
       }
