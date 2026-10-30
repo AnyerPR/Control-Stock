@@ -43,7 +43,7 @@ export function playTone(freq = 440, duration = 0.08, type: OscillatorType = "si
 export function playSound(event: "click" | "open" | "close" | "positive" | "negative" | "action" | "notify") {
   switch (event) {
     case "click":
-      playTone(1000, 0.05, "square");
+      playAudioFile("CLICK.mp3");
       break;
     case "open":
       playTone(660, 0.12, "sine");
@@ -61,11 +61,16 @@ export function playSound(event: "click" | "open" | "close" | "positive" | "nega
       playTone(520, 0.12, "triangle");
       break;
     case "notify":
-      // A beautiful notification chime: two quick rising tones
-      playTone(587.33, 0.08, "sine"); // D5
-      setTimeout(() => {
-        playTone(880, 0.15, "sine"); // A5
-      }, 80);
+      playAudioFile("NOTIFICACION.mp3");
       break;
   }
+}
+
+function playAudioFile(filename: string) {
+  if (isMuted) return;
+
+  const audio = new Audio(`${import.meta.env.BASE_URL}${filename}`);
+  audio.play().catch((error: unknown) => {
+    console.warn(`Error playing ${filename}:`, error);
+  });
 }
