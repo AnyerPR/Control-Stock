@@ -76,6 +76,32 @@ test("adjusts only system fields from physical data and retains unrelated lot va
   assert.equal(createAdjustedLot(lot, false).cantidad, lot.cantidad);
 });
 
+test("marks lots adjusted using existing system values when physical fields are empty", () => {
+  const lot: Lote = {
+    id: "lot-without-physical-data",
+    numeroLote: "SYSTEM-LOT",
+    cantidad: 12,
+    cantidadF: 0,
+    fechaVencimiento: "2027-01-01",
+    precio: 3.25,
+    loteFisico: "",
+    fechaFisica: ""
+  };
+  Object.defineProperty(lot, "cantidadF", { value: undefined });
+
+  assert.deepEqual(createAdjustedLot(lot, true), {
+    ...lot,
+    cantidad: 12,
+    numeroLote: "SYSTEM-LOT",
+    fechaVencimiento: "2027-01-01",
+    articuloAjustado: true
+  });
+  const emptyQuantityLot = { ...lot };
+  Object.defineProperty(emptyQuantityLot, "cantidadF", { value: "" });
+  assert.equal(createAdjustedLot(emptyQuantityLot, true).cantidad, 12);
+  assert.equal(createAdjustedLot({ ...lot, cantidadF: 0 }, true).cantidad, 0);
+});
+
 test("rejects invalid physical quantities and dates", () => {
   const lot: Lote = {
     id: "lot-1",
@@ -90,7 +116,8 @@ test("rejects invalid physical quantities and dates", () => {
   assert.throws(() => createAdjustedLot({ ...lot, cantidadF: 5.5 }, true), /entero válido/);
   assert.throws(() => createAdjustedLot({ ...lot, cantidadF: 5, fechaFisica: "not-a-date" }, true), /fecha física/);
   assert.throws(() => createAdjustedLot({ ...lot, cantidadF: 5, fechaFisica: "2027-02-29" }, true), /fecha física/);
-  const emptyQuantityLot = { ...lot };
-  Object.defineProperty(emptyQuantityLot, "cantidadF", { value: "" });
-  assert.throws(() => createAdjustedLot(emptyQuantityLot, true), /entero válido/);
+  const emptySystemQuantityLot = { ...lot, cantidad: 0 };
+  Object.defineProperty(emptySystemQuantityLot, "cantidad", { value: undefined });
+  Object.defineProperty(emptySystemQuantityLot, "cantidadF", { value: "" });
+  assert.throws(() => createAdjustedLot(emptySystemQuantityLot, true), /entero válido/);
 });

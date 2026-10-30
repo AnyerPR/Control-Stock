@@ -34,9 +34,12 @@ export function removeProductImage(images: string[], index: number): string[] {
 export function createAdjustedLot(lot: Lote, checked: boolean): Lote {
   if (!checked) return { ...lot, articuloAjustado: false };
 
-  const physicalQuantity = Number(lot.cantidadF);
-  if (lot.cantidadF === null || lot.cantidadF === undefined || String(lot.cantidadF).trim() === "" ||
-    !Number.isSafeInteger(physicalQuantity) || physicalQuantity < 0) {
+  const physicalQuantityValue = lot.cantidadF;
+  const hasPhysicalQuantity = physicalQuantityValue !== null &&
+    physicalQuantityValue !== undefined &&
+    String(physicalQuantityValue).trim() !== "";
+  const adjustedQuantity = Number(hasPhysicalQuantity ? physicalQuantityValue : lot.cantidad);
+  if (!Number.isSafeInteger(adjustedQuantity) || adjustedQuantity < 0) {
     throw new Error("La cantidad física debe ser un número entero válido y no negativo.");
   }
   if (lot.fechaFisica) {
@@ -49,7 +52,7 @@ export function createAdjustedLot(lot: Lote, checked: boolean): Lote {
 
   return {
     ...lot,
-    cantidad: physicalQuantity,
+    cantidad: adjustedQuantity,
     numeroLote: lot.loteFisico?.trim() || lot.numeroLote,
     fechaVencimiento: lot.fechaFisica || lot.fechaVencimiento,
     articuloAjustado: true

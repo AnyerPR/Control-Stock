@@ -1646,10 +1646,11 @@ export default function App() {
     const draftLot = editLotes.find((lot) => lot.id === lotId);
     if (!sourceProduct || !sourceLot || !draftLot) return;
 
+    const normalizePhysicalValue = (value: string | number | undefined) => String(value ?? "").trim();
     if (checked && (
-      Number(draftLot.cantidadF) !== Number(sourceLot.cantidadF) ||
-      draftLot.loteFisico !== sourceLot.loteFisico ||
-      draftLot.fechaFisica !== sourceLot.fechaFisica
+      normalizePhysicalValue(draftLot.cantidadF) !== normalizePhysicalValue(sourceLot.cantidadF) ||
+      normalizePhysicalValue(draftLot.loteFisico) !== normalizePhysicalValue(sourceLot.loteFisico) ||
+      normalizePhysicalValue(draftLot.fechaFisica) !== normalizePhysicalValue(sourceLot.fechaFisica)
     )) {
       showToast("Guarda primero los cambios de los datos físicos y luego aplica el ajuste.");
       playSound("negative");
