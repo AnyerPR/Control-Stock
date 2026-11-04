@@ -43,7 +43,7 @@ export interface Movimiento {
   fechaVencimiento?: string;
   fechaFisica?: string;
   precio: number;
-  tipoMovimiento: "Entrada" | "Salida" | "Ajuste";
+  tipoMovimiento: "Entrada" | "Salida" | "Ajuste" | "Producto eliminado";
   usuario: string; // Nombre (usuario)
   fecha: string; // ISO string
   timestamp: number;

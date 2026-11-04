@@ -1586,19 +1586,58 @@ export default function App() {
     const prod = products.find((p) => p.codigo === selectedProductCode);
     if (!prod) return;
 
-    if (confirm(`¿Eliminar por completo "${prod.nombre}" y todos sus lotes registrados?`)) {
-      try {
+    const motivo = window.prompt(`Indica el motivo para eliminar "${prod.nombre}":`)?.trim();
+    if (motivo === undefined) return;
+    if (!motivo) {
+      showToast("Debes indicar el motivo para eliminar el producto.");
+      return;
+    }
+    if (!confirm(`¿Eliminar por completo "${prod.nombre}" y todos sus lotes registrados?`)) return;
+
+    const now = Date.now();
+    const movementId = `mov-${prod.codigo}-${now}-${Math.random().toString(36).slice(2, 8)}`;
+    const movement: Movimiento = {
+      id: movementId,
+      productoCodigo: prod.codigo,
+      productoNombre: prod.nombre,
+      descripcion: `Motivo de eliminación: ${motivo}`,
+      lote: "—",
+      cantidad: 0,
+      precio: 0,
+      tipoMovimiento: "Producto eliminado",
+      usuario: currentUser ? `${currentUser.nombre} (${currentUser.usuario})` : "Sistema",
+      fecha: new Date(now).toISOString(),
+      timestamp: now,
+      catalogId: prod.catalogId || activeCatalogId
+    };
+
+    try {
+      const isLocalFileMode = typeof window !== "undefined" && window.location.protocol === "file:";
+      if (isLocalFileMode) {
+        const storedMovements = localStorage.getItem("offline_movimientos");
+        const localMovements = storedMovements ? JSON.parse(storedMovements) as Movimiento[] : [];
+        localStorage.setItem("offline_movimientos", JSON.stringify([movement, ...localMovements]));
+        window.dispatchEvent(new Event("offline_movimientos_update"));
+
+        const storedProducts = localStorage.getItem("offline_productos");
+        const localProducts = storedProducts ? JSON.parse(storedProducts) as Producto[] : products;
+        const updatedProducts = localProducts.filter((product) => product.codigo !== prod.codigo);
+        localStorage.setItem("offline_productos", JSON.stringify(updatedProducts));
+        window.dispatchEvent(new Event("offline_productos_update"));
+      } else {
         const batch = writeBatch(db);
         batch.delete(tenantDoc("productos", selectedProductCode.replace(/\//g, "_"), activeFarmaciaId));
+        batch.set(tenantDoc("movimientos", movementId, activeFarmaciaId), movement);
         await batch.commit();
-
-        setSelectedProductCode(null);
-        playSound("negative");
-        showToast("Insumo eliminado por completo del catálogo");
-      } catch (err) {
-        console.error("Error deleting product:", err);
-        showToast("Error al eliminar producto");
       }
+
+      setProducts((previous) => previous.filter((product) => product.codigo !== prod.codigo));
+      setSelectedProductCode(null);
+      playSound("negative");
+      showToast("Producto eliminado y registrado en el historial.");
+    } catch (err) {
+      console.error("Error deleting product:", err);
+      showToast("Error al eliminar producto y registrar el motivo en el historial.");
     }
   };
 
@@ -1820,10 +1859,6 @@ export default function App() {
 
   // Delete Lot inside Detail Modal
   const handleDeleteLot = (lotId: string) => {
-    if (editLotes.length <= 1) {
-      alert("No se puede eliminar el único lote. Elimine el producto completo si es necesario.");
-      return;
-    }
     if (confirm("¿Deseas eliminar este lote? Esta acción no se puede deshacer.")) {
       setEditLotes((prev) => prev.filter((l) => l.id !== lotId));
       playSound("negative");
@@ -3547,7 +3582,9 @@ export default function App() {
                             <div className="flex flex-wrap items-center gap-1.5 mt-4 pt-3.5 border-t border-slate-100">
                               <span className="inline-flex items-center gap-1 text-[11px] font-extrabold px-3 py-1 rounded-xl bg-slate-100 text-slate-700 border border-slate-200/80 tabular-nums">
                                 <Layers className="w-3.5 h-3.5 text-slate-500" />
-                                {p.lotes.length} {p.lotes.length === 1 ? "lote" : "lotes"}
+                                {p.lotes.length > 0
+                                  ? `${p.lotes.length} ${p.lotes.length === 1 ? "lote" : "lotes"}`
+                                  : "No hay lotes existentes del producto"}
                               </span>
 
                               <button
@@ -3720,7 +3757,11 @@ export default function App() {
                     </div>
 
                     <div className="space-y-4">
-                      {editLotes.map((l) => {
+                      {editLotes.length === 0 ? (
+                        <div className="rounded-2xl border border-dashed border-amber-300 bg-amber-50/70 px-4 py-6 text-center text-sm font-bold text-amber-900">
+                          No hay lotes existentes del producto.
+                        </div>
+                      ) : editLotes.map((l) => {
                         const daysTo = getDaysToExpiration(l.fechaVencimiento);
                         const hasStock = Number(l.cantidad || 0) > 0;
                         const status = !hasStock ? "sinStock" : daysTo < 0 ? "vencido" : daysTo <= 30 ? "proximo" : (daysTo <= 90 ? "pronto" : "ok");

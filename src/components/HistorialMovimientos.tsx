@@ -186,7 +186,8 @@ export default function HistorialMovimientos({ activeCatalogId, currentUser, cat
         mov.productoCodigo.toLowerCase().includes(search) ||
         mov.productoNombre.toLowerCase().includes(search) ||
         mov.lote.toLowerCase().includes(search) ||
-        mov.usuario.toLowerCase().includes(search)
+        mov.usuario.toLowerCase().includes(search) ||
+        (mov.descripcion || "").toLowerCase().includes(search)
       );
     });
   }, [catalogAccessibleMovements, filterType, searchTerm]);
@@ -259,6 +260,8 @@ export default function HistorialMovimientos({ activeCatalogId, currentUser, cat
         return "bg-rose-500 text-white";
       case "Ajuste":
         return "bg-amber-500 text-slate-900";
+      case "Producto eliminado":
+        return "bg-rose-800 text-white";
       default:
         return "bg-slate-500 text-white";
     }
@@ -346,7 +349,7 @@ export default function HistorialMovimientos({ activeCatalogId, currentUser, cat
           <p className="text-xs font-bold text-slate-500">
             {viewMode === "facturas"
               ? "Visualizando compras y entradas agrupadas por comprobante"
-              : "Visualizando el registro detallado de entradas, salidas y ajustes"}
+              : "Visualizando el registro detallado de entradas, salidas, ajustes y productos eliminados"}
           </p>
         </div>
 
@@ -374,6 +377,7 @@ export default function HistorialMovimientos({ activeCatalogId, currentUser, cat
                 <option value="Entrada">Solo Entradas</option>
                 <option value="Salida">Solo Salidas</option>
                 <option value="Ajuste">Solo Ajustes</option>
+                <option value="Producto eliminado">Productos eliminados</option>
               </select>
             </div>
           )}
@@ -618,12 +622,18 @@ export default function HistorialMovimientos({ activeCatalogId, currentUser, cat
                             className="w-full"
                             textClassName="font-bold text-slate-900 text-sm"
                           />
+                          {mov.descripcion && (
+                            <span className="block max-w-[280px] text-xs font-medium text-slate-500">
+                              {mov.descripcion}
+                            </span>
+                          )}
                         </div>
                       </td>
                       <td className="px-6 py-4 font-mono font-bold text-slate-800">{mov.lote}</td>
                       <td className="px-6 py-4 text-right font-extrabold text-slate-900 tabular-nums">
-                        {mov.tipoMovimiento === "Salida" ? "-" : "+"}
-                        {mov.cantidad}
+                        {mov.tipoMovimiento === "Producto eliminado"
+                          ? "—"
+                          : `${mov.tipoMovimiento === "Salida" ? "-" : "+"}${mov.cantidad}`}
                       </td>
                       <td className="px-6 py-4 text-right font-semibold text-slate-700 tabular-nums">
                         {mov.precio != null && mov.precio > 0 ? `RD$ ${mov.precio.toFixed(2)}` : "—"}
