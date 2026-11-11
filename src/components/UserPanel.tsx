@@ -242,9 +242,9 @@ export default function UserPanel({
   };
 
   return (
-    <div className="anim-card-in mb-6 rounded-3xl bg-white border border-slate-200 shadow-sm overflow-hidden">
+    <div className="anim-card-in mb-6 w-full min-w-0 max-w-full rounded-3xl bg-white border border-slate-200 shadow-sm overflow-hidden">
       {!isAnyer && (
-        <div className="bg-amber-50 border-b border-amber-200 px-6 py-4 flex items-center gap-3 text-xs sm:text-sm text-amber-800 font-bold">
+        <div className="bg-amber-50 border-b border-amber-200 px-4 sm:px-6 py-4 flex items-center gap-3 text-xs sm:text-sm text-amber-800 font-bold">
           <ShieldAlert className="w-5 h-5 text-amber-600 shrink-0" />
           <span>
             Atención: Solo el Administrador Principal (Anyer) tiene permisos para registrar, editar, desactivar o eliminar usuarios en el sistema.
@@ -252,18 +252,18 @@ export default function UserPanel({
         </div>
       )}
 
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 px-6 py-4 border-b border-slate-200">
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 px-4 sm:px-6 py-4 border-b border-slate-200">
         <div>
           <p className="text-xs uppercase tracking-[0.24em] text-slate-400 font-bold">Configuración de Seguridad</p>
-          <h2 className="text-2xl font-black text-slate-900 flex items-center gap-2">
-            <Users className="w-6 h-6 text-teal-600" />
-            Administración de Usuarios
+          <h2 className="text-xl sm:text-2xl font-black text-slate-900 flex items-center gap-2">
+            <Users className="w-6 h-6 text-teal-600 shrink-0" />
+            <span>Administración de Usuarios</span>
           </h2>
         </div>
         <button
           onClick={handleOpenAddModal}
           disabled={!isAnyer}
-          className={`inline-flex items-center gap-2 rounded-xl px-4 py-2.5 text-xs font-black uppercase tracking-wider shadow-sm transition cursor-pointer ${
+          className={`w-full sm:w-auto inline-flex items-center justify-center gap-2 rounded-xl px-4 py-2.5 text-xs font-black uppercase tracking-wider shadow-sm transition cursor-pointer ${
             isAnyer ? "bg-teal-600 hover:bg-teal-700 text-white active:scale-95" : "bg-slate-200 text-slate-400 cursor-not-allowed"
           }`}
           title={isAnyer ? "Registrar Nuevo Usuario" : "Solo Anyer puede registrar nuevos usuarios"}
@@ -273,8 +273,8 @@ export default function UserPanel({
         </button>
       </div>
 
-      <div className="p-6">
-        <div className="overflow-x-auto border border-slate-200 rounded-2xl bg-slate-50">
+      <div className="p-4 sm:p-6">
+        <div className="w-full max-w-full overflow-x-auto overscroll-x-contain touch-pan-x [-webkit-overflow-scrolling:touch] border border-slate-200 rounded-2xl bg-slate-50">
           <table className="min-w-[650px] w-full text-left border-collapse">
             <thead>
               <tr className="bg-slate-100 border-b border-slate-200 text-xs font-bold text-slate-500 uppercase tracking-wider">
@@ -450,13 +450,13 @@ export default function UserPanel({
       </div>
 
       {showAddModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+        <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center p-2 sm:p-4">
           <div className="absolute inset-0 bg-black/40 backdrop-blur-xs" onClick={() => setShowAddModal(false)}></div>
-          <div className="relative bg-white rounded-3xl border border-slate-200 shadow-xl max-w-md w-full overflow-hidden anim-pop-in">
-            <div className="flex items-center justify-between px-6 py-4 border-b border-slate-200 bg-slate-50">
-              <h3 className="font-black text-slate-900 flex items-center gap-2">
-                <UserPlus className="w-5 h-5 text-teal-600" />
-                Registrar Nuevo Usuario
+          <div className="relative bg-white rounded-3xl border border-slate-200 shadow-xl max-w-md w-full max-h-[92dvh] flex flex-col overflow-hidden anim-pop-in">
+            <div className="flex items-center justify-between px-5 sm:px-6 py-4 border-b border-slate-200 bg-slate-50 shrink-0">
+              <h3 className="font-black text-slate-900 flex items-center gap-2 text-sm sm:text-base">
+                <UserPlus className="w-5 h-5 text-teal-600 shrink-0" />
+                <span>Registrar Nuevo Usuario</span>
               </h3>
               <button
                 onClick={() => setShowAddModal(false)}
@@ -465,7 +465,7 @@ export default function UserPanel({
                 <X className="w-4 h-4" />
               </button>
             </div>
-            <form onSubmit={handleAddUserSubmit} className="p-6 space-y-4">
+            <form onSubmit={handleAddUserSubmit} className="p-4 sm:p-6 space-y-4 overflow-y-auto overscroll-contain flex-1">
               <div>
                 <label className="block text-xs font-black uppercase text-slate-500 tracking-wider mb-1">
                   Nombre Completo *
@@ -627,13 +627,13 @@ export default function UserPanel({
       )}
 
       {editingUser && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+        <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center p-2 sm:p-4">
           <div className="absolute inset-0 bg-black/40 backdrop-blur-xs" onClick={() => setEditingUser(null)}></div>
-          <div className="relative bg-white rounded-3xl border border-slate-200 shadow-xl max-w-md w-full overflow-hidden anim-pop-in">
-            <div className="flex items-center justify-between px-6 py-4 border-b border-slate-200 bg-slate-50">
-              <h3 className="font-black text-slate-900 flex items-center gap-2">
-                <Pen className="w-5 h-5 text-teal-600" />
-                Editar Usuario ({editingUser.usuario})
+          <div className="relative bg-white rounded-3xl border border-slate-200 shadow-xl max-w-md w-full max-h-[92dvh] flex flex-col overflow-hidden anim-pop-in">
+            <div className="flex items-center justify-between px-5 sm:px-6 py-4 border-b border-slate-200 bg-slate-50 shrink-0">
+              <h3 className="font-black text-slate-900 flex items-center gap-2 text-sm sm:text-base">
+                <Pen className="w-5 h-5 text-teal-600 shrink-0" />
+                <span>Editar Usuario ({editingUser.usuario})</span>
               </h3>
               <button
                 onClick={() => setEditingUser(null)}
@@ -642,7 +642,7 @@ export default function UserPanel({
                 <X className="w-4 h-4" />
               </button>
             </div>
-            <form onSubmit={handleUpdateUserSubmit} className="p-6 space-y-4">
+            <form onSubmit={handleUpdateUserSubmit} className="p-4 sm:p-6 space-y-4 overflow-y-auto overscroll-contain flex-1">
               <div>
                 <label className="block text-xs font-black uppercase text-slate-500 tracking-wider mb-1">
                   Nombre Completo *
@@ -781,13 +781,13 @@ export default function UserPanel({
       )}
 
       {changingPasswordUser && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+        <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center p-2 sm:p-4">
           <div className="absolute inset-0 bg-black/40 backdrop-blur-xs" onClick={() => setChangingPasswordUser(null)}></div>
-          <div className="relative bg-white rounded-3xl border border-slate-200 shadow-xl max-w-md w-full overflow-hidden anim-pop-in">
-            <div className="flex items-center justify-between px-6 py-4 border-b border-slate-200 bg-slate-50">
-              <h3 className="font-black text-slate-900 flex items-center gap-2">
-                <Key className="w-5 h-5 text-teal-600" />
-                Cambiar Contraseña
+          <div className="relative bg-white rounded-3xl border border-slate-200 shadow-xl max-w-md w-full max-h-[90dvh] flex flex-col overflow-hidden anim-pop-in">
+            <div className="flex items-center justify-between px-5 sm:px-6 py-4 border-b border-slate-200 bg-slate-50 shrink-0">
+              <h3 className="font-black text-slate-900 flex items-center gap-2 text-sm sm:text-base">
+                <Key className="w-5 h-5 text-teal-600 shrink-0" />
+                <span>Cambiar Contraseña</span>
               </h3>
               <button
                 onClick={() => setChangingPasswordUser(null)}
@@ -796,7 +796,7 @@ export default function UserPanel({
                 <X className="w-4 h-4" />
               </button>
             </div>
-            <form onSubmit={handleChangePasswordSubmit} className="p-6 space-y-4">
+            <form onSubmit={handleChangePasswordSubmit} className="p-4 sm:p-6 space-y-4 overflow-y-auto overscroll-contain flex-1">
               <div className="bg-slate-50 p-3 rounded-xl border border-slate-200">
                 <p className="text-xs text-slate-500 font-semibold">Usuario:</p>
                 <p className="text-sm font-bold text-slate-800">

@@ -306,19 +306,19 @@ export default function CargaMasiva({ products, currentUser, onImportComplete, s
   };
 
   return (
-    <div className="space-y-6">
-      <div className="bg-white rounded-3xl p-6 border border-slate-200 shadow-sm">
+    <div className="w-full min-w-0 max-w-full space-y-5 sm:space-y-6">
+      <div className="w-full min-w-0 max-w-full bg-white rounded-3xl p-4 sm:p-6 border border-slate-200 shadow-sm">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-4">
           <div>
             <h3 className="text-lg font-bold text-slate-900 mb-1">Importar Inventario desde Excel</h3>
-            <p className="text-slate-500 text-sm">
+            <p className="text-slate-500 text-xs sm:text-sm">
               Sube un archivo de Excel (.xlsx o .xls) para registrar y crear nuevos lotes de medicamentos y suministros.
               El archivo debe incluir columnas como:{" "}
               <span className="font-semibold text-teal-800">Medicamento (o Nombre), Lote, Fecha Vencimiento, Cantidad, Precio</span>.
             </p>
           </div>
           {catalogos.length > 0 && (
-            <div className="bg-teal-50/70 border border-teal-200 rounded-2xl px-4 py-2.5 shrink-0">
+            <div className="w-full sm:w-auto bg-teal-50/70 border border-teal-200 rounded-2xl px-4 py-2.5 shrink-0">
               <label className="block text-[10px] font-black uppercase text-teal-800 tracking-wider mb-1 flex items-center gap-1">
                 <Layers className="w-3.5 h-3.5 text-teal-600" />
                 Catálogo Destino de Importación
@@ -348,7 +348,7 @@ export default function CargaMasiva({ products, currentUser, onImportComplete, s
           onDrop={handleDrop}
           onSubmit={(e) => e.preventDefault()}
           onClick={triggerFileBrowser}
-          className={`flex flex-col items-center justify-center p-8 border-2 border-dashed rounded-2xl transition cursor-pointer text-center ${
+          className={`flex flex-col items-center justify-center p-5 sm:p-8 border-2 border-dashed rounded-2xl transition cursor-pointer text-center ${
             isDragging ? "border-teal-500 bg-teal-50" : "border-slate-300 hover:border-teal-400 bg-slate-50 hover:bg-slate-50/50"
           }`}
         >

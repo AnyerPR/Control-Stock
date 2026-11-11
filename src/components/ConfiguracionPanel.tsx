@@ -1119,11 +1119,11 @@ export default function ConfiguracionPanel({
   };
 
   return (
-    <div className="space-y-6">
+    <div className="w-full min-w-0 max-w-full space-y-5 sm:space-y-6">
       {/* =====================================================================
           TARJETA IMAGEN 1: INSTITUCIÓN / EMPRESA & COMERCIALIZACIÓN POR CLIENTE
          ===================================================================== */}
-      <div className="bg-white rounded-3xl p-6 sm:p-7 border border-slate-200 shadow-sm space-y-6 anim-card-in">
+      <div className="w-full min-w-0 max-w-full bg-white rounded-3xl p-4 sm:p-7 border border-slate-200 shadow-sm space-y-5 sm:space-y-6 anim-card-in">
         {/* Cabecera Exacta de Imagen 1 */}
         <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-4 border-b border-slate-100 pb-4">
           <div>
@@ -1142,7 +1142,7 @@ export default function ConfiguracionPanel({
 
         {/* Barra de Comercialización (Solo visible para SuperAdmin en sede principal) */}
         {isSuperAdmin && (
-          <div className="bg-slate-50/90 border border-slate-200/80 rounded-2xl p-4 flex flex-col md:flex-row md:items-center justify-between gap-3">
+          <div className="bg-slate-50/90 border border-slate-200/80 rounded-2xl p-3.5 sm:p-4 flex flex-col md:flex-row md:items-center justify-between gap-3">
             <div className="space-y-0.5">
               <span className="text-[10px] font-black uppercase tracking-wider text-teal-700 block">
                 Comercialización • Selector de Farmacia / Cliente
@@ -1151,14 +1151,14 @@ export default function ConfiguracionPanel({
                 Selecciona una farmacia para editar sus datos fiscales o registra un nuevo cliente comercial aislado.
               </p>
             </div>
-            <div className="flex flex-wrap items-center gap-2">
+            <div className="flex flex-wrap items-center gap-2 w-full md:w-auto">
               <select
                 value={selectedClientMode}
                 onChange={(e) => {
                   setSelectedClientMode(e.target.value);
                   playSound("click");
                 }}
-                className="bg-white border border-slate-200 rounded-xl px-3.5 py-2.5 text-xs font-bold text-slate-800 outline-none focus:ring-2 focus:ring-teal-400 cursor-pointer"
+                className="w-full sm:w-auto bg-white border border-slate-200 rounded-xl px-3.5 py-2.5 text-xs font-bold text-slate-800 outline-none focus:ring-2 focus:ring-teal-400 cursor-pointer"
               >
                 <option value="principal">🏥 Sede Principal (Dr. José Manuel Rodríguez)</option>
                 {farmaciasList.map((f) => (
@@ -1175,7 +1175,7 @@ export default function ConfiguracionPanel({
                   setSelectedClientMode("__nuevo__");
                   playSound("open");
                 }}
-                className={`px-3.5 py-2.5 rounded-xl text-xs font-extrabold uppercase tracking-wider flex items-center gap-1.5 transition cursor-pointer ${
+                className={`flex-1 sm:flex-initial justify-center px-3.5 py-2.5 rounded-xl text-xs font-extrabold uppercase tracking-wider flex items-center gap-1.5 transition cursor-pointer ${
                   selectedClientMode === "__nuevo__"
                     ? "bg-teal-700 text-white shadow-xs"
                     : "bg-teal-50 text-teal-700 border border-teal-200 hover:bg-teal-100"
@@ -1189,7 +1189,7 @@ export default function ConfiguracionPanel({
                 <button
                   type="button"
                   onClick={() => onSwitchFarmacia(selectedClientMode, instNombre || selectedClientMode)}
-                  className="px-3.5 py-2.5 rounded-xl text-xs font-extrabold uppercase tracking-wider flex items-center gap-1.5 bg-emerald-700 hover:bg-emerald-800 text-white shadow-xs transition cursor-pointer"
+                  className="flex-1 sm:flex-initial justify-center px-3.5 py-2.5 rounded-xl text-xs font-extrabold uppercase tracking-wider flex items-center gap-1.5 bg-emerald-700 hover:bg-emerald-800 text-white shadow-xs transition cursor-pointer"
                 >
                   <Building2 className="w-3.5 h-3.5" />
                   <span>Entrar a esta Farmacia</span>
@@ -1492,7 +1492,7 @@ export default function ConfiguracionPanel({
             <h4 className="text-xs font-black uppercase text-slate-400 tracking-wider">
               Clientes / Farmacias Registradas ({farmaciasList.length})
             </h4>
-            <div className="overflow-x-auto border border-slate-200 rounded-2xl bg-slate-50">
+            <div className="w-full max-w-full overflow-x-auto overscroll-x-contain touch-pan-x [-webkit-overflow-scrolling:touch] border border-slate-200 rounded-2xl bg-slate-50">
               <table className="min-w-[680px] w-full text-left border-collapse">
                 <thead>
                   <tr className="bg-slate-100 border-b border-slate-200 text-[11px] font-bold text-slate-500 uppercase tracking-wider">
@@ -1589,7 +1589,7 @@ export default function ConfiguracionPanel({
       </div>
 
       {/* Tarjeta de Gestión de Departamentos */}
-      <div className="bg-white rounded-3xl p-6 border border-slate-200 shadow-sm space-y-6 anim-card-in">
+      <div className="w-full min-w-0 max-w-full bg-white rounded-3xl p-4 sm:p-6 border border-slate-200 shadow-sm space-y-5 sm:space-y-6 anim-card-in">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-slate-100 pb-3">
           <h3 className="text-lg font-bold text-slate-900 flex items-center gap-2">
             <Building className="w-5 h-5 text-teal-600" />
@@ -1629,7 +1629,7 @@ export default function ConfiguracionPanel({
             Listado de Departamentos Registrados
           </h4>
           
-          <div className="overflow-x-auto border border-slate-200 rounded-2xl bg-slate-50">
+          <div className="w-full max-w-full overflow-x-auto overscroll-x-contain touch-pan-x [-webkit-overflow-scrolling:touch] border border-slate-200 rounded-2xl bg-slate-50">
             <table className="min-w-[500px] w-full text-left border-collapse">
               <thead>
                 <tr className="bg-slate-100 border-b border-slate-200 text-xs font-bold text-slate-500 uppercase tracking-wider">
@@ -1724,7 +1724,7 @@ export default function ConfiguracionPanel({
       </div>
 
       {/* Tarjeta de Gestión de Multi-Catálogos */}
-      <div className="bg-white rounded-3xl p-6 border border-slate-200 shadow-sm space-y-6 anim-card-in">
+      <div className="w-full min-w-0 max-w-full bg-white rounded-3xl p-4 sm:p-6 border border-slate-200 shadow-sm space-y-5 sm:space-y-6 anim-card-in">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-slate-100 pb-3">
           <h3 className="text-lg font-bold text-slate-900 flex items-center gap-2">
             <Layers className="w-5 h-5 text-teal-600" />
@@ -1776,7 +1776,7 @@ export default function ConfiguracionPanel({
             Listado de Catálogos del Sistema
           </h4>
           
-          <div className="overflow-x-auto border border-slate-200 rounded-2xl bg-slate-50">
+          <div className="w-full max-w-full overflow-x-auto overscroll-x-contain touch-pan-x [-webkit-overflow-scrolling:touch] border border-slate-200 rounded-2xl bg-slate-50">
             <table className="min-w-[600px] w-full text-left border-collapse">
               <thead>
                 <tr className="bg-slate-100 border-b border-slate-200 text-xs font-bold text-slate-500 uppercase tracking-wider">
@@ -1900,7 +1900,7 @@ export default function ConfiguracionPanel({
       </div>
 
       {/* Gestión de Conceptos de Facturación (Módulo de Venta) */}
-      <div className="bg-white rounded-3xl p-6 border border-slate-200 shadow-sm space-y-6">
+      <div className="w-full min-w-0 max-w-full bg-white rounded-3xl p-4 sm:p-6 border border-slate-200 shadow-sm space-y-5 sm:space-y-6">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-slate-100 pb-4">
           <div>
             <h3 className="text-lg font-bold text-slate-900 flex items-center gap-2">
@@ -1954,8 +1954,8 @@ export default function ConfiguracionPanel({
 
         {/* Lista de Conceptos */}
         <div className="border border-slate-200 rounded-2xl overflow-hidden">
-          <div className="overflow-x-auto">
-            <table className="w-full text-left border-collapse">
+          <div className="w-full max-w-full overflow-x-auto overscroll-x-contain touch-pan-x [-webkit-overflow-scrolling:touch]">
+            <table className="min-w-[540px] w-full text-left border-collapse">
               <thead>
                 <tr className="bg-slate-50 border-b border-slate-200 text-[10px] font-black uppercase text-slate-500 tracking-wider">
                   <th className="px-4 py-3">Concepto</th>
@@ -2070,9 +2070,9 @@ export default function ConfiguracionPanel({
       </div>
 
       {isAnyer && (
-        <div className="anim-card-in space-y-6">
+        <div className="w-full min-w-0 max-w-full anim-card-in space-y-5 sm:space-y-6">
           {/* Tarjeta de Cierre de Mes */}
-          <div className="bg-white rounded-3xl p-6 border border-slate-200 shadow-sm space-y-4">
+          <div className="w-full min-w-0 max-w-full bg-white rounded-3xl p-4 sm:p-6 border border-slate-200 shadow-sm space-y-4">
             <h3 className="text-lg font-bold text-slate-900 flex items-center gap-2 border-b border-slate-100 pb-3">
               <RefreshCw className="w-5 h-5 text-rose-600" />
               Cierre de Período Mensual
@@ -2099,7 +2099,7 @@ export default function ConfiguracionPanel({
           </div>
 
           {/* Tarjeta de Personalización de Colores */}
-          <div className="bg-white rounded-3xl p-6 border border-slate-200 shadow-sm space-y-6">
+          <div className="w-full min-w-0 max-w-full bg-white rounded-3xl p-4 sm:p-6 border border-slate-200 shadow-sm space-y-5 sm:space-y-6">
             <h3 className="text-lg font-bold text-slate-900 flex items-center gap-2 border-b border-slate-100 pb-3">
               <Palette className="w-5 h-5 text-teal-600" />
               Personalización de la Identidad Visual

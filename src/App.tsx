@@ -2890,14 +2890,14 @@ export default function App() {
 
           {/* 2. Área Principal de Contenido */}
           <div
-            className={`flex-1 min-w-0 flex flex-col min-h-screen pb-28 transition-[padding] duration-200 ease-out ${
+            className={`flex-1 w-full max-w-full min-w-0 flex flex-col min-h-screen pb-28 transition-[padding] duration-200 ease-out ${
               !isSidebarCollapsed ? "lg:pl-64" : "lg:pl-0"
             }`}
           >
-            <header className="sticky top-0 z-30 text-white shadow-lg bg-custom-sidebar border-b border-white/10">
-              <div className="max-w-7xl mx-auto px-3.5 sm:px-6 pt-3 pb-2.5 flex flex-col md:flex-row md:items-center justify-between gap-2.5 sm:gap-3.5">
-                <div className="flex items-center justify-between gap-2">
-                  <div className="flex items-center gap-2">
+            <header className="sticky top-0 z-30 text-white shadow-lg bg-custom-sidebar border-b border-white/10 w-full min-w-0">
+              <div className="max-w-7xl mx-auto pl-9 pr-3.5 sm:px-6 pt-3 pb-2.5 flex flex-col md:flex-row md:items-center justify-between gap-2.5 sm:gap-3.5">
+                <div className="flex items-center justify-between gap-2 min-w-0">
+                  <div className="flex items-center gap-2 min-w-0">
                     <div
                       className="cursor-pointer group flex items-center gap-2.5 min-w-0"
                       onClick={() => {
@@ -3090,7 +3090,7 @@ export default function App() {
             </div>
           )}
 
-          <main className="px-4 sm:px-6 py-6 max-w-6xl mx-auto">
+          <main className="w-full min-w-0 max-w-6xl mx-auto px-3 sm:px-6 py-4 sm:py-6">
             {/* Contenido Principal */}
             {activeTab === "dashboard" && (
               <DashboardPanel
@@ -3593,15 +3593,15 @@ export default function App() {
           {selectedProductCode && (
             <div className="fixed inset-0 z-40 flex items-end sm:items-center justify-center p-0 sm:p-4">
               <div className="absolute inset-0 bg-slate-950/55 backdrop-blur-xs" onClick={() => setSelectedProductCode(null)}></div>
-              <div className="relative w-full sm:max-w-2xl h-[90vh] sm:h-[86vh] bg-slate-50 rounded-t-3xl sm:rounded-3xl shadow-2xl border border-slate-200 flex flex-col overflow-hidden anim-slide-up sm:anim-pop-in">
-                <div className="flex items-center justify-between px-6 py-4 border-b border-slate-200 bg-white shrink-0">
+              <div className="relative w-full sm:max-w-2xl h-[92dvh] sm:h-[86dvh] bg-slate-50 rounded-t-3xl sm:rounded-3xl shadow-2xl border border-slate-200 flex flex-col overflow-hidden anim-slide-up sm:anim-pop-in">
+                <div className="flex items-center justify-between px-4 sm:px-6 py-3.5 sm:py-4 border-b border-slate-200 bg-white shrink-0">
                   <button
                     onClick={() => setSelectedProductCode(null)}
                     className="p-2 -ml-1.5 text-slate-500 hover:text-slate-800 hover:bg-slate-100 rounded-xl active:scale-90 transition cursor-pointer"
                   >
                     <X className="w-5 h-5" />
                   </button>
-                  <span className="font-mono text-xs font-extrabold text-teal-800 bg-teal-50 px-3.5 py-1.5 rounded-xl border border-teal-200 uppercase tracking-wider">
+                  <span className="font-mono text-xs font-extrabold text-teal-800 bg-teal-50 px-3.5 py-1.5 rounded-xl border border-teal-200 uppercase tracking-wider truncate max-w-[65vw]">
                     Suministro: {selectedProductCode}
                   </span>
                   <button
@@ -3613,10 +3613,10 @@ export default function App() {
                   </button>
                 </div>
 
-                <div className="flex-1 overflow-y-auto px-6 py-6 space-y-6">
+                <div className="flex-1 overflow-y-auto px-4 sm:px-6 py-4 sm:py-6 space-y-5 sm:space-y-6">
                   <ProductPhotosEditor images={editImages} onChange={setEditImages} />
 
-                  <div className="bg-white rounded-2xl p-5 border border-slate-200/90 space-y-4 shadow-2xs">
+                  <div className="bg-white rounded-2xl p-4 sm:p-5 border border-slate-200/90 space-y-4 shadow-2xs">
                     <div>
                       <label className="block text-xs font-extrabold text-slate-700 uppercase tracking-wider mb-1.5">
                         Nombre del Suministro
@@ -3983,34 +3983,34 @@ export default function App() {
           {showProductAdd && (
             <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center p-0 sm:p-4">
               <div className="absolute inset-0 bg-slate-950/55 backdrop-blur-xs" onClick={() => setShowProductAdd(false)}></div>
-              <div className="relative w-full sm:max-w-3xl bg-slate-50 rounded-t-3xl sm:rounded-3xl shadow-2xl flex flex-col overflow-hidden anim-slide-up sm:anim-pop-in max-h-[92vh] border border-slate-200">
+              <div className="relative w-full sm:max-w-3xl bg-slate-50 rounded-t-3xl sm:rounded-3xl shadow-2xl flex flex-col overflow-hidden anim-slide-up sm:anim-pop-in max-h-[92dvh] border border-slate-200">
                 {/* Cabecera del Modal (Imagen 3) */}
-                <div className="px-6 py-4 flex items-center justify-between border-b border-slate-200 bg-white shrink-0">
-                  <div className="flex items-center gap-3.5">
-                    <div className="w-11 h-11 rounded-2xl bg-teal-50 border border-teal-200 flex items-center justify-center text-teal-700 shrink-0">
-                      <FileText className="w-5 h-5" />
+                <div className="px-4 sm:px-6 py-3.5 sm:py-4 flex items-center justify-between border-b border-slate-200 bg-white shrink-0">
+                  <div className="flex items-center gap-2.5 sm:gap-3.5 min-w-0">
+                    <div className="w-9 h-9 sm:w-11 sm:h-11 rounded-2xl bg-teal-50 border border-teal-200 flex items-center justify-center text-teal-700 shrink-0">
+                      <FileText className="w-4 h-4 sm:w-5 sm:h-5" />
                     </div>
-                    <div>
-                      <h2 className="font-extrabold text-slate-900 text-base uppercase tracking-wide leading-tight">
+                    <div className="min-w-0">
+                      <h2 className="font-extrabold text-slate-900 text-xs sm:text-base uppercase tracking-wide leading-tight truncate">
                         REGISTRO DE ENTRADA DE PRODUCTOS
                       </h2>
-                      <p className="text-xs text-slate-500 font-semibold mt-0.5">
+                      <p className="text-[11px] sm:text-xs text-slate-500 font-semibold mt-0.5 line-clamp-1">
                         Agrega los productos a la lista temporal de la factura y confirma la entrada en un solo paso
                       </p>
                     </div>
                   </div>
                   <button
                     onClick={() => setShowProductAdd(false)}
-                    className="p-2 text-slate-400 hover:text-slate-700 hover:bg-slate-100 rounded-xl transition cursor-pointer"
+                    className="p-2 text-slate-400 hover:text-slate-700 hover:bg-slate-100 rounded-xl transition cursor-pointer shrink-0"
                   >
                     <X className="w-5 h-5" />
                   </button>
                 </div>
 
                 {/* Cuerpo con Scroll */}
-                <div className="flex-1 overflow-y-auto px-5 sm:px-6 py-5 space-y-5 bg-slate-50">
+                <div className="flex-1 overflow-y-auto px-3.5 sm:px-6 py-4 sm:py-5 space-y-4 sm:space-y-5 bg-slate-50">
                   {/* SECCIÓN 1: INFORMACIÓN DE LA FACTURA / COMPROBANTE */}
-                  <div className="bg-white rounded-2xl border border-slate-200/90 p-5 shadow-2xs space-y-4">
+                  <div className="bg-white rounded-2xl border border-slate-200/90 p-4 sm:p-5 shadow-2xs space-y-4">
                     <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-1 border-b border-slate-100 pb-3">
                       <h3 className="flex items-center gap-2 text-xs font-extrabold uppercase tracking-wider text-teal-800">
                         <FileText className="w-4 h-4 text-teal-600" />

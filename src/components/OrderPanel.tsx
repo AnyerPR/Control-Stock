@@ -124,8 +124,8 @@ export default function OrderPanel({
   const activeCatalogName = availableCatalogos.find((c) => c.id === orderCatalogId)?.nombre || "Medicamentos e Insumos";
 
   return (
-    <div className="anim-card-in mb-6 rounded-3xl bg-white border border-slate-200/90 shadow-xs overflow-hidden">
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 px-6 py-5 border-b border-slate-200 bg-slate-50/50">
+    <div className="anim-card-in mb-6 w-full min-w-0 max-w-full rounded-3xl bg-white border border-slate-200/90 shadow-xs overflow-hidden">
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 px-4 sm:px-6 py-4 sm:py-5 border-b border-slate-200 bg-slate-50/50">
         <div>
           <p className="text-[11px] uppercase tracking-[0.2em] text-teal-700 font-extrabold">
             Salida de Medicamentos
@@ -185,7 +185,7 @@ export default function OrderPanel({
         </div>
       </div>
 
-      <div className="p-6 space-y-6">
+      <div className="p-4 sm:p-6 space-y-5 sm:space-y-6">
         {/* Selector de Catálogo */}
         <div className="bg-slate-50 border border-slate-200/90 rounded-2xl p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
           <div className="space-y-1">
@@ -206,7 +206,7 @@ export default function OrderPanel({
           </select>
         </div>
 
-        <div className="overflow-x-auto border border-slate-200/90 rounded-2xl bg-slate-50">
+        <div className="w-full max-w-full overflow-x-auto overscroll-x-contain touch-pan-x [-webkit-overflow-scrolling:touch] border border-slate-200/90 rounded-2xl bg-slate-50">
           <table className="min-w-[650px] w-full text-left border-collapse">
             <thead>
               <tr className="bg-slate-100 border-b border-slate-200 text-[11px] font-extrabold text-slate-600 uppercase tracking-wider">

@@ -712,31 +712,31 @@ export default function DashboardPanel({
   ]);
 
   return (
-    <div className="space-y-6 anim-card-in">
+    <div className="space-y-4 sm:space-y-6 anim-card-in w-full min-w-0 max-w-full">
       {/* =====================================================================
           1. CABECERA EJECUTIVA E INTERACTIVA DEL DASHBOARD
          ===================================================================== */}
-      <div className="bg-white rounded-3xl border border-slate-200/90 p-5 sm:p-6 shadow-xs relative overflow-hidden">
+      <div className="bg-white rounded-2xl sm:rounded-3xl border border-slate-200/90 p-4 sm:p-6 shadow-xs relative overflow-hidden w-full min-w-0">
         <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
-          <div className="space-y-1.5">
-            <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-teal-50 border border-teal-200 text-teal-800 text-[11px] font-extrabold uppercase tracking-wider">
-              <LayoutDashboard className="w-3.5 h-3.5 text-teal-600" />
-              <span>Panel de Control Interactivo • {activePeriod}</span>
+          <div className="space-y-1.5 min-w-0">
+            <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-teal-50 border border-teal-200 text-teal-800 text-[10px] sm:text-[11px] font-extrabold uppercase tracking-wider">
+              <LayoutDashboard className="w-3.5 h-3.5 text-teal-600 shrink-0" />
+              <span className="truncate">Panel de Control Interactivo • {activePeriod}</span>
             </div>
-            <h2 className="text-xl sm:text-2xl font-black text-slate-900 tracking-tight">
+            <h2 className="text-lg sm:text-2xl font-black text-slate-900 tracking-tight truncate">
               Hola, {currentUser.nombre}
             </h2>
-            <p className="text-xs sm:text-sm text-slate-500 font-medium flex flex-wrap items-center gap-2">
+            <p className="text-xs sm:text-sm text-slate-500 font-medium flex flex-wrap items-center gap-x-2 gap-y-1">
               <span className="inline-flex items-center gap-1 font-bold text-slate-700">
-                <ShieldCheck className="w-4 h-4 text-teal-600" />
+                <ShieldCheck className="w-4 h-4 text-teal-600 shrink-0" />
                 Rol: {currentUser.rol}
               </span>
-              <span>•</span>
+              <span className="hidden sm:inline">•</span>
               <span className="inline-flex items-center gap-1 font-bold text-slate-700">
-                <Building2 className="w-4 h-4 text-teal-600" />
+                <Building2 className="w-4 h-4 text-teal-600 shrink-0" />
                 Área: {currentUser.departamento || "Almacén y Suministro"}
               </span>
-              <span>•</span>
+              <span className="hidden sm:inline">•</span>
               <span className="text-teal-700 font-extrabold">
                 {availableCatalogos.length}{" "}
                 {availableCatalogos.length === 1 ? "catálogo habilitado" : "catálogos habilitados"}
@@ -745,9 +745,9 @@ export default function DashboardPanel({
           </div>
 
           {/* Controles Interactivos de Catálogo y Actualización */}
-          <div className="flex flex-wrap items-center gap-2.5">
-            <div className="flex flex-col bg-slate-50 border border-slate-200/90 rounded-2xl px-3.5 py-2 min-w-[220px]">
-              <label className="text-[10px] font-black uppercase text-slate-400 tracking-wider mb-0.5">
+          <div className="flex items-center gap-2 w-full lg:w-auto">
+            <div className="flex-1 lg:flex-initial flex flex-col bg-slate-50 border border-slate-200/90 rounded-2xl px-3.5 py-2 min-w-0 sm:min-w-[220px]">
+              <label className="text-[10px] font-black uppercase text-slate-400 tracking-wider mb-0.5 truncate">
                 Filtrar Estadísticas por Catálogo
               </label>
               <select
@@ -760,7 +760,7 @@ export default function DashboardPanel({
                   }
                   playSound("click");
                 }}
-                className="bg-transparent text-xs sm:text-sm font-extrabold text-slate-800 outline-none cursor-pointer"
+                className="bg-transparent text-xs sm:text-sm font-extrabold text-slate-800 outline-none cursor-pointer w-full truncate"
               >
                 <option value="todos">
                   📚 Todos mis catálogos ({availableCatalogos.length})
@@ -779,7 +779,7 @@ export default function DashboardPanel({
                 fetchDashboardAuxiliaryData();
                 playSound("click");
               }}
-              className="inline-flex items-center gap-2 px-4 py-3 rounded-2xl border border-slate-200 bg-white hover:bg-slate-50 active:scale-95 transition text-xs font-extrabold text-slate-700 cursor-pointer shadow-2xs"
+              className="inline-flex items-center justify-center gap-2 px-3.5 sm:px-4 py-3 rounded-2xl border border-slate-200 bg-white hover:bg-slate-50 active:scale-95 transition text-xs font-extrabold text-slate-700 cursor-pointer shadow-2xs shrink-0"
               title="Actualizar indicadores en tiempo real"
             >
               <RefreshCw className={`w-4 h-4 text-teal-600 ${loadingExtra ? "animate-spin" : ""}`} />
@@ -1379,7 +1379,7 @@ export default function DashboardPanel({
                 </p>
               </div>
             ) : (
-              <div className="overflow-x-auto border border-slate-200/80 rounded-2xl">
+              <div className="w-full max-w-full overflow-x-auto overscroll-x-contain touch-pan-x border border-slate-200/80 rounded-2xl">
                 <table className="w-full text-left border-collapse min-w-[640px]">
                   <thead>
                     <tr className="bg-slate-50 border-b border-slate-200 text-[10px] font-black uppercase text-slate-500 tracking-wider">

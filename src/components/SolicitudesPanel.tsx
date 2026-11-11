@@ -1953,42 +1953,44 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
   };
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-4 sm:space-y-6 w-full min-w-0 max-w-full">
       {/* Selector de periodo y controles principales */}
-      <div className="bg-white rounded-3xl p-6 border border-slate-200 shadow-sm">
-        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-          <div>
-            <h3 className="text-lg font-bold text-slate-900 flex items-center gap-2">
-              <ClipboardList className="w-5 h-5 text-teal-600" />
-              {currentUser.rol === "Administrador" ? "Gestión de Órdenes de Servicio" : "Mis Solicitudes de Departamento"}
+      <div className="bg-white rounded-2xl sm:rounded-3xl p-4 sm:p-6 border border-slate-200 shadow-sm w-full min-w-0">
+        <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3.5 sm:gap-4">
+          <div className="min-w-0">
+            <h3 className="text-base sm:text-lg font-bold text-slate-900 flex items-center gap-2">
+              <ClipboardList className="w-5 h-5 text-teal-600 shrink-0" />
+              <span className="truncate">
+                {currentUser.rol === "Administrador" ? "Gestión de Órdenes de Servicio" : "Mis Solicitudes de Departamento"}
+              </span>
             </h3>
-            <p className="text-slate-500 text-xs mt-1">
+            <p className="text-slate-500 text-xs mt-1 leading-relaxed">
               {currentUser.rol === "Administrador"
                 ? "Consulta, monitorea y autoriza todas las solicitudes departamentales de insumos"
                 : "Crea y supervisa las solicitudes de medicamentos y materiales para tu área"}
             </p>
           </div>
-          <div className="flex gap-2 flex-wrap">
+          <div className="grid grid-cols-2 sm:flex sm:flex-wrap gap-2">
             <button
               onClick={() => {
                 setActiveSubTab("reabastecimiento");
                 playSound("click");
               }}
-              className={`px-4 py-2 text-xs font-bold rounded-xl transition flex items-center gap-1.5 shadow-2xs ${
+              className={`px-3 sm:px-4 py-2 text-[11px] sm:text-xs font-bold rounded-xl transition flex items-center justify-center gap-1.5 shadow-2xs ${
                 activeSubTab === "reabastecimiento"
                   ? "bg-gradient-to-r from-teal-700 to-emerald-700 text-white shadow-md shadow-teal-900/20 font-extrabold"
                   : "bg-teal-50 hover:bg-teal-100 text-teal-800 border border-teal-200"
               }`}
             >
-              <Sparkles className="w-3.5 h-3.5 text-amber-300" />
-              <span>Reabastecimiento Inteligente</span>
+              <Sparkles className="w-3.5 h-3.5 text-amber-300 shrink-0" />
+              <span className="truncate">Reabastecimiento</span>
             </button>
             <button
               onClick={() => {
                 setActiveSubTab("list");
                 playSound("click");
               }}
-              className={`px-4 py-2 text-xs font-bold rounded-xl transition ${
+              className={`px-3 sm:px-4 py-2 text-[11px] sm:text-xs font-bold rounded-xl transition text-center truncate ${
                 activeSubTab === "list" ? "bg-teal-800 text-white shadow-sm" : "bg-slate-50 hover:bg-slate-100 text-slate-600 border border-slate-200"
               }`}
             >
@@ -1999,25 +2001,25 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
                 setActiveSubTab("create");
                 playSound("click");
               }}
-              className={`px-4 py-2 text-xs font-bold rounded-xl transition flex items-center gap-1.5 ${
+              className={`px-3 sm:px-4 py-2 text-[11px] sm:text-xs font-bold rounded-xl transition flex items-center justify-center gap-1.5 ${
                 activeSubTab === "create" ? "bg-teal-800 text-white shadow-sm" : "bg-slate-50 hover:bg-slate-100 text-slate-600 border border-slate-200"
               }`}
             >
-              <Plus className="w-3.5 h-3.5" />
-              Nueva Solicitud Manual
+              <Plus className="w-3.5 h-3.5 shrink-0" />
+              <span className="truncate">Solicitud Manual</span>
             </button>
             <button
               onClick={() => {
                 setActiveSubTab("history");
                 playSound("click");
               }}
-              className={`px-4 py-2 text-xs font-bold rounded-xl transition flex items-center gap-1.5 ${
+              className={`px-3 sm:px-4 py-2 text-[11px] sm:text-xs font-bold rounded-xl transition flex items-center justify-center gap-1.5 ${
                 activeSubTab === "history" ? "bg-teal-800 text-white shadow-sm" : "bg-slate-50 hover:bg-slate-100 text-slate-600 border border-slate-200"
               }`}
             >
-              <FileText className="w-3.5 h-3.5" />
-              <span>Historial de Solicitudes</span>
-              <span className={`px-1.5 py-0.2 rounded-full text-[10px] font-black ${activeSubTab === "history" ? "bg-white/20 text-white" : "bg-teal-100 text-teal-800"}`}>
+              <FileText className="w-3.5 h-3.5 shrink-0" />
+              <span className="truncate">Historial</span>
+              <span className={`px-1.5 py-0.2 rounded-full text-[10px] font-black shrink-0 ${activeSubTab === "history" ? "bg-white/20 text-white" : "bg-teal-100 text-teal-800"}`}>
                 {solicitudes.length}
               </span>
             </button>
@@ -2240,10 +2242,10 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
               {filteredList.slice(0, visibleListCount).map((sol) => {
                 const authMeta = getAuthorizationMetadata(sol);
                 return (
-                  <div key={sol.id} className="bg-white rounded-3xl border border-slate-200 p-6 shadow-sm hover:shadow-md transition space-y-4">
-                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-100 pb-3">
-                      <div className="flex items-center gap-3 flex-wrap">
-                        <span className="text-sm font-black text-teal-800 bg-teal-50 border border-teal-200 px-3 py-1.5 rounded-2xl">
+                  <div key={sol.id} className="bg-white rounded-2xl sm:rounded-3xl border border-slate-200 p-4 sm:p-6 shadow-sm hover:shadow-md transition space-y-4 w-full min-w-0">
+                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 sm:gap-3 border-b border-slate-100 pb-3">
+                      <div className="flex items-center gap-2 sm:gap-3 flex-wrap">
+                        <span className="text-xs sm:text-sm font-black text-teal-800 bg-teal-50 border border-teal-200 px-3 py-1.5 rounded-2xl">
                           {sol.numeroSolicitud}
                         </span>
                         <span className={`text-[10px] font-black uppercase tracking-wider px-2.5 py-1 rounded-full ${getPriorityBadgeClass(sol.prioridad)}`}>
@@ -2443,20 +2445,20 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
           )}
         </div>
       ) : activeSubTab === "create" ? (
-        <form onSubmit={handleCreateRequest} className="bg-white rounded-3xl p-6 border border-slate-200 shadow-sm space-y-6 anim-card-in">
+        <form onSubmit={handleCreateRequest} className="bg-white rounded-2xl sm:rounded-3xl p-4 sm:p-6 border border-slate-200 shadow-sm space-y-5 sm:space-y-6 anim-card-in w-full min-w-0">
           <div className="border-b border-slate-100 pb-4">
-            <h3 className="text-xl font-extrabold text-slate-900 flex items-center gap-2">
-              <PlusCircle className="w-6 h-6 text-teal-600" />
-              Registrar Nueva Solicitud Departamental
+            <h3 className="text-base sm:text-xl font-extrabold text-slate-900 flex items-center gap-2">
+              <PlusCircle className="w-5 h-5 sm:w-6 sm:h-6 text-teal-600 shrink-0" />
+              <span>Registrar Nueva Solicitud Departamental</span>
             </h3>
             <p className="text-slate-500 text-xs mt-1">
               Seleccione productos del catálogo digital o ingrese los insumos requeridos de forma manual.
             </p>
           </div>
 
-          <div className="grid grid-cols-1 lg:grid-cols-12 gap-8">
+          <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 sm:gap-8">
             {/* COLUMNA IZQUIERDA: DATOS DE LA SOLICITUD Y DRAFT */}
-            <div className="lg:col-span-7 space-y-5">
+            <div className="lg:col-span-7 space-y-5 min-w-0">
               <h4 className="text-sm font-black uppercase text-slate-700 tracking-wider flex items-center gap-2">
                 <span className="w-1.5 h-4 rounded-full bg-teal-600"></span>
                 1. Información General de la Solicitud
@@ -2642,7 +2644,7 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
             </div>
 
             {/* COLUMNA DERECHA: CATÁLOGO DIGITAL CON STOCK FÍSICO Y SISTEMA */}
-            <div className="lg:col-span-5 bg-slate-50/50 rounded-2xl p-5 border border-slate-200/60 flex flex-col h-[650px]">
+            <div className="lg:col-span-5 bg-slate-50/50 rounded-2xl p-3.5 sm:p-5 border border-slate-200/60 flex flex-col h-[500px] sm:h-[650px] min-w-0">
               <div className="mb-4 space-y-3 shrink-0">
                 <h4 className="text-sm font-black uppercase text-slate-700 tracking-wider flex items-center gap-2">
                   <Layers className="w-5 h-5 text-teal-600" />
@@ -2895,13 +2897,13 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
           const paginatedHistorySolicitudes = filteredHistorialSolicitudes.slice(0, visibleHistoryCount);
 
           return (
-            <div className="bg-white rounded-3xl border border-slate-200 shadow-sm overflow-hidden anim-card-in">
-              <div className="px-6 py-4 bg-slate-50 border-b border-slate-200 flex flex-col gap-4">
+            <div className="bg-white rounded-2xl sm:rounded-3xl border border-slate-200 shadow-sm overflow-hidden anim-card-in w-full min-w-0 max-w-full">
+              <div className="px-4 sm:px-6 py-4 bg-slate-50 border-b border-slate-200 flex flex-col gap-4">
                 <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-                  <div>
+                  <div className="min-w-0">
                     <h4 className="font-extrabold text-slate-900 text-sm sm:text-base flex items-center gap-2">
-                      <ClipboardList className="w-5 h-5 text-teal-600" />
-                      Historial General de Solicitudes y Autorizaciones
+                      <ClipboardList className="w-5 h-5 text-teal-600 shrink-0" />
+                      <span>Historial General de Solicitudes y Autorizaciones</span>
                     </h4>
                     <p className="text-xs text-slate-500 mt-0.5">
                       {isAdmin
@@ -2910,14 +2912,14 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
                     </p>
                   </div>
 
-                  <div className="flex items-center gap-1.5 bg-white p-1 rounded-xl border border-slate-200 self-start sm:self-auto">
+                  <div className="flex items-center gap-1.5 bg-white p-1 rounded-xl border border-slate-200 w-full sm:w-auto">
                     <button
                       type="button"
                       onClick={() => {
                         setHistoryViewMode("solicitudes");
                         playSound("click");
                       }}
-                      className={`px-3 py-1.5 rounded-lg text-xs font-extrabold transition cursor-pointer ${
+                      className={`flex-1 sm:flex-initial px-3 py-1.5 rounded-lg text-xs font-extrabold transition cursor-pointer ${
                         historyViewMode === "solicitudes"
                           ? "bg-teal-800 text-white shadow-2xs"
                           : "text-slate-600 hover:bg-slate-100"
@@ -2931,19 +2933,19 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
                         setHistoryViewMode("eventos");
                         playSound("click");
                       }}
-                      className={`px-3 py-1.5 rounded-lg text-xs font-extrabold transition cursor-pointer ${
+                      className={`flex-1 sm:flex-initial px-3 py-1.5 rounded-lg text-xs font-extrabold transition cursor-pointer ${
                         historyViewMode === "eventos"
                           ? "bg-teal-800 text-white shadow-2xs"
                           : "text-slate-600 hover:bg-slate-100"
                       }`}
                     >
-                      Bitácora de Eventos ({filteredHistorial.length})
+                      Bitácora ({filteredHistorial.length})
                     </button>
                   </div>
                 </div>
 
                 {/* Panel de Filtros para el Historial (Fecha, Usuario, Estado y Departamento) */}
-                <div className="grid grid-cols-1 sm:grid-cols-4 gap-3 bg-white p-4 rounded-2xl border border-slate-200/80">
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 bg-white p-3.5 sm:p-4 rounded-2xl border border-slate-200/80">
                   <div>
                     <label className="block text-[10px] font-black uppercase text-slate-400 mb-1">Fecha de Creación</label>
                     <input
@@ -3044,8 +3046,8 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
                     </div>
                   ) : (
                     <>
-                      <div className="overflow-x-auto">
-                        <table className="w-full text-left border-collapse min-w-[980px] text-xs">
+                      <div className="w-full max-w-full overflow-x-auto overscroll-x-contain touch-pan-x [-webkit-overflow-scrolling:touch]">
+                        <table className="w-full text-left border-collapse min-w-[920px] text-xs">
                           <thead>
                             <tr className="bg-slate-100/90 border-b border-slate-200 text-[10px] font-black uppercase tracking-wider text-slate-600">
                               <th className="py-3.5 px-4 whitespace-nowrap">N.º Solicitud</th>
@@ -3289,26 +3291,26 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
 
       {/* Modal para Ver Historial de Cambios / Modificar Estado */}
       {selectedSolicitud && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+        <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center p-0 sm:p-4">
           <div className="absolute inset-0 bg-black/40 backdrop-blur-xs animate-fade-in" onClick={() => setSelectedSolicitud(null)}></div>
-          <div className="relative bg-white rounded-3xl border border-slate-200 shadow-xl max-w-4xl w-full overflow-hidden anim-pop-in flex flex-col max-h-[90vh]">
+          <div className="relative bg-white rounded-t-3xl sm:rounded-3xl border border-slate-200 shadow-xl max-w-4xl w-full overflow-hidden anim-slide-up sm:anim-pop-in flex flex-col max-h-[92dvh]">
             {/* Header */}
-            <div className="flex items-center justify-between px-6 py-4 border-b border-slate-200 bg-slate-50 shrink-0">
-              <h3 className="font-black text-slate-900 flex items-center gap-2 font-sans text-base">
-                <Layers className="w-5 h-5 text-teal-600" />
-                Detalle de Solicitud {selectedSolicitud.numeroSolicitud}
+            <div className="flex items-center justify-between px-4 sm:px-6 py-3.5 sm:py-4 border-b border-slate-200 bg-slate-50 shrink-0">
+              <h3 className="font-black text-slate-900 flex items-center gap-2 font-sans text-sm sm:text-base truncate">
+                <Layers className="w-5 h-5 text-teal-600 shrink-0" />
+                <span className="truncate">Detalle de Solicitud {selectedSolicitud.numeroSolicitud}</span>
               </h3>
               <button
                 onClick={() => setSelectedSolicitud(null)}
-                className="rounded-xl border border-slate-200 p-1.5 text-slate-500 hover:bg-slate-100 transition cursor-pointer"
+                className="rounded-xl border border-slate-200 p-1.5 text-slate-500 hover:bg-slate-100 transition cursor-pointer shrink-0"
               >
                 <X className="w-4 h-4" />
               </button>
             </div>
 
             {/* Export & Admin Authorization Actions Bar */}
-            <div className="px-6 py-3 bg-teal-50/50 border-b border-slate-200 flex flex-wrap gap-2 justify-between items-center shrink-0">
-              <div className="flex flex-wrap items-center gap-2">
+            <div className="px-4 sm:px-6 py-3 bg-teal-50/50 border-b border-slate-200 flex flex-wrap gap-2 justify-between items-center shrink-0">
+              <div className="flex flex-wrap items-center gap-2 w-full sm:w-auto">
                 {isAdmin && selectedSolicitud.estado === "Pendiente" && (
                   <>
                     <button
@@ -3317,10 +3319,10 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
                         await handleDirectStatusChange(selectedSolicitud, "Aprobada");
                         setSelectedSolicitud(null);
                       }}
-                      className="flex items-center gap-1.5 px-4 py-2 rounded-xl bg-teal-700 hover:bg-teal-800 text-white font-extrabold text-xs shadow-xs transition active:scale-95 cursor-pointer"
+                      className="flex-1 sm:flex-initial justify-center flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-teal-700 hover:bg-teal-800 text-white font-extrabold text-xs shadow-xs transition active:scale-95 cursor-pointer"
                     >
-                      <CheckCircle2 className="w-4 h-4" />
-                      Autorizar Solicitud (ADMIN)
+                      <CheckCircle2 className="w-4 h-4 shrink-0" />
+                      <span>Autorizar (ADMIN)</span>
                     </button>
                     <button
                       type="button"
@@ -3328,48 +3330,48 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
                         await handleDirectStatusChange(selectedSolicitud, "Rechazada");
                         setSelectedSolicitud(null);
                       }}
-                      className="flex items-center gap-1.5 px-4 py-2 rounded-xl bg-rose-600 hover:bg-rose-700 text-white font-extrabold text-xs shadow-xs transition active:scale-95 cursor-pointer"
+                      className="flex-1 sm:flex-initial justify-center flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-rose-600 hover:bg-rose-700 text-white font-extrabold text-xs shadow-xs transition active:scale-95 cursor-pointer"
                     >
-                      <XCircle className="w-4 h-4" />
-                      Rechazar Solicitud (ADMIN)
+                      <XCircle className="w-4 h-4 shrink-0" />
+                      <span>Rechazar (ADMIN)</span>
                     </button>
                   </>
                 )}
               </div>
 
-              <div className="flex flex-wrap gap-2 justify-end">
+              <div className="flex flex-wrap gap-1.5 sm:gap-2 justify-end w-full sm:w-auto">
                 {/* Botón Eliminar Orden (exclusivo Anyer) */}
                 {(currentUser.usuario.toLowerCase() === "anyer" || currentUser.nombre.toLowerCase() === "anyer") && (
                   <button
                     type="button"
                     onClick={() => handleDeleteRequest(selectedSolicitud)}
-                    className="flex items-center gap-1.5 px-4 py-2 rounded-xl bg-rose-600 hover:bg-rose-700 text-white font-extrabold text-xs shadow-xs transition active:scale-95 cursor-pointer border border-rose-750/10"
+                    className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-rose-600 hover:bg-rose-700 text-white font-extrabold text-xs shadow-xs transition active:scale-95 cursor-pointer border border-rose-750/10"
                   >
-                    <Trash2 className="w-4 h-4" />
-                    Eliminar Orden
+                    <Trash2 className="w-4 h-4 shrink-0" />
+                    <span>Eliminar</span>
                   </button>
                 )}
                 <button
                   type="button"
                   onClick={() => exportToWord(selectedSolicitud)}
-                  className="flex items-center gap-1.5 px-4 py-2 rounded-xl bg-teal-700 hover:bg-teal-800 text-white font-extrabold text-xs shadow-xs transition active:scale-95 cursor-pointer border border-teal-800/10"
+                  className="flex-1 sm:flex-initial justify-center flex items-center gap-1.5 px-3 py-2 rounded-xl bg-teal-700 hover:bg-teal-800 text-white font-extrabold text-xs shadow-xs transition active:scale-95 cursor-pointer border border-teal-800/10"
                 >
-                  <FileText className="w-4 h-4" />
-                  Exportar a Word (.docx)
+                  <FileText className="w-4 h-4 shrink-0" />
+                  <span>Word (.docx)</span>
                 </button>
                 <button
                   type="button"
                   onClick={() => exportToPDF(selectedSolicitud)}
-                  className="flex items-center gap-1.5 px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-900 text-white font-extrabold text-xs shadow-xs transition active:scale-95 cursor-pointer border border-slate-950/10"
+                  className="flex-1 sm:flex-initial justify-center flex items-center gap-1.5 px-3 py-2 rounded-xl bg-slate-800 hover:bg-slate-900 text-white font-extrabold text-xs shadow-xs transition active:scale-95 cursor-pointer border border-slate-950/10"
                 >
-                  <FileText className="w-4 h-4" />
-                  Exportar a PDF (.pdf)
+                  <FileText className="w-4 h-4 shrink-0" />
+                  <span>PDF (.pdf)</span>
                 </button>
               </div>
             </div>
 
             {/* Content (Scrollable) */}
-            <div className="p-6 space-y-6 overflow-y-auto flex-1 text-slate-700 font-sans">
+            <div className="p-4 sm:p-6 space-y-5 sm:space-y-6 overflow-y-auto flex-1 text-slate-700 font-sans">
               {/* Info General en Grid Responsivo */}
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 bg-slate-50 p-4 rounded-2xl border border-slate-200/80 text-xs sm:text-sm">
                 <div>

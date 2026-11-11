@@ -356,61 +356,61 @@ export default function ReabastecimientoInteligente({
   };
 
   return (
-    <div className="space-y-5">
+    <div className="space-y-4 sm:space-y-5 w-full min-w-0 max-w-full">
       {/* Banner superior explicativo y KPIs */}
-      <div className="bg-gradient-to-r from-teal-900 via-teal-800 to-emerald-900 rounded-2xl p-5 text-white shadow-lg border border-teal-700/50">
-        <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
-          <div className="space-y-1.5">
-            <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-teal-500/20 border border-teal-400/30 text-teal-200 text-xs font-extrabold uppercase tracking-wider">
-              <Sparkles className="w-3.5 h-3.5 text-amber-300" />
-              <span>Cálculo Automático de Cobertura Mensual</span>
+      <div className="bg-gradient-to-r from-teal-900 via-teal-800 to-emerald-900 rounded-2xl p-3.5 sm:p-5 text-white shadow-lg border border-teal-700/50 overflow-hidden">
+        <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3.5 sm:gap-4">
+          <div className="space-y-1.5 min-w-0">
+            <div className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-teal-500/20 border border-teal-400/30 text-teal-200 text-[10px] sm:text-xs font-extrabold uppercase tracking-wider">
+              <Sparkles className="w-3.5 h-3.5 text-amber-300 shrink-0" />
+              <span className="truncate">Cálculo Automático de Cobertura Mensual</span>
             </div>
-            <h3 className="text-xl sm:text-2xl font-extrabold tracking-tight">
+            <h3 className="text-base sm:text-2xl font-extrabold tracking-tight leading-snug">
               Reabastecimiento Inteligente de Insumos y Medicamentos
             </h3>
-            <p className="text-xs sm:text-sm text-teal-100/90 max-w-3xl leading-relaxed">
+            <p className="text-[11px] sm:text-sm text-teal-100/90 max-w-3xl leading-relaxed">
               Fórmula activa:{" "}
-              <span className="font-mono font-bold bg-black/25 px-2 py-0.5 rounded-md text-amber-200 border border-white/10">
+              <span className="font-mono font-bold bg-black/25 px-1.5 py-0.5 rounded-md text-amber-200 border border-white/10 inline-block my-0.5">
                 Faltante Sugerido = Consumo Mensual Estimado − Existencia Actual
               </span>
-              . Desliza horizontalmente la tabla: la columna del medicamento permanece fija a la izquierda para facilitar la lectura.
+              . Desliza horizontalmente la tabla: solo la columna del medicamento permanece fija a la izquierda.
             </p>
           </div>
 
-          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5 shrink-0">
-            <div className="bg-black/25 backdrop-blur-xs border border-white/10 rounded-xl p-3 text-center">
-              <span className="block text-[10px] font-bold uppercase tracking-wider text-rose-300">
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 sm:gap-2.5 shrink-0">
+            <div className="bg-black/25 backdrop-blur-xs border border-white/10 rounded-xl p-2.5 sm:p-3 text-center">
+              <span className="block text-[9px] sm:text-[10px] font-bold uppercase tracking-wider text-rose-300 truncate">
                 Agotados (Stock 0)
               </span>
-              <span className="text-xl font-black text-white">{stats.agotados}</span>
+              <span className="text-lg sm:text-xl font-black text-white tabular-nums">{stats.agotados}</span>
             </div>
-            <div className="bg-black/25 backdrop-blur-xs border border-white/10 rounded-xl p-3 text-center">
-              <span className="block text-[10px] font-bold uppercase tracking-wider text-amber-300">
+            <div className="bg-black/25 backdrop-blur-xs border border-white/10 rounded-xl p-2.5 sm:p-3 text-center">
+              <span className="block text-[9px] sm:text-[10px] font-bold uppercase tracking-wider text-amber-300 truncate">
                 Stock Bajo
               </span>
-              <span className="text-xl font-black text-white">{stats.bajos}</span>
+              <span className="text-lg sm:text-xl font-black text-white tabular-nums">{stats.bajos}</span>
             </div>
-            <div className="bg-black/25 backdrop-blur-xs border border-white/10 rounded-xl p-3 text-center">
-              <span className="block text-[10px] font-bold uppercase tracking-wider text-teal-300">
+            <div className="bg-black/25 backdrop-blur-xs border border-white/10 rounded-xl p-2.5 sm:p-3 text-center">
+              <span className="block text-[9px] sm:text-[10px] font-bold uppercase tracking-wider text-teal-300 truncate">
                 Ítems a Pedir
               </span>
-              <span className="text-xl font-black text-emerald-300">{stats.seleccionados}</span>
+              <span className="text-lg sm:text-xl font-black text-emerald-300 tabular-nums">{stats.seleccionados}</span>
             </div>
-            <div className="bg-black/25 backdrop-blur-xs border border-white/10 rounded-xl p-3 text-center">
-              <span className="block text-[10px] font-bold uppercase tracking-wider text-teal-200">
+            <div className="bg-black/25 backdrop-blur-xs border border-white/10 rounded-xl p-2.5 sm:p-3 text-center">
+              <span className="block text-[9px] sm:text-[10px] font-bold uppercase tracking-wider text-teal-200 truncate">
                 Unidades Totales
               </span>
-              <span className="text-xl font-black text-white">{stats.totalUnidadesAPedir}</span>
+              <span className="text-lg sm:text-xl font-black text-white tabular-nums">{stats.totalUnidadesAPedir}</span>
             </div>
           </div>
         </div>
       </div>
 
       {/* Barra de controles y filtros */}
-      <div className="bg-white rounded-2xl p-4 shadow-xs border border-slate-200 space-y-3">
-        <div className="flex flex-col md:flex-row gap-3 items-stretch md:items-center justify-between">
+      <div className="bg-white rounded-2xl p-3.5 sm:p-4 shadow-xs border border-slate-200 space-y-3 w-full min-w-0">
+        <div className="flex flex-col md:flex-row gap-2.5 sm:gap-3 items-stretch md:items-center justify-between">
           {/* Buscador */}
-          <div className="relative flex-1">
+          <div className="relative flex-1 min-w-0">
             <Search className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none" />
             <input
               type="text"
@@ -419,13 +419,13 @@ export default function ReabastecimientoInteligente({
                 setSearchTerm(e.target.value);
                 setVisibleCount(PAGE_SIZE);
               }}
-              placeholder="Buscar por código, nombre del medicamento o categoría..."
-              className="w-full pl-10 pr-4 py-2.5 bg-slate-50 border border-slate-300 rounded-xl text-sm font-semibold text-slate-800 focus:bg-white focus:ring-2 focus:ring-teal-500/30 focus:border-teal-600 outline-none transition"
+              placeholder="Buscar por código, medicamento o categoría..."
+              className="w-full pl-10 pr-4 py-2.5 bg-slate-50 border border-slate-300 rounded-xl text-xs sm:text-sm font-semibold text-slate-800 focus:bg-white focus:ring-2 focus:ring-teal-500/30 focus:border-teal-600 outline-none transition"
             />
           </div>
 
           {/* Filtro por Categoría */}
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 w-full md:w-auto">
             <SlidersHorizontal className="w-4 h-4 text-slate-500 shrink-0 hidden sm:block" />
             <select
               value={categoryFilter}
@@ -433,7 +433,7 @@ export default function ReabastecimientoInteligente({
                 setCategoryFilter(e.target.value);
                 setVisibleCount(PAGE_SIZE);
               }}
-              className="bg-slate-50 border border-slate-300 rounded-xl px-3 py-2.5 text-xs font-bold text-slate-700 outline-none focus:ring-2 focus:ring-teal-500/30 cursor-pointer"
+              className="flex-1 md:flex-initial min-w-0 bg-slate-50 border border-slate-300 rounded-xl px-3 py-2.5 text-xs font-bold text-slate-700 outline-none focus:ring-2 focus:ring-teal-500/30 cursor-pointer truncate"
             >
               <option value="todas">Todas las Categorías ({availableCategories.length})</option>
               {availableCategories.map((cat) => (
@@ -446,7 +446,7 @@ export default function ReabastecimientoInteligente({
             <button
               type="button"
               onClick={handleResetSuggestions}
-              className="inline-flex items-center gap-1.5 px-3 py-2.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold transition cursor-pointer"
+              className="inline-flex items-center justify-center gap-1.5 px-3 py-2.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold transition cursor-pointer shrink-0"
               title="Restablecer cálculos sugeridos"
             >
               <RotateCcw className="w-3.5 h-3.5" />
@@ -456,8 +456,8 @@ export default function ReabastecimientoInteligente({
         </div>
 
         {/* Pestañas de nivel de stock y acciones rápidas */}
-        <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-slate-100">
-          <div className="flex flex-wrap items-center gap-1.5">
+        <div className="flex flex-col sm:flex-row sm:flex-wrap items-stretch sm:items-center justify-between gap-2.5 pt-2.5 border-t border-slate-100">
+          <div className="grid grid-cols-2 sm:flex sm:flex-wrap items-center gap-1.5">
             <button
               type="button"
               onClick={() => {
@@ -465,14 +465,14 @@ export default function ReabastecimientoInteligente({
                 setVisibleCount(PAGE_SIZE);
                 playSound("click");
               }}
-              className={`px-3.5 py-1.5 rounded-xl text-xs font-extrabold transition cursor-pointer flex items-center gap-1.5 ${
+              className={`px-2.5 sm:px-3.5 py-2 sm:py-1.5 rounded-xl text-[11px] sm:text-xs font-extrabold transition cursor-pointer flex items-center justify-center gap-1.5 ${
                 stockFilter === "criticos"
                   ? "bg-teal-700 text-white shadow-xs"
                   : "bg-slate-100 text-slate-600 hover:bg-slate-200"
               }`}
             >
-              <AlertTriangle className="w-3.5 h-3.5" />
-              <span>Críticos y Faltantes ({stats.agotados + stats.bajos})</span>
+              <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+              <span className="truncate">Críticos ({stats.agotados + stats.bajos})</span>
             </button>
 
             <button
@@ -482,7 +482,7 @@ export default function ReabastecimientoInteligente({
                 setVisibleCount(PAGE_SIZE);
                 playSound("click");
               }}
-              className={`px-3.5 py-1.5 rounded-xl text-xs font-extrabold transition cursor-pointer ${
+              className={`px-2.5 sm:px-3.5 py-2 sm:py-1.5 rounded-xl text-[11px] sm:text-xs font-extrabold transition cursor-pointer text-center truncate ${
                 stockFilter === "agotados"
                   ? "bg-rose-600 text-white shadow-xs"
                   : "bg-rose-50 text-rose-700 hover:bg-rose-100"
@@ -498,7 +498,7 @@ export default function ReabastecimientoInteligente({
                 setVisibleCount(PAGE_SIZE);
                 playSound("click");
               }}
-              className={`px-3.5 py-1.5 rounded-xl text-xs font-extrabold transition cursor-pointer ${
+              className={`px-2.5 sm:px-3.5 py-2 sm:py-1.5 rounded-xl text-[11px] sm:text-xs font-extrabold transition cursor-pointer text-center truncate ${
                 stockFilter === "bajos"
                   ? "bg-amber-600 text-white shadow-xs"
                   : "bg-amber-50 text-amber-800 hover:bg-amber-100"
@@ -514,23 +514,23 @@ export default function ReabastecimientoInteligente({
                 setVisibleCount(PAGE_SIZE);
                 playSound("click");
               }}
-              className={`px-3.5 py-1.5 rounded-xl text-xs font-extrabold transition cursor-pointer ${
+              className={`px-2.5 sm:px-3.5 py-2 sm:py-1.5 rounded-xl text-[11px] sm:text-xs font-extrabold transition cursor-pointer text-center truncate ${
                 stockFilter === "todos"
                   ? "bg-slate-800 text-white shadow-xs"
                   : "bg-slate-100 text-slate-600 hover:bg-slate-200"
               }`}
             >
-              Todo el Catálogo ({calculatedRows.length})
+              Catálogo ({calculatedRows.length})
             </button>
           </div>
 
-          <div className="flex flex-wrap items-center gap-2">
+          <div className="flex flex-col sm:flex-row flex-wrap items-stretch sm:items-center gap-2">
             <button
               type="button"
               onClick={handleSelectAllFiltered}
-              className="px-3 py-1.5 rounded-xl border border-slate-300 hover:bg-slate-50 text-xs font-bold text-slate-700 flex items-center gap-1.5 cursor-pointer transition"
+              className="px-3 py-2 sm:py-1.5 rounded-xl border border-slate-300 hover:bg-slate-50 text-xs font-bold text-slate-700 flex items-center justify-center gap-1.5 cursor-pointer transition"
             >
-              <CheckSquare className="w-3.5 h-3.5 text-teal-600" />
+              <CheckSquare className="w-3.5 h-3.5 text-teal-600 shrink-0" />
               <span>Seleccionar / Desmarcar visibles</span>
             </button>
 
@@ -539,9 +539,9 @@ export default function ReabastecimientoInteligente({
                 type="button"
                 disabled={isSubmittingDirect || stats.seleccionados === 0}
                 onClick={handleDirectOrderSubmit}
-                className="px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white text-xs font-extrabold flex items-center gap-2 shadow-sm transition cursor-pointer active:scale-95"
+                className="px-4 py-2.5 sm:py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white text-xs font-extrabold flex items-center justify-center gap-2 shadow-sm transition cursor-pointer active:scale-95"
               >
-                <Send className="w-3.5 h-3.5" />
+                <Send className="w-3.5 h-3.5 shrink-0" />
                 <span>
                   {isSubmittingDirect
                     ? "Registrando..."
@@ -553,19 +553,19 @@ export default function ReabastecimientoInteligente({
             <button
               type="button"
               onClick={handleGenerateOrder}
-              className="px-4 py-2 rounded-xl bg-teal-700 hover:bg-teal-600 text-white text-xs font-extrabold flex items-center gap-2 shadow-sm transition cursor-pointer active:scale-95"
+              className="px-4 py-2.5 sm:py-2 rounded-xl bg-teal-700 hover:bg-teal-600 text-white text-xs font-extrabold flex items-center justify-center gap-2 shadow-sm transition cursor-pointer active:scale-95"
             >
               <span>Revisar en Formulario ({stats.seleccionados})</span>
-              <ArrowRight className="w-4 h-4" />
+              <ArrowRight className="w-4 h-4 shrink-0" />
             </button>
           </div>
         </div>
       </div>
 
-      {/* Tabla interactiva de Reabastecimiento Inteligente con 1ra Columna Fija (Sticky) */}
-      <div className="bg-white rounded-2xl shadow-xs border border-slate-200 overflow-hidden">
+      {/* Tabla interactiva de Reabastecimiento Inteligente con SOLO la 1ra Columna Fija (Sticky) */}
+      <div className="bg-white rounded-2xl shadow-xs border border-slate-200 overflow-hidden w-full min-w-0 max-w-full">
         {filteredRows.length === 0 ? (
-          <div className="p-12 text-center space-y-3">
+          <div className="p-8 sm:p-12 text-center space-y-3">
             <div className="w-14 h-14 rounded-2xl bg-teal-50 text-teal-600 flex items-center justify-center mx-auto">
               <Package className="w-7 h-7" />
             </div>
@@ -573,224 +573,231 @@ export default function ReabastecimientoInteligente({
               No se encontraron insumos en esta vista
             </h4>
             <p className="text-xs text-slate-500 max-w-md mx-auto">
-              Prueba cambiando el filtro a &ldquo;Todo el Catálogo&rdquo; o ajusta el término de búsqueda para evaluar otros productos.
+              Prueba cambiando el filtro a &ldquo;Catálogo&rdquo; o ajusta el término de búsqueda para evaluar otros productos.
             </p>
           </div>
         ) : (
-          <div className="overflow-x-auto relative">
-            <table className="w-full text-left border-collapse min-w-[920px]">
-              <thead>
-                <tr className="bg-slate-100 border-b border-slate-200 text-[11px] font-extrabold uppercase tracking-wider text-slate-600">
-                  {/* PRIMERA COLUMNA FIJA (STICKY): Selección + Medicamento / Insumo */}
-                  <th
-                    scope="col"
-                    className="sticky left-0 z-20 bg-slate-100 py-3.5 pl-3.5 pr-4 border-r border-slate-200 shadow-[2px_0_6px_-2px_rgba(15,23,42,0.08)] min-w-[230px] max-w-[290px] sm:min-w-[280px] sm:max-w-[340px]"
-                  >
-                    <div className="flex items-center gap-2.5">
-                      <span className="sr-only">Seleccionar</span>
-                      <span>Medicamento / Insumo (Fijo)</span>
-                    </div>
-                  </th>
-                  <th scope="col" className="py-3.5 px-4 whitespace-nowrap">
-                    Categoría
-                  </th>
-                  <th scope="col" className="py-3.5 px-4 text-center whitespace-nowrap">
-                    <div className="inline-flex items-center gap-1 text-slate-700">
-                      <TrendingUp className="w-3.5 h-3.5 text-teal-600" />
-                      <span>Consumo Mensual Est.</span>
-                    </div>
-                  </th>
-                  <th scope="col" className="py-3.5 px-4 text-center whitespace-nowrap">
-                    Existencia Actual
-                  </th>
-                  <th scope="col" className="py-3.5 px-4 text-center whitespace-nowrap">
-                    <div className="inline-flex items-center gap-1 text-amber-800">
-                      <Calculator className="w-3.5 h-3.5 text-amber-600" />
-                      <span>Faltante Sugerido</span>
-                    </div>
-                  </th>
-                  <th scope="col" className="py-3.5 px-4 text-center whitespace-nowrap">
-                    Cantidad a Pedir
-                  </th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-slate-200/70 text-xs">
-                {paginatedRows.map((row) => {
-                  const {
-                    product,
-                    existenciaActual,
-                    consumoMensualEstimado,
-                    faltanteSugerido,
-                    cantidadAPedir,
-                    status,
-                    isSelected
-                  } = row;
+          <>
+            {/* Indicador móvil de deslizamiento lateral */}
+            <div className="sm:hidden bg-teal-50/90 border-b border-teal-200/80 px-3 py-1.5 flex items-center justify-between text-[11px] font-extrabold text-teal-900">
+              <span>📌 Medicamento / Insumo fijo</span>
+              <span className="text-teal-700 animate-pulse">Desliza a los lados ↔</span>
+            </div>
 
-                  // Color sólido para la celda sticky para evitar transparencia al desplazar horizontalmente
-                  const stickyBgClass = isSelected
-                    ? "bg-teal-50 group-hover:bg-teal-100/80"
-                    : status === "agotado"
-                    ? "bg-rose-50 group-hover:bg-rose-100/70"
-                    : "bg-white group-hover:bg-slate-50";
-
-                  const rowBgClass = isSelected
-                    ? "bg-teal-50/40 hover:bg-teal-50/70"
-                    : status === "agotado"
-                    ? "bg-rose-50/25 hover:bg-rose-50/50"
-                    : "hover:bg-slate-50";
-
-                  return (
-                    <tr
-                      key={product.codigo}
-                      className={`group transition-colors ${rowBgClass}`}
+            <div className="w-full max-w-full overflow-x-auto overscroll-x-contain touch-pan-x relative [-webkit-overflow-scrolling:touch]">
+              <table className="w-full text-left border-collapse min-w-[740px] sm:min-w-[920px]">
+                <thead>
+                  <tr className="bg-slate-100 border-b border-slate-200 text-[10px] sm:text-[11px] font-extrabold uppercase tracking-wider text-slate-600">
+                    {/* ÚNICA COLUMNA FIJA (STICKY): Medicamento / Insumo */}
+                    <th
+                      scope="col"
+                      className="sticky left-0 z-20 bg-slate-100 py-3 sm:py-3.5 pl-2.5 pr-2.5 sm:pl-3.5 sm:pr-4 border-r border-slate-300/90 shadow-[3px_0_8px_-2px_rgba(15,23,42,0.12)] w-[155px] min-w-[155px] max-w-[165px] sm:w-[270px] sm:min-w-[270px] sm:max-w-[330px]"
                     >
-                      {/* PRIMERA COLUMNA FIJA (STICKY): Checkbox + Nombre y Código del Producto */}
-                      <td
-                        className={`sticky left-0 z-10 py-3 pl-3.5 pr-4 border-r border-slate-200 shadow-[2px_0_6px_-2px_rgba(15,23,42,0.08)] align-middle transition-colors min-w-[230px] max-w-[290px] sm:min-w-[280px] sm:max-w-[340px] ${stickyBgClass}`}
+                      <div className="flex items-center gap-1.5">
+                        <span className="truncate">Medicamento / Insumo (Fijo)</span>
+                      </div>
+                    </th>
+                    <th scope="col" className="py-3 sm:py-3.5 px-3 sm:px-4 whitespace-nowrap">
+                      Categoría
+                    </th>
+                    <th scope="col" className="py-3 sm:py-3.5 px-3 sm:px-4 text-center whitespace-nowrap">
+                      <div className="inline-flex items-center gap-1 text-slate-700">
+                        <TrendingUp className="w-3.5 h-3.5 text-teal-600 shrink-0" />
+                        <span>Consumo Mensual Est.</span>
+                      </div>
+                    </th>
+                    <th scope="col" className="py-3 sm:py-3.5 px-3 sm:px-4 text-center whitespace-nowrap">
+                      Existencia Actual
+                    </th>
+                    <th scope="col" className="py-3 sm:py-3.5 px-3 sm:px-4 text-center whitespace-nowrap">
+                      <div className="inline-flex items-center gap-1 text-amber-800">
+                        <Calculator className="w-3.5 h-3.5 text-amber-600 shrink-0" />
+                        <span>Faltante Sugerido</span>
+                      </div>
+                    </th>
+                    <th scope="col" className="py-3 sm:py-3.5 px-3 sm:px-4 text-center whitespace-nowrap">
+                      Cantidad a Pedir
+                    </th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-200/70 text-xs">
+                  {paginatedRows.map((row) => {
+                    const {
+                      product,
+                      existenciaActual,
+                      consumoMensualEstimado,
+                      faltanteSugerido,
+                      cantidadAPedir,
+                      status,
+                      isSelected
+                    } = row;
+
+                    // Color sólido opaco para la celda sticky para evitar transparencia al desplazar horizontalmente
+                    const stickyBgClass = isSelected
+                      ? "bg-teal-50 group-hover:bg-teal-100"
+                      : status === "agotado"
+                      ? "bg-rose-50 group-hover:bg-rose-100"
+                      : "bg-white group-hover:bg-slate-50";
+
+                    const rowBgClass = isSelected
+                      ? "bg-teal-50/40 hover:bg-teal-50/70"
+                      : status === "agotado"
+                      ? "bg-rose-50/25 hover:bg-rose-50/50"
+                      : "hover:bg-slate-50";
+
+                    return (
+                      <tr
+                        key={product.codigo}
+                        className={`group transition-colors ${rowBgClass}`}
                       >
-                        <div className="flex items-start gap-2.5">
-                          <button
-                            type="button"
-                            onClick={() =>
-                              handleToggleSelectRow(
-                                product.codigo,
-                                isSelected,
-                                cantidadAPedir,
-                                faltanteSugerido
-                              )
-                            }
-                            className="p-1 mt-0.5 rounded-lg hover:bg-slate-200/60 transition cursor-pointer shrink-0"
-                            title={isSelected ? "Quitar de la solicitud" : "Incluir en la solicitud"}
-                          >
-                            {isSelected ? (
-                              <CheckSquare className="w-5 h-5 text-teal-600" />
-                            ) : (
-                              <Square className="w-5 h-5 text-slate-400" />
-                            )}
-                          </button>
-
-                          <div className="min-w-0 flex-1">
-                            <p
-                              className="font-extrabold text-slate-900 text-xs sm:text-[13px] leading-snug break-words line-clamp-2"
-                              title={product.nombre}
-                            >
-                              {product.nombre}
-                            </p>
-                            <div className="flex flex-wrap items-center gap-1.5 mt-1">
-                              <span className="font-mono text-[10px] font-extrabold px-1.5 py-0.5 rounded bg-slate-100 text-slate-700 border border-slate-200">
-                                {product.codigo}
-                              </span>
-                              <span className="text-[10px] text-slate-500 font-semibold">
-                                {(product.lotes || []).length} lote(s)
-                              </span>
-                            </div>
-                          </div>
-                        </div>
-                      </td>
-
-                      {/* Categoría */}
-                      <td className="py-3 px-4 align-middle whitespace-nowrap">
-                        <span className="inline-flex items-center px-2.5 py-1 rounded-full text-[11px] font-bold bg-slate-100 text-slate-700 border border-slate-200">
-                          {product.categoria || "General"}
-                        </span>
-                      </td>
-
-                      {/* Consumo Mensual Estimado (Editable para ajustar meta del mes) */}
-                      <td className="py-3 px-4 text-center align-middle whitespace-nowrap">
-                        <div className="inline-flex flex-col items-center">
-                          <input
-                            type="number"
-                            min={0}
-                            value={consumoMensualEstimado}
-                            onChange={(e) =>
-                              handleConsumptionChange(product.codigo, e.target.value, existenciaActual)
-                            }
-                            className="w-24 text-center font-extrabold text-slate-800 bg-white border border-slate-300 rounded-xl px-2.5 py-1.5 text-xs focus:ring-2 focus:ring-teal-500/30 focus:border-teal-600 outline-none transition"
-                            title="Consumo mensual estimado (editable)"
-                          />
-                          <span className="text-[10px] text-slate-400 mt-0.5">meta mensual</span>
-                        </div>
-                      </td>
-
-                      {/* Existencia Actual */}
-                      <td className="py-3 px-4 text-center align-middle whitespace-nowrap">
-                        <div className="inline-flex flex-col items-center">
-                          <span
-                            className={`inline-flex items-center justify-center px-3 py-1 rounded-xl font-black text-xs border ${
-                              existenciaActual === 0
-                                ? "bg-rose-100 text-rose-800 border-rose-300"
-                                : status === "bajo"
-                                ? "bg-amber-100 text-amber-900 border-amber-300"
-                                : "bg-emerald-50 text-emerald-800 border-emerald-200"
-                            }`}
-                          >
-                            {existenciaActual}
-                          </span>
-                          <span className="text-[10px] font-bold mt-0.5 text-slate-400">
-                            {existenciaActual === 0
-                              ? "Agotado"
-                              : status === "bajo"
-                              ? "Stock Bajo"
-                              : "Disponible"}
-                          </span>
-                        </div>
-                      </td>
-
-                      {/* Faltante Sugerido = Consumo Mensual Estimado - Existencia Actual */}
-                      <td className="py-3 px-4 text-center align-middle whitespace-nowrap">
-                        <div className="inline-flex flex-col items-center">
-                          <span
-                            className={`inline-flex items-center gap-1 px-3 py-1 rounded-xl font-black text-xs ${
-                              faltanteSugerido > 0
-                                ? "bg-amber-50 text-amber-900 border border-amber-300"
-                                : "bg-slate-100 text-slate-500"
-                            }`}
-                          >
-                            {faltanteSugerido > 0 ? `+${faltanteSugerido}` : "0"}
-                          </span>
-                          <span className="text-[10px] text-slate-400 mt-0.5 font-mono">
-                            {consumoMensualEstimado} − {existenciaActual} = {faltanteSugerido}
-                          </span>
-                        </div>
-                      </td>
-
-                      {/* Cantidad a Pedir (Input Editable) */}
-                      <td className="py-3 px-4 text-center align-middle whitespace-nowrap">
-                        <div className="inline-flex flex-col items-center">
-                          <input
-                            type="number"
-                            min={0}
-                            value={cantidadAPedir}
-                            onChange={(e) => handleOrderQtyChange(product.codigo, e.target.value)}
-                            className={`w-28 text-center font-black rounded-xl px-3 py-2 text-sm outline-none transition border-2 ${
-                              isSelected && cantidadAPedir > 0
-                                ? "bg-teal-50/70 border-teal-600 text-teal-950 focus:ring-2 focus:ring-teal-500/30"
-                                : "bg-slate-50 border-slate-300 text-slate-700 focus:border-teal-600"
-                            }`}
-                          />
-                          {faltanteSugerido > 0 && cantidadAPedir !== faltanteSugerido && (
+                        {/* ÚNICA COLUMNA FIJA (STICKY): Checkbox + Nombre y Código del Producto */}
+                        <td
+                          className={`sticky left-0 z-10 py-2.5 sm:py-3 pl-2 pr-2 sm:pl-3.5 sm:pr-4 border-r border-slate-300/90 shadow-[3px_0_8px_-2px_rgba(15,23,42,0.12)] align-middle transition-colors w-[155px] min-w-[155px] max-w-[165px] sm:w-[270px] sm:min-w-[270px] sm:max-w-[330px] ${stickyBgClass}`}
+                        >
+                          <div className="flex items-start gap-1.5 sm:gap-2.5">
                             <button
                               type="button"
-                              onClick={() => handleOrderQtyChange(product.codigo, String(faltanteSugerido))}
-                              className="text-[10px] text-teal-700 hover:underline font-bold mt-0.5 cursor-pointer"
+                              onClick={() =>
+                                handleToggleSelectRow(
+                                  product.codigo,
+                                  isSelected,
+                                  cantidadAPedir,
+                                  faltanteSugerido
+                                )
+                              }
+                              className="p-0.5 sm:p-1 mt-0.5 rounded-lg hover:bg-slate-200/60 transition cursor-pointer shrink-0"
+                              title={isSelected ? "Quitar de la solicitud" : "Incluir en la solicitud"}
                             >
-                              Usar sugerido ({faltanteSugerido})
+                              {isSelected ? (
+                                <CheckSquare className="w-4 h-4 sm:w-5 sm:h-5 text-teal-600" />
+                              ) : (
+                                <Square className="w-4 h-4 sm:w-5 sm:h-5 text-slate-400" />
+                              )}
                             </button>
-                          )}
-                        </div>
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
+
+                            <div className="min-w-0 flex-1">
+                              <p
+                                className="font-extrabold text-slate-900 text-[11px] sm:text-[13px] leading-tight sm:leading-snug break-words line-clamp-2"
+                                title={product.nombre}
+                              >
+                                {product.nombre}
+                              </p>
+                              <div className="flex flex-wrap items-center gap-1 mt-1">
+                                <span className="font-mono text-[9px] sm:text-[10px] font-extrabold px-1 sm:px-1.5 py-0.5 rounded bg-slate-100 text-slate-700 border border-slate-200 truncate max-w-full">
+                                  {product.codigo}
+                                </span>
+                                <span className="text-[9px] sm:text-[10px] text-slate-500 font-semibold whitespace-nowrap">
+                                  {(product.lotes || []).length} lote(s)
+                                </span>
+                              </div>
+                            </div>
+                          </div>
+                        </td>
+
+                        {/* Categoría (Deslizable) */}
+                        <td className="py-2.5 sm:py-3 px-3 sm:px-4 align-middle whitespace-nowrap">
+                          <span className="inline-flex items-center px-2.5 py-1 rounded-full text-[11px] font-bold bg-slate-100 text-slate-700 border border-slate-200">
+                            {product.categoria || "General"}
+                          </span>
+                        </td>
+
+                        {/* Consumo Mensual Estimado (Deslizable y Editable) */}
+                        <td className="py-2.5 sm:py-3 px-3 sm:px-4 text-center align-middle whitespace-nowrap">
+                          <div className="inline-flex flex-col items-center">
+                            <input
+                              type="number"
+                              min={0}
+                              value={consumoMensualEstimado}
+                              onChange={(e) =>
+                                handleConsumptionChange(product.codigo, e.target.value, existenciaActual)
+                              }
+                              className="w-20 sm:w-24 text-center font-extrabold text-slate-800 bg-white border border-slate-300 rounded-xl px-2 py-1.5 text-xs focus:ring-2 focus:ring-teal-500/30 focus:border-teal-600 outline-none transition"
+                              title="Consumo mensual estimado (editable)"
+                            />
+                            <span className="text-[10px] text-slate-400 mt-0.5">meta mensual</span>
+                          </div>
+                        </td>
+
+                        {/* Existencia Actual (Deslizable) */}
+                        <td className="py-2.5 sm:py-3 px-3 sm:px-4 text-center align-middle whitespace-nowrap">
+                          <div className="inline-flex flex-col items-center">
+                            <span
+                              className={`inline-flex items-center justify-center px-2.5 sm:px-3 py-1 rounded-xl font-black text-xs border tabular-nums ${
+                                existenciaActual === 0
+                                  ? "bg-rose-100 text-rose-800 border-rose-300"
+                                  : status === "bajo"
+                                  ? "bg-amber-100 text-amber-900 border-amber-300"
+                                  : "bg-emerald-50 text-emerald-800 border-emerald-200"
+                              }`}
+                            >
+                              {existenciaActual}
+                            </span>
+                            <span className="text-[10px] font-bold mt-0.5 text-slate-400">
+                              {existenciaActual === 0
+                                ? "Agotado"
+                                : status === "bajo"
+                                ? "Stock Bajo"
+                                : "Disponible"}
+                            </span>
+                          </div>
+                        </td>
+
+                        {/* Faltante Sugerido (Deslizable) */}
+                        <td className="py-2.5 sm:py-3 px-3 sm:px-4 text-center align-middle whitespace-nowrap">
+                          <div className="inline-flex flex-col items-center">
+                            <span
+                              className={`inline-flex items-center gap-1 px-2.5 sm:px-3 py-1 rounded-xl font-black text-xs tabular-nums ${
+                                faltanteSugerido > 0
+                                  ? "bg-amber-50 text-amber-900 border border-amber-300"
+                                  : "bg-slate-100 text-slate-500"
+                              }`}
+                            >
+                              {faltanteSugerido > 0 ? `+${faltanteSugerido}` : "0"}
+                            </span>
+                            <span className="text-[10px] text-slate-400 mt-0.5 font-mono">
+                              {consumoMensualEstimado} − {existenciaActual} = {faltanteSugerido}
+                            </span>
+                          </div>
+                        </td>
+
+                        {/* Cantidad a Pedir (Deslizable y Editable) */}
+                        <td className="py-2.5 sm:py-3 px-3 sm:px-4 text-center align-middle whitespace-nowrap">
+                          <div className="inline-flex flex-col items-center">
+                            <input
+                              type="number"
+                              min={0}
+                              value={cantidadAPedir}
+                              onChange={(e) => handleOrderQtyChange(product.codigo, e.target.value)}
+                              className={`w-24 sm:w-28 text-center font-black rounded-xl px-2.5 py-1.5 sm:px-3 sm:py-2 text-xs sm:text-sm outline-none transition border-2 ${
+                                isSelected && cantidadAPedir > 0
+                                  ? "bg-teal-50/70 border-teal-600 text-teal-950 focus:ring-2 focus:ring-teal-500/30"
+                                  : "bg-slate-50 border-slate-300 text-slate-700 focus:border-teal-600"
+                              }`}
+                            />
+                            {faltanteSugerido > 0 && cantidadAPedir !== faltanteSugerido && (
+                              <button
+                                type="button"
+                                onClick={() => handleOrderQtyChange(product.codigo, String(faltanteSugerido))}
+                                className="text-[10px] text-teal-700 hover:underline font-bold mt-0.5 cursor-pointer"
+                              >
+                                Usar sugerido ({faltanteSugerido})
+                              </button>
+                            )}
+                          </div>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </>
         )}
 
         {/* Paginación Progresiva si hay más filas */}
         {filteredRows.length > visibleCount && (
-          <div className="px-4 py-3 bg-slate-50 border-t border-slate-200 flex items-center justify-between">
-            <span className="text-xs font-semibold text-slate-600">
+          <div className="px-3.5 sm:px-4 py-3 bg-slate-50 border-t border-slate-200 flex flex-col sm:flex-row items-center justify-between gap-2.5">
+            <span className="text-xs font-semibold text-slate-600 text-center sm:text-left">
               Mostrando <strong className="text-slate-900">{paginatedRows.length}</strong> de{" "}
               <strong className="text-slate-900">{filteredRows.length}</strong> insumos
             </span>
@@ -800,18 +807,18 @@ export default function ReabastecimientoInteligente({
                 playSound("click");
                 setVisibleCount((prev) => prev + PAGE_SIZE);
               }}
-              className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl bg-white hover:bg-slate-100 text-teal-800 border border-slate-300 text-xs font-extrabold shadow-2xs transition cursor-pointer"
+              className="w-full sm:w-auto inline-flex items-center justify-center gap-1.5 px-4 py-2 rounded-xl bg-white hover:bg-slate-100 text-teal-800 border border-slate-300 text-xs font-extrabold shadow-2xs transition cursor-pointer"
             >
-              <ChevronDown className="w-4 h-4" />
+              <ChevronDown className="w-4 h-4 shrink-0" />
               <span>Cargar más insumos ({filteredRows.length - visibleCount} restantes)</span>
             </button>
           </div>
         )}
 
         {/* Pie de tabla con resumen y botón de acción */}
-        <div className="bg-slate-50 px-5 py-4 border-t border-slate-200 flex flex-col sm:flex-row items-center justify-between gap-3">
-          <div className="flex items-center gap-2 text-xs text-slate-600">
-            <Info className="w-4 h-4 text-teal-600 shrink-0" />
+        <div className="bg-slate-50 px-3.5 sm:px-5 py-3.5 sm:py-4 border-t border-slate-200 flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3">
+          <div className="flex items-start sm:items-center gap-2 text-xs text-slate-600">
+            <Info className="w-4 h-4 text-teal-600 shrink-0 mt-0.5 sm:mt-0" />
             <span>
               Mostrando <strong>{paginatedRows.length}</strong> de <strong>{filteredRows.length}</strong> insumos. Tienes{" "}
               <strong className="text-teal-800">{stats.seleccionados} producto(s)</strong> marcados para solicitar (
@@ -819,15 +826,15 @@ export default function ReabastecimientoInteligente({
             </span>
           </div>
 
-          <div className="flex flex-wrap items-center gap-2 w-full sm:w-auto justify-end">
+          <div className="flex flex-col sm:flex-row flex-wrap items-stretch sm:items-center gap-2 w-full sm:w-auto justify-end">
             {onDirectSubmitSolicitud && (
               <button
                 type="button"
                 disabled={isSubmittingDirect || stats.seleccionados === 0}
                 onClick={handleDirectOrderSubmit}
-                className="w-full sm:w-auto px-5 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white text-xs sm:text-sm font-extrabold flex items-center justify-center gap-2 shadow-md transition cursor-pointer active:scale-95"
+                className="w-full sm:w-auto px-4 sm:px-5 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white text-xs sm:text-sm font-extrabold flex items-center justify-center gap-2 shadow-md transition cursor-pointer active:scale-95"
               >
-                <Send className="w-4 h-4" />
+                <Send className="w-4 h-4 shrink-0" />
                 <span>
                   {isSubmittingDirect
                     ? "Registrando Solicitud..."
@@ -839,10 +846,10 @@ export default function ReabastecimientoInteligente({
             <button
               type="button"
               onClick={handleGenerateOrder}
-              className="w-full sm:w-auto px-5 py-2.5 rounded-xl bg-teal-700 hover:bg-teal-600 text-white text-xs sm:text-sm font-extrabold flex items-center justify-center gap-2 shadow-md transition cursor-pointer active:scale-95"
+              className="w-full sm:w-auto px-4 sm:px-5 py-2.5 rounded-xl bg-teal-700 hover:bg-teal-600 text-white text-xs sm:text-sm font-extrabold flex items-center justify-center gap-2 shadow-md transition cursor-pointer active:scale-95"
             >
               <span>Revisar en Formulario ({stats.seleccionados} ítems)</span>
-              <ArrowRight className="w-4 h-4" />
+              <ArrowRight className="w-4 h-4 shrink-0" />
             </button>
           </div>
         </div>

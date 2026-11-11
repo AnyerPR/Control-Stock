@@ -75,8 +75,8 @@ export default function BlockPanel({
   const targetProduct = products.find((p) => p.codigo === blockAddProduct);
 
   return (
-    <div className="anim-card-in mb-6 rounded-3xl bg-white border border-slate-200/90 shadow-xs overflow-hidden">
-      <div className="flex items-center justify-between gap-3 px-6 py-5 border-b border-slate-200 bg-slate-50/50">
+    <div className="anim-card-in mb-6 w-full min-w-0 max-w-full rounded-3xl bg-white border border-slate-200/90 shadow-xs overflow-hidden">
+      <div className="flex items-center justify-between gap-3 px-4 sm:px-6 py-4 sm:py-5 border-b border-slate-200 bg-slate-50/50">
         <div>
           <p className="text-[11px] uppercase tracking-[0.2em] text-teal-700 font-extrabold">
             Bloque Seleccionado
@@ -94,11 +94,11 @@ export default function BlockPanel({
         </button>
       </div>
 
-      <div className="p-6 space-y-4">
+      <div className="p-4 sm:p-6 space-y-4">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
           <button
             onClick={onAddSupplyToBlock}
-            className="inline-flex items-center gap-2.5 rounded-xl border border-slate-300 bg-slate-50 hover:bg-slate-100 px-4 py-2.5 text-xs font-extrabold text-slate-800 shadow-2xs transition active:scale-95 cursor-pointer"
+            className="w-full sm:w-auto inline-flex items-center justify-center sm:justify-start gap-2.5 rounded-xl border border-slate-300 bg-slate-50 hover:bg-slate-100 px-4 py-2.5 text-xs font-extrabold text-slate-800 shadow-2xs transition active:scale-95 cursor-pointer"
           >
             <span className="inline-flex items-center justify-center w-6 h-6 rounded-lg bg-teal-700 text-white text-sm font-bold">
               +

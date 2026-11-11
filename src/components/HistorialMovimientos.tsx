@@ -276,16 +276,16 @@ export default function HistorialMovimientos({ activeCatalogId, currentUser, cat
   };
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-4 sm:space-y-6 w-full min-w-0 max-w-full">
       {/* Cabecera estilo Imagen 2 */}
-      <div className="bg-white rounded-3xl p-6 border border-slate-200/90 shadow-xs space-y-5">
-        <div className="flex items-start justify-between gap-4">
-          <div>
-            <h3 className="text-lg sm:text-xl font-extrabold text-slate-900 flex items-center gap-2.5">
+      <div className="bg-white rounded-2xl sm:rounded-3xl p-4 sm:p-6 border border-slate-200/90 shadow-xs space-y-4 sm:space-y-5 w-full min-w-0">
+        <div className="flex items-start justify-between gap-3 sm:gap-4">
+          <div className="min-w-0">
+            <h3 className="text-base sm:text-xl font-extrabold text-slate-900 flex items-center gap-2.5">
               <div className="w-9 h-9 rounded-xl bg-teal-50 border border-teal-200 flex items-center justify-center text-teal-700 shrink-0">
                 <History className="w-5 h-5" />
               </div>
-              <span>Historial de Movimientos y Facturas de Entrada</span>
+              <span className="leading-snug">Historial de Movimientos y Facturas de Entrada</span>
             </h3>
             <p className="text-slate-500 text-xs sm:text-sm mt-1 font-medium">
               Consulta las entradas agrupadas por número de factura o el registro detallado de salidas y ajustes
@@ -302,23 +302,25 @@ export default function HistorialMovimientos({ activeCatalogId, currentUser, cat
 
         {/* Selector de Pestañas Segmentado (Imagen 2) */}
         <div className="space-y-3">
-          <div className="inline-flex flex-wrap items-center gap-1.5 bg-slate-100 p-1.5 rounded-2xl border border-slate-200/90">
+          <div className="grid grid-cols-1 sm:inline-flex sm:flex-wrap items-center gap-1.5 bg-slate-100 p-1.5 rounded-2xl border border-slate-200/90 w-full sm:w-auto">
             <button
               type="button"
               onClick={() => {
                 setViewMode("facturas");
                 playSound("click");
               }}
-              className={`inline-flex items-center gap-2 px-4 py-2.5 rounded-xl text-xs font-extrabold transition cursor-pointer ${
+              className={`inline-flex items-center justify-between sm:justify-start gap-2 px-3.5 sm:px-4 py-2.5 rounded-xl text-xs font-extrabold transition cursor-pointer ${
                 viewMode === "facturas"
                   ? "bg-white text-teal-900 shadow-xs border border-slate-200/80"
                   : "text-slate-600 hover:text-slate-900"
               }`}
             >
-              <FileText className={`w-4 h-4 ${viewMode === "facturas" ? "text-teal-600" : "text-slate-400"}`} />
-              <span>Entradas Agrupadas por Factura</span>
+              <span className="inline-flex items-center gap-2 truncate">
+                <FileText className={`w-4 h-4 shrink-0 ${viewMode === "facturas" ? "text-teal-600" : "text-slate-400"}`} />
+                <span className="truncate">Entradas Agrupadas por Factura</span>
+              </span>
               <span
-                className={`px-2 py-0.5 rounded-full text-[11px] font-black tabular-nums ${
+                className={`px-2 py-0.5 rounded-full text-[11px] font-black tabular-nums shrink-0 ${
                   viewMode === "facturas"
                     ? "bg-teal-100 text-teal-800"
                     : "bg-slate-200 text-slate-600"
@@ -334,16 +336,18 @@ export default function HistorialMovimientos({ activeCatalogId, currentUser, cat
                 setViewMode("detalle");
                 playSound("click");
               }}
-              className={`inline-flex items-center gap-2 px-4 py-2.5 rounded-xl text-xs font-extrabold transition cursor-pointer ${
+              className={`inline-flex items-center justify-between sm:justify-start gap-2 px-3.5 sm:px-4 py-2.5 rounded-xl text-xs font-extrabold transition cursor-pointer ${
                 viewMode === "detalle"
                   ? "bg-white text-teal-900 shadow-xs border border-slate-200/80"
                   : "text-slate-600 hover:text-slate-900"
               }`}
             >
-              <List className={`w-4 h-4 ${viewMode === "detalle" ? "text-teal-600" : "text-slate-400"}`} />
-              <span>Todos los Movimientos (Detalle)</span>
+              <span className="inline-flex items-center gap-2 truncate">
+                <List className={`w-4 h-4 shrink-0 ${viewMode === "detalle" ? "text-teal-600" : "text-slate-400"}`} />
+                <span className="truncate">Todos los Movimientos (Detalle)</span>
+              </span>
               <span
-                className={`px-2 py-0.5 rounded-full text-[11px] font-black tabular-nums ${
+                className={`px-2 py-0.5 rounded-full text-[11px] font-black tabular-nums shrink-0 ${
                   viewMode === "detalle"
                     ? "bg-teal-100 text-teal-800"
                     : "bg-slate-200 text-slate-600"
@@ -571,9 +575,9 @@ export default function HistorialMovimientos({ activeCatalogId, currentUser, cat
           )}
         </div>
       ) : (
-        <div className="bg-white rounded-3xl border border-slate-200/90 shadow-xs overflow-hidden">
-          <div className="overflow-x-auto">
-            <table className="min-w-[850px] w-full text-left border-collapse">
+        <div className="bg-white rounded-2xl sm:rounded-3xl border border-slate-200/90 shadow-xs overflow-hidden w-full min-w-0 max-w-full">
+          <div className="w-full max-w-full overflow-x-auto overscroll-x-contain touch-pan-x [-webkit-overflow-scrolling:touch]">
+            <table className="min-w-[820px] w-full text-left border-collapse">
               <thead>
                 <tr className="bg-slate-100/90 border-b border-slate-200 text-[11px] font-extrabold text-slate-600 uppercase tracking-wider">
                   <th className="px-6 py-4">Tipo</th>
