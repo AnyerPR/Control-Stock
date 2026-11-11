@@ -54,6 +54,15 @@ interface DashboardPanelProps {
   onOpenProductDetail: (productCode: string) => void;
 }
 
+const cachedDashboardAuxByTenant = new Map<
+  string,
+  {
+    solicitudes: Solicitud[];
+    movimientos: Movimiento[];
+    facturas: FacturaVenta[];
+  }
+>();
+
 export default function DashboardPanel({
   currentUser,
   products,
@@ -65,6 +74,8 @@ export default function DashboardPanel({
   onNavigateInventoryFilter,
   onOpenProductDetail
 }: DashboardPanelProps) {
+  const tenantKey = currentUser.farmaciaId || "default";
+  const initialAux = cachedDashboardAuxByTenant.get(tenantKey);
   const enabledModules = useMemo(() => getEnabledModules(currentUser), [currentUser]);
   const availableCatalogos = useMemo(
     () => getUserAvailableCatalogos(currentUser, catalogos),
@@ -88,9 +99,9 @@ export default function DashboardPanel({
   const [periodScope, setPeriodScope] = useState<"actual" | "todos">("actual");
 
   // Lightweight on-demand data for Solicitudes, Movimientos, and Ventas (loaded only if user has permissions)
-  const [solicitudesList, setSolicitudesList] = useState<Solicitud[]>([]);
-  const [movimientosList, setMovimientosList] = useState<Movimiento[]>([]);
-  const [facturasVentaList, setFacturasVentaList] = useState<FacturaVenta[]>([]);
+  const [solicitudesList, setSolicitudesList] = useState<Solicitud[]>(() => initialAux?.solicitudes || []);
+  const [movimientosList, setMovimientosList] = useState<Movimiento[]>(() => initialAux?.movimientos || []);
+  const [facturasVentaList, setFacturasVentaList] = useState<FacturaVenta[]>(() => initialAux?.facturas || []);
   const [loadingExtra, setLoadingExtra] = useState<boolean>(false);
 
   // Ensure dashCatalogFilter stays valid if user's availableCatalogos change
@@ -105,15 +116,21 @@ export default function DashboardPanel({
 
   const fetchDashboardAuxiliaryData = async () => {
     const isLocalFileMode = typeof window !== "undefined" && window.location.protocol === "file:";
-    setLoadingExtra(true);
+    if (!cachedDashboardAuxByTenant.has(tenantKey)) {
+      setLoadingExtra(true);
+    }
 
     try {
       if (isLocalFileMode) {
+        let nextSol: Solicitud[] = [];
+        let nextMov: Movimiento[] = [];
+        let nextFac: FacturaVenta[] = [];
         if (hasSolicitudesAccess) {
           const rawSol = localStorage.getItem("offline_solicitudes");
           if (rawSol) {
             try {
-              setSolicitudesList(JSON.parse(rawSol));
+              nextSol = JSON.parse(rawSol);
+              setSolicitudesList(nextSol);
             } catch {}
           }
         }
@@ -121,7 +138,8 @@ export default function DashboardPanel({
           const rawMov = localStorage.getItem("offline_movimientos");
           if (rawMov) {
             try {
-              setMovimientosList(JSON.parse(rawMov));
+              nextMov = JSON.parse(rawMov);
+              setMovimientosList(nextMov);
             } catch {}
           }
         }
@@ -129,15 +147,24 @@ export default function DashboardPanel({
           const rawFac = localStorage.getItem("offline_facturas_venta");
           if (rawFac) {
             try {
-              setFacturasVentaList(JSON.parse(rawFac));
+              nextFac = JSON.parse(rawFac);
+              setFacturasVentaList(nextFac);
             } catch {}
           }
         }
+        cachedDashboardAuxByTenant.set(tenantKey, {
+          solicitudes: nextSol,
+          movimientos: nextMov,
+          facturas: nextFac
+        });
         setLoadingExtra(false);
         return;
       }
 
       const promises: Promise<void>[] = [];
+      let nextSol = initialAux?.solicitudes || [];
+      let nextMov = initialAux?.movimientos || [];
+      let nextFac = initialAux?.facturas || [];
 
       if (hasSolicitudesAccess) {
         promises.push(
@@ -145,6 +172,7 @@ export default function DashboardPanel({
             .then((snap) => {
               const list: Solicitud[] = [];
               snap.forEach((d) => list.push({ id: d.id, ...(d.data() as Omit<Solicitud, "id">) }));
+              nextSol = list;
               setSolicitudesList(list);
             })
             .catch(() => {})
@@ -157,6 +185,7 @@ export default function DashboardPanel({
             .then((snap) => {
               const list: Movimiento[] = [];
               snap.forEach((d) => list.push({ id: d.id, ...(d.data() as Movimiento) }));
+              nextMov = list;
               setMovimientosList(list);
             })
             .catch(() => {})
@@ -174,8 +203,10 @@ export default function DashboardPanel({
                   : Array.isArray(data?.items)
                   ? data.items
                   : [];
-                setFacturasVentaList(list as FacturaVenta[]);
+                nextFac = list as FacturaVenta[];
+                setFacturasVentaList(nextFac);
               } else {
+                nextFac = [];
                 setFacturasVentaList([]);
               }
             })
@@ -184,6 +215,11 @@ export default function DashboardPanel({
       }
 
       await Promise.all(promises);
+      cachedDashboardAuxByTenant.set(tenantKey, {
+        solicitudes: nextSol,
+        movimientos: nextMov,
+        facturas: nextFac
+      });
     } finally {
       setLoadingExtra(false);
     }

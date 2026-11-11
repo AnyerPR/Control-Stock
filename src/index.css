@@ -170,3 +170,18 @@
 .anim-toast {
   animation: toast-in 0.25s cubic-bezier(0.16, 1, 0.3, 1) forwards;
 }
+
+/* Optimización de renderizado para listas extensas en PC, iOS y Android */
+.cv-card {
+  content-visibility: auto;
+  contain-intrinsic-size: 0 176px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .anim-pop-in,
+  .anim-card-in,
+  .animate-fade-in {
+    animation: none !important;
+  }
+}
+

@@ -29,6 +29,8 @@ export interface Producto {
   lotes: Lote[];
   updatedAt: number;
   catalogId?: string;
+  categoria?: string;
+  consumoMensualEstimado?: number;
 }
 
 export interface Movimiento {
@@ -465,6 +467,9 @@ export interface SolicitudItem {
   loteId?: string;
   loteNumero?: string;
   despachoLotes?: DespachoLote[];
+  categoria?: string;
+  stockActualAlMomento?: number;
+  justificacion?: string;
 }
 
 export interface Solicitud {
@@ -483,6 +488,13 @@ export interface Solicitud {
   historialCambios: CambioEstado[];
   items?: SolicitudItem[];
   catalogId?: string;
+  usuarioAutorizador?: string;
+  rolAutorizador?: string;
+  fechaAutorizacion?: string;
+  horaAutorizacion?: string;
+  timestampAutorizacion?: number;
+  accionAutorizacion?: "Autorizada" | "Rechazada";
+  requestFingerprint?: string;
 }
 
 export interface RegistroHistorial {

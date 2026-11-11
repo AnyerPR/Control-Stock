@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useMemo } from "react";
+import React, { useState, useEffect, useRef, useMemo, startTransition } from "react";
 import { doc, onSnapshot, getDocs, getDoc, writeBatch, updateDoc, setDoc, deleteDoc, runTransaction } from "firebase/firestore";
 import { onAuthStateChanged, signOut } from "firebase/auth";
 import {
@@ -44,6 +44,7 @@ import DashboardPanel from "./components/DashboardPanel";
 import ChatLateral from "./components/ChatLateral";
 import ProductPhotosEditor from "./components/ProductPhotosEditor";
 import ImageLightbox from "./components/ImageLightbox";
+import Sidebar from "./components/Sidebar";
 import { PWAInstallButton, OfflineIndicator, APP_ICON_PATH } from "./components/PWAInstallButton";
 import { logSystemEvent } from "./utils/chatHelper";
 import { exportToWord, exportToPDF } from "./utils/exportUtils";
@@ -88,7 +89,8 @@ import {
   ClipboardList,
   Clock,
   AlertCircle,
-  Receipt
+  Receipt,
+  Menu
 } from "lucide-react";
 
 // Filtros del catálogo
@@ -137,9 +139,15 @@ export default function App() {
   const [isFirebaseAuthed, setIsFirebaseAuthed] = useState(false);
 
   const [activeTab, setActiveTab] = useState<string>("inventory");
+  const [isSidebarCollapsed, setIsSidebarCollapsed] = useState<boolean>(() => {
+    if (typeof window === "undefined") return false;
+    return localStorage.getItem("sidebar_collapsed") === "true";
+  });
+  const [isMobileSidebarOpen, setIsMobileSidebarOpen] = useState(false);
   const [catalogFilter, setCatalogFilter] = useState("todos");
   const [searchQuery, setSearchTerm] = useState("");
   const [showUnverifiedOnly, setShowUnverifiedOnly] = useState(false);
+  const [inventoryVisibleCount, setInventoryVisibleCount] = useState<number>(36);
 
   // Edit / Details Modal State
   const [selectedProductCode, setSelectedProductCode] = useState<string | null>(null);
@@ -258,14 +266,21 @@ export default function App() {
     };
   }, []);
 
+  // Reset progressive inventory count when filter, search, or catalog changes
+  useEffect(() => {
+    setInventoryVisibleCount(36);
+  }, [activeCatalogId, catalogFilter, searchQuery, showUnverifiedOnly]);
+
   // Safe module navigation helper that enforces user permissions and blocks unauthorized URL access
   const navigateToTab = (targetTab: string) => {
     if (!currentUser) return;
     if (targetTab === "dashboard") {
-      setActiveTab("dashboard");
-      setShowBlocks(false);
-      setSelectedBlock(null);
-      setShowOrder(false);
+      startTransition(() => {
+        setActiveTab("dashboard");
+        setShowBlocks(false);
+        setSelectedBlock(null);
+        setShowOrder(false);
+      });
       return;
     }
     const enabled = getEnabledModules(currentUser);
@@ -273,12 +288,17 @@ export default function App() {
       playSound("negative");
       showToast("Acceso denegado: No tienes permisos para acceder a ese módulo.");
       const fallback = enabled[0] || "dashboard";
-      setActiveTab(fallback);
+      startTransition(() => {
+        setActiveTab(fallback);
+      });
       return;
     }
-    setActiveTab(targetTab);
-    setShowBlocks(false);
-    setSelectedBlock(null);
+    startTransition(() => {
+      setActiveTab(targetTab);
+      setShowBlocks(false);
+      setSelectedBlock(null);
+      setShowOrder(false);
+    });
   };
 
   // Auto-redirect to first enabled module (or verify URL route permissions) upon login or permission update
@@ -2805,35 +2825,107 @@ export default function App() {
           }}
         />
       ) : (
-        <div className="bg-slate-100/90 text-slate-800 min-h-screen pb-28 font-sans selection:bg-teal-600 selection:text-white">
-          <header className="sticky top-0 z-30 text-white shadow-lg bg-custom-sidebar border-b border-white/10">
-            <div className="max-w-6xl mx-auto px-3.5 sm:px-6 pt-3 pb-2.5 flex flex-col md:flex-row md:items-center justify-between gap-2.5 sm:gap-3.5">
-              <div className="flex items-center justify-between gap-2">
-                <div
-                  className="cursor-pointer group flex items-center gap-2.5 min-w-0"
-                  onClick={() => {
-                    setActiveTab("dashboard");
-                    setShowBlocks(false);
-                    setSelectedBlock(null);
-                  }}
-                >
-                  <div className="w-10 h-10 sm:w-11 sm:h-11 rounded-xl bg-white p-1.5 shadow-sm flex items-center justify-center shrink-0 border border-white/20">
-                    <img
-                      src={APP_ICON_PATH}
-                      alt="Icono de la Aplicación"
-                      className="w-full h-full object-contain"
-                    />
-                  </div>
-                  <div className="min-w-0">
-                    <h1 className="text-base sm:text-2xl font-extrabold tracking-tight leading-tight flex items-center gap-2 group-hover:text-teal-200 transition-colors truncate">
-                      <span className="truncate">{farmaciaMeta.nombre || "Control de Stock"}</span>
-                    </h1>
-                    <p className="text-teal-100/95 text-[11px] sm:text-[13px] font-semibold mt-0.5 truncate">
-                      {farmaciaMeta.subtitulo || "Suministros Hospitalarios • Dr. José Manuel Rodríguez"}
-                    </p>
+        <div className="bg-slate-100/90 text-slate-800 min-h-screen font-sans selection:bg-teal-600 selection:text-white flex flex-row">
+          {/* 1. Barra Lateral Retráctil (Sidebar) */}
+          <Sidebar
+            activeTab={activeTab}
+            onSelectTab={(tabId) => {
+              navigateToTab(tabId);
+              playSound("click");
+            }}
+            currentUser={currentUser}
+            enabledModules={enabledModules}
+            isCollapsed={isSidebarCollapsed}
+            onToggleCollapse={() => {
+              setIsSidebarCollapsed((prev) => {
+                const next = !prev;
+                try {
+                  localStorage.setItem("sidebar_collapsed", String(next));
+                } catch {}
+                return next;
+              });
+              playSound("click");
+            }}
+            isMobileOpen={isMobileSidebarOpen}
+            onCloseMobile={() => setIsMobileSidebarOpen(false)}
+            onOpenMobile={() => setIsMobileSidebarOpen(true)}
+            orderCount={orderItems.length}
+            showOrder={showOrder}
+            showBlocks={showBlocks}
+            onToggleBlocks={() => {
+              startTransition(() => {
+                setActiveTab("inventory");
+                setShowOrder(false);
+                setShowBlocks((prev) => !prev);
+                setSelectedBlock(null);
+              });
+              playSound("click");
+            }}
+            onOpenOrder={() => {
+              startTransition(() => {
+                setActiveTab("inventory");
+                setShowBlocks(false);
+                setSelectedBlock(null);
+                setShowOrder((prev) => !prev);
+              });
+              playSound("click");
+            }}
+            onLogout={async () => {
+              try {
+                await signOut(auth);
+              } catch (e) {}
+              setCurrentUser(null);
+              setUsers([]);
+              setProducts([]);
+              localStorage.removeItem("current_user");
+              playSound("close");
+              showToast("Sesión cerrada correctamente");
+            }}
+            isMuted={isMuted}
+            onToggleMute={handleToggleMute}
+            farmaciaNombre={farmaciaMeta.nombre || "Control de Stock"}
+            farmaciaSubtitulo={farmaciaMeta.subtitulo || "Suministros Hospitalarios"}
+            activeCatalogName={catalogos.find((c) => c.id === activeCatalogId)?.nombre || "Catálogo Principal"}
+          />
+
+          {/* 2. Área Principal de Contenido */}
+          <div
+            className={`flex-1 min-w-0 flex flex-col min-h-screen pb-28 transition-[padding] duration-200 ease-out ${
+              !isSidebarCollapsed ? "lg:pl-64" : "lg:pl-0"
+            }`}
+          >
+            <header className="sticky top-0 z-30 text-white shadow-lg bg-custom-sidebar border-b border-white/10">
+              <div className="max-w-7xl mx-auto px-3.5 sm:px-6 pt-3 pb-2.5 flex flex-col md:flex-row md:items-center justify-between gap-2.5 sm:gap-3.5">
+                <div className="flex items-center justify-between gap-2">
+                  <div className="flex items-center gap-2">
+                    <div
+                      className="cursor-pointer group flex items-center gap-2.5 min-w-0"
+                      onClick={() => {
+                        startTransition(() => {
+                          setActiveTab("dashboard");
+                          setShowBlocks(false);
+                          setSelectedBlock(null);
+                        });
+                      }}
+                    >
+                      <div className="w-9 h-9 sm:w-10 sm:h-10 rounded-xl bg-white p-1.5 shadow-sm flex items-center justify-center shrink-0 border border-white/20">
+                        <img
+                          src={APP_ICON_PATH}
+                          alt="Icono de la Aplicación"
+                          className="w-full h-full object-contain"
+                        />
+                      </div>
+                      <div className="min-w-0">
+                        <h1 className="text-sm sm:text-xl font-extrabold tracking-tight leading-tight flex items-center gap-2 group-hover:text-teal-200 transition-colors truncate">
+                          <span className="truncate">{farmaciaMeta.nombre || "Control de Stock"}</span>
+                        </h1>
+                        <p className="text-teal-100/95 text-[10px] sm:text-xs font-semibold truncate">
+                          {farmaciaMeta.subtitulo || "Suministros Hospitalarios • Dr. José Manuel Rodríguez"}
+                        </p>
+                      </div>
+                    </div>
                   </div>
                 </div>
-              </div>
 
               {/* Selector Global de Catálogo */}
               <div className="flex flex-col gap-1 md:max-w-[280px] w-full md:mx-4 bg-black/15 px-3 py-1.5 sm:px-3.5 sm:py-2 rounded-2xl border border-white/15">
@@ -2872,14 +2964,6 @@ export default function App() {
 
                 <PWAInstallButton variant="header" />
 
-                <button
-                  onClick={handleToggleMute}
-                  className="p-2 sm:p-2.5 bg-white/10 hover:bg-white/20 active:scale-95 transition rounded-xl text-white border border-white/10 shadow-xs flex items-center justify-center cursor-pointer shrink-0"
-                  title={isMuted ? "Activar Sonidos" : "Silenciar"}
-                >
-                  {isMuted ? <VolumeX className="w-4 h-4 sm:w-4.5 sm:h-4.5 text-rose-300" /> : <Volume2 className="w-4 h-4 sm:w-4.5 sm:h-4.5 text-emerald-300" />}
-                </button>
-
                 {activeFarmaciaId !== DEFAULT_FARMACIA_ID &&
                   currentUser.usuario.toLowerCase() === "anyer" && (
                     <button
@@ -2906,222 +2990,7 @@ export default function App() {
                       <span>🏥 Principal</span>
                     </button>
                   )}
-
-                {enabledModules.includes("inventory") && (
-                  <button
-                    onClick={() => {
-                      setCatalogFilter("todos");
-                      setSearchTerm("");
-                      setSelectedBlock(null);
-                      setShowBlocks(false);
-                      setShowOrder(false);
-                      navigateToTab("inventory");
-                      playSound("click");
-                    }}
-                    className="flex items-center gap-1.5 bg-teal-700 hover:bg-teal-600 active:scale-95 transition rounded-xl px-3 py-2 sm:px-4 sm:py-2.5 text-[11px] sm:text-xs font-extrabold uppercase tracking-wider shadow-sm border border-white/15 cursor-pointer bg-custom-buttons shrink-0"
-                  >
-                    <Package className="w-3.5 h-3.5 sm:w-4 sm:h-4" />
-                    <span className="hidden sm:inline">Inventario</span>
-                  </button>
-                )}
-
-                <button
-                  onClick={async () => {
-                    try {
-                      await signOut(auth);
-                    } catch (e) {}
-                    setCurrentUser(null);
-                    setUsers([]);
-                    setProducts([]);
-                    localStorage.removeItem("current_user");
-                    playSound("close");
-                    showToast("Sesión cerrada correctamente");
-                  }}
-                  title="Cerrar Sesión"
-                  className="flex items-center justify-center bg-black/25 hover:bg-rose-600 active:scale-95 transition rounded-xl p-2 sm:p-2.5 text-white border border-white/10 shadow-xs cursor-pointer shrink-0"
-                >
-                  <LogOut className="w-4 h-4 sm:w-4.5 sm:h-4.5" />
-                </button>
               </div>
-            </div>
-
-            {/* Menu Tabs Navigation */}
-            <div className="max-w-6xl mx-auto px-4 sm:px-6 pb-3 pt-1 flex overflow-x-auto chip-scroll items-center gap-2 shrink-0">
-              <button
-                onClick={() => {
-                  navigateToTab("dashboard");
-                  playSound("click");
-                }}
-                className={`rounded-xl px-4 py-2 text-xs sm:text-[13px] font-bold transition active:scale-95 flex items-center gap-1.5 cursor-pointer whitespace-nowrap ${
-                  activeTab === "dashboard"
-                    ? "bg-white text-teal-900 font-extrabold shadow-sm"
-                    : "bg-white/10 text-teal-50 hover:bg-white/20"
-                }`}
-              >
-                <LayoutDashboard className="w-4 h-4" />
-                <span>Dashboard</span>
-              </button>
-
-              {enabledModules.includes("inventory") && (
-                <button
-                  onClick={() => {
-                    navigateToTab("inventory");
-                    playSound("click");
-                  }}
-                  className={`rounded-xl px-4 py-2 text-xs sm:text-[13px] font-bold transition active:scale-95 flex items-center gap-1.5 cursor-pointer whitespace-nowrap ${
-                    activeTab === "inventory" && !selectedBlock && !showOrder
-                      ? "bg-white text-teal-900 font-extrabold shadow-sm"
-                      : "bg-white/10 text-teal-50 hover:bg-white/20"
-                  }`}
-                >
-                  <Package className="w-4 h-4" />
-                  <span>Suministros</span>
-                </button>
-              )}
-
-              {enabledModules.includes("venta") && (
-                <button
-                  onClick={() => {
-                    navigateToTab("venta");
-                    playSound("click");
-                  }}
-                  className={`rounded-xl px-4 py-2 text-xs sm:text-[13px] font-bold transition active:scale-95 flex items-center gap-1.5 cursor-pointer whitespace-nowrap ${
-                    activeTab === "venta"
-                      ? "bg-white text-teal-900 font-extrabold shadow-sm"
-                      : "bg-white/10 text-teal-50 hover:bg-white/20"
-                  }`}
-                >
-                  <Receipt className="w-4 h-4" />
-                  <span>Venta</span>
-                </button>
-              )}
-
-              {enabledModules.includes("carga_masiva") && (
-                <button
-                  onClick={() => {
-                    navigateToTab("carga_masiva");
-                    playSound("click");
-                  }}
-                  className={`rounded-xl px-4 py-2 text-xs sm:text-[13px] font-bold transition active:scale-95 flex items-center gap-1.5 cursor-pointer whitespace-nowrap ${
-                    activeTab === "carga_masiva"
-                      ? "bg-white text-teal-900 font-extrabold shadow-sm"
-                      : "bg-white/10 text-teal-50 hover:bg-white/20"
-                  }`}
-                >
-                  <FileSpreadsheet className="w-4 h-4" />
-                  <span>Carga Masiva</span>
-                </button>
-              )}
-
-              {/* Solicitudes & Órdenes (Shared/Collapsible panel based on role) */}
-              {enabledModules.includes("solicitudes") && (
-                <button
-                  onClick={() => {
-                    navigateToTab("solicitudes");
-                    playSound("click");
-                  }}
-                  className={`rounded-xl px-4 py-2 text-xs sm:text-[13px] font-bold transition active:scale-95 flex items-center gap-1.5 cursor-pointer whitespace-nowrap ${
-                    activeTab === "solicitudes"
-                      ? "bg-white text-teal-900 font-extrabold shadow-sm"
-                      : "bg-white/10 text-teal-50 hover:bg-white/20"
-                  }`}
-                >
-                  <ClipboardList className="w-4 h-4" />
-                  <span>{currentUser.rol === "Administrador" ? "Órdenes" : "Solicitudes"}</span>
-                </button>
-              )}
-
-              {enabledModules.includes("historial") && (
-                <button
-                  onClick={() => {
-                    navigateToTab("historial");
-                    playSound("click");
-                  }}
-                  className={`rounded-xl px-4 py-2 text-xs sm:text-[13px] font-bold transition active:scale-95 flex items-center gap-1.5 cursor-pointer whitespace-nowrap ${
-                    activeTab === "historial"
-                      ? "bg-white text-teal-900 font-extrabold shadow-sm"
-                      : "bg-white/10 text-teal-50 hover:bg-white/20"
-                  }`}
-                >
-                  <History className="w-4 h-4" />
-                  <span>Historial Movs</span>
-                </button>
-              )}
-
-              {enabledModules.includes("usuarios") && (
-                <button
-                  onClick={() => {
-                    navigateToTab("usuarios");
-                    playSound("click");
-                  }}
-                  className={`rounded-xl px-4 py-2 text-xs sm:text-[13px] font-bold transition active:scale-95 flex items-center gap-1.5 cursor-pointer whitespace-nowrap ${
-                    activeTab === "usuarios"
-                      ? "bg-white text-teal-900 font-extrabold shadow-sm"
-                      : "bg-white/10 text-teal-50 hover:bg-white/20"
-                  }`}
-                >
-                  <Users className="w-4 h-4" />
-                  <span>Personal</span>
-                </button>
-              )}
-
-              {enabledModules.includes("configuracion") && (
-                <button
-                  onClick={() => {
-                    navigateToTab("configuracion");
-                    playSound("click");
-                  }}
-                  className={`rounded-xl px-4 py-2 text-xs sm:text-[13px] font-bold transition active:scale-95 flex items-center gap-1.5 cursor-pointer whitespace-nowrap ${
-                    activeTab === "configuracion"
-                      ? "bg-white text-teal-900 font-extrabold shadow-sm"
-                      : "bg-white/10 text-teal-50 hover:bg-white/20"
-                  }`}
-                >
-                  <Settings className="w-4 h-4" />
-                  <span>Configurar</span>
-                </button>
-              )}
-
-              {enabledModules.includes("inventory") && (
-                <>
-                  <div className="h-6 w-px bg-white/20 hidden sm:block mx-1"></div>
-
-                  <button
-                    onClick={() => {
-                      setActiveTab("inventory");
-                      setShowBlocks(!showBlocks);
-                      setSelectedBlock(null);
-                      playSound("click");
-                    }}
-                    className={`inline-flex items-center gap-1.5 rounded-xl px-4 py-2 border transition text-xs sm:text-[13px] font-bold active:scale-95 cursor-pointer whitespace-nowrap ${
-                      showBlocks
-                        ? "bg-white text-teal-900 border-white font-extrabold shadow-sm"
-                        : "bg-white/10 text-teal-50 border-white/15 hover:bg-white/20"
-                    }`}
-                  >
-                    <Layers className="w-4 h-4" />
-                    <span>Bloques</span>
-                  </button>
-
-                  <button
-                    onClick={() => {
-                      setActiveTab("inventory");
-                      setShowBlocks(false);
-                      setSelectedBlock(null);
-                      setShowOrder(!showOrder);
-                      playSound("click");
-                    }}
-                    className={`inline-flex items-center gap-1.5 rounded-xl px-4 py-2 border transition text-xs sm:text-[13px] font-bold active:scale-95 cursor-pointer whitespace-nowrap ${
-                      showOrder
-                        ? "bg-white text-teal-900 border-white font-extrabold shadow-sm"
-                        : "bg-white/10 text-teal-50 border-white/15 hover:bg-white/20"
-                    }`}
-                  >
-                    <ShoppingCart className="w-4 h-4" />
-                    <span>Pedido {orderItems.length > 0 && `(${orderItems.length})`}</span>
-                  </button>
-                </>
-              )}
             </div>
 
             {showBlocks && enabledModules.includes("inventory") && (
@@ -3506,37 +3375,40 @@ export default function App() {
                     </div>
 
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                      {getFilteredProducts().map((p, idx) => {
-                        const stats = getProductStats(p);
-                        const coords = getProductCoordinates(p.codigo);
-                        const productImage = getProductImages(p)[0];
+                      {getFilteredProducts()
+                        .slice(0, inventoryVisibleCount)
+                        .map((p, idx) => {
+                          const stats = getProductStats(p);
+                          const coords = getProductCoordinates(p.codigo);
+                          const productImage = getProductImages(p)[0];
 
-                        return (
-                          <div
-                            key={p.codigo}
-                            onClick={() => handleOpenDetails(p.codigo)}
-                            className="anim-card-in card-tap bg-white rounded-2xl shadow-xs border border-slate-200/90 p-4 sm:p-5 cursor-pointer relative flex flex-col justify-between"
-                            style={{ animationDelay: `${Math.min(idx, 15) * 20}ms` }}
-                          >
-                            <div className="flex flex-col xs:flex-row sm:flex-row justify-between items-start gap-3 sm:gap-4">
-                              <div className="flex items-start gap-3 min-w-0 flex-1 w-full">
-                                {productImage ? (
-                                  <button
-                                    type="button"
-                                    aria-label={`Ampliar fotografía de ${p.nombre}`}
-                                    onClick={(event) => {
-                                      event.preventDefault();
-                                      event.stopPropagation();
-                                      setZoomProductImage({ url: productImage, alt: p.nombre });
-                                    }}
-                                    className="h-12 w-12 shrink-0 cursor-zoom-in overflow-hidden rounded-2xl border border-slate-200 shadow-2xs sm:h-14 sm:w-14"
-                                  >
-                                    <img
-                                      src={productImage}
-                                      alt={p.nombre}
-                                      className="h-full w-full object-cover"
-                                    />
-                                  </button>
+                          return (
+                            <div
+                              key={p.codigo}
+                              onClick={() => handleOpenDetails(p.codigo)}
+                              className="cv-card card-tap bg-white rounded-2xl shadow-xs border border-slate-200/90 p-4 sm:p-5 cursor-pointer relative flex flex-col justify-between"
+                            >
+                              <div className="flex flex-col xs:flex-row sm:flex-row justify-between items-start gap-3 sm:gap-4">
+                                <div className="flex items-start gap-3 min-w-0 flex-1 w-full">
+                                  {productImage ? (
+                                    <button
+                                      type="button"
+                                      aria-label={`Ampliar fotografía de ${p.nombre}`}
+                                      onClick={(event) => {
+                                        event.preventDefault();
+                                        event.stopPropagation();
+                                        setZoomProductImage({ url: productImage, alt: p.nombre });
+                                      }}
+                                      className="h-12 w-12 shrink-0 cursor-zoom-in overflow-hidden rounded-2xl border border-slate-200 shadow-2xs sm:h-14 sm:w-14"
+                                    >
+                                      <img
+                                        src={productImage}
+                                        alt={p.nombre}
+                                        loading="lazy"
+                                        decoding="async"
+                                        className="h-full w-full object-cover"
+                                      />
+                                    </button>
                                 ) : (
                                   <div className="w-12 h-12 sm:w-14 sm:h-14 rounded-2xl bg-slate-50 border border-slate-200/90 flex items-center justify-center shrink-0 text-teal-600/70 shadow-2xs">
                                     <Package className="w-5 h-5 sm:w-6 sm:h-6" />
@@ -3655,6 +3527,37 @@ export default function App() {
                         );
                       })}
                     </div>
+
+                    {getFilteredProducts().length > inventoryVisibleCount && (
+                      <div className="mt-5 flex flex-col sm:flex-row items-center justify-between gap-3 bg-white border border-slate-200/90 rounded-2xl px-4 py-3.5 shadow-2xs">
+                        <p className="text-xs font-bold text-slate-600">
+                          Mostrando <span className="text-teal-700 font-extrabold">{inventoryVisibleCount}</span> de{" "}
+                          <span className="text-slate-900 font-extrabold">{getFilteredProducts().length}</span> suministros
+                        </p>
+                        <div className="flex items-center gap-2 w-full sm:w-auto">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setInventoryVisibleCount((prev) => prev + 48);
+                              playSound("click");
+                            }}
+                            className="flex-1 sm:flex-initial px-4 py-2 rounded-xl bg-teal-600 hover:bg-teal-700 active:scale-95 text-white text-xs font-extrabold transition cursor-pointer shadow-xs"
+                          >
+                            Cargar más (+48)
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setInventoryVisibleCount(getFilteredProducts().length);
+                              playSound("click");
+                            }}
+                            className="px-3.5 py-2 rounded-xl bg-slate-100 hover:bg-slate-200 active:scale-95 text-slate-700 text-xs font-bold transition cursor-pointer"
+                          >
+                            Ver todos ({getFilteredProducts().length})
+                          </button>
+                        </div>
+                      </div>
+                    )}
                   </div>
                 )}
               </div>
@@ -4498,6 +4401,7 @@ export default function App() {
 
           {/* Global Lateral Chat drawer */}
           {!showProductAdd && <ChatLateral currentUser={currentUser} />}
+          </div>
         </div>
       )}
     </>

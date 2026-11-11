@@ -5,9 +5,9 @@
   "type": "module",
   "scripts": {
     "dev": "vite --port=3000 --host=0.0.0.0",
-    "build": "vite build && BUILD_SINGLE=true vite build --outDir dist/single && cp dist/single/index.html ./index_2.html && cp dist/single/index.html ./index_todo_en_uno.html && cp dist/single/index.html dist/index_2.html && cp dist/single/index.html dist/index_todo_en_uno.html && rm -rf dist/single && node post-build.cjs",
+    "build": "vite build && node scripts/build-single.cjs && node post-build.cjs",
     "preview": "vite preview",
-    "clean": "rm -rf dist server.js",
+    "clean": "node -e \"const fs=require('fs');fs.rmSync('dist',{recursive:true,force:true});fs.rmSync('server.js',{force:true});\"",
     "lint": "tsc --noEmit",
     "test": "tsx --test src/utils/productPhotos.test.ts"
   },

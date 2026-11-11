@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import React, { useRef, useState, useCallback } from "react";
 
 interface MarqueeTextProps {
   text: string;
@@ -6,32 +6,22 @@ interface MarqueeTextProps {
   textClassName?: string;
 }
 
-export default function MarqueeText({ text, className = "", textClassName = "" }: MarqueeTextProps) {
+function MarqueeTextInner({ text, className = "", textClassName = "" }: MarqueeTextProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const textRef = useRef<HTMLSpanElement>(null);
   const [shouldScroll, setShouldScroll] = useState(false);
+  const checkedRef = useRef<string>("");
 
-  useEffect(() => {
-    if (text.length < 18) {
-      setShouldScroll(false);
-      return;
-    }
-
-    const checkScroll = () => {
-      if (containerRef.current && textRef.current) {
-        const hasOverflow = textRef.current.scrollWidth > containerRef.current.clientWidth;
-        setShouldScroll(hasOverflow);
+  const handleCheckOverflow = useCallback(() => {
+    if (text.length < 24) return;
+    if (checkedRef.current === text) return;
+    checkedRef.current = text;
+    if (containerRef.current && textRef.current) {
+      const hasOverflow = textRef.current.scrollWidth > containerRef.current.clientWidth;
+      if (hasOverflow) {
+        setShouldScroll(true);
       }
-    };
-
-    checkScroll();
-    window.addEventListener("resize", checkScroll);
-    const timer = setTimeout(checkScroll, 150);
-
-    return () => {
-      window.removeEventListener("resize", checkScroll);
-      clearTimeout(timer);
-    };
+    }
   }, [text]);
 
   if (shouldScroll) {
@@ -54,10 +44,19 @@ export default function MarqueeText({ text, className = "", textClassName = "" }
   }
 
   return (
-    <div ref={containerRef} className={`overflow-hidden truncate w-full ${className}`} title={text}>
+    <div
+      ref={containerRef}
+      onMouseEnter={handleCheckOverflow}
+      onTouchStart={handleCheckOverflow}
+      className={`overflow-hidden truncate w-full ${className}`}
+      title={text}
+    >
       <span ref={textRef} className={`block truncate ${textClassName}`}>
         {text}
       </span>
     </div>
   );
 }
+
+const MarqueeText = React.memo(MarqueeTextInner);
+export default MarqueeText;

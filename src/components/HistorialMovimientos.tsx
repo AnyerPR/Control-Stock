@@ -1,6 +1,6 @@
 import { useState, useEffect, useMemo } from "react";
 import { query, orderBy, limit, getDocs } from "firebase/firestore";
-import { tenantCollection } from "../firebase";
+import { tenantCollection, getActiveFarmaciaId } from "../firebase";
 import { Movimiento, Usuario, Catalogo, isCatalogAllowedForUser, matchesCatalog } from "../types";
 import { playSound } from "../utils/audio";
 import { exportInvoiceToPDF, exportInvoiceToWord } from "../utils/exportUtils";
@@ -39,9 +39,12 @@ interface FacturaGroup {
   totalMonto: number;
 }
 
+const cachedMovementsByTenant = new Map<string, Movimiento[]>();
+
 export default function HistorialMovimientos({ activeCatalogId, currentUser, catalogos = [] }: HistorialMovimientosProps) {
-  const [allMovements, setAllMovements] = useState<Movimiento[]>([]);
-  const [loading, setLoading] = useState(true);
+  const tenantKey = currentUser?.farmaciaId || getActiveFarmaciaId();
+  const [allMovements, setAllMovements] = useState<Movimiento[]>(() => cachedMovementsByTenant.get(tenantKey) || []);
+  const [loading, setLoading] = useState<boolean>(() => !cachedMovementsByTenant.has(tenantKey));
   const [viewMode, setViewMode] = useState<"facturas" | "detalle">("facturas");
   const [filterType, setFilterType] = useState<string>("todos");
   const [searchTerm, setSearchTerm] = useState("");
@@ -51,8 +54,10 @@ export default function HistorialMovimientos({ activeCatalogId, currentUser, cat
 
   const isLocalFileMode = typeof window !== "undefined" && window.location.protocol === "file:";
 
-  const fetchMovements = async () => {
-    setLoading(true);
+  const fetchMovements = async (forceSpinner = false) => {
+    if (forceSpinner || !cachedMovementsByTenant.has(tenantKey)) {
+      setLoading(true);
+    }
     if (isLocalFileMode) {
       const stored = localStorage.getItem("offline_movimientos");
       let list: Movimiento[] = [];
@@ -63,6 +68,7 @@ export default function HistorialMovimientos({ activeCatalogId, currentUser, cat
           console.error(e);
         }
       }
+      cachedMovementsByTenant.set(tenantKey, list);
       setAllMovements(list);
       setLoading(false);
       return;
@@ -70,12 +76,13 @@ export default function HistorialMovimientos({ activeCatalogId, currentUser, cat
 
     try {
       const colRef = tenantCollection("movimientos");
-      const q = query(colRef, orderBy("timestamp", "desc"), limit(2000));
+      const q = query(colRef, orderBy("timestamp", "desc"), limit(500));
       const snapshot = await getDocs(q);
       const list: Movimiento[] = [];
       snapshot.forEach((docSnap) => {
         list.push({ id: docSnap.id, ...docSnap.data() } as Movimiento);
       });
+      cachedMovementsByTenant.set(tenantKey, list);
       setAllMovements(list);
     } catch (err) {
       console.error("Error fetching movements:", err);
@@ -85,15 +92,16 @@ export default function HistorialMovimientos({ activeCatalogId, currentUser, cat
   };
 
   useEffect(() => {
-    fetchMovements();
+    fetchMovements(false);
 
     if (isLocalFileMode) {
-      window.addEventListener("offline_movimientos_update", fetchMovements);
+      const handler = () => fetchMovements(false);
+      window.addEventListener("offline_movimientos_update", handler);
       return () => {
-        window.removeEventListener("offline_movimientos_update", fetchMovements);
+        window.removeEventListener("offline_movimientos_update", handler);
       };
     }
-  }, [isLocalFileMode, currentUser?.farmaciaId, activeCatalogId]);
+  }, [isLocalFileMode, tenantKey]);
 
   useEffect(() => {
     setCurrentPage(1);

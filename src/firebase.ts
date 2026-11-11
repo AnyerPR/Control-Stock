@@ -55,27 +55,12 @@ function getSecondaryAuth() {
   return getAuth(getSecondaryApp());
 }
 
-// Hash SHA-256 de la cuenta maestra Anyer ("303005") para consultas de directorio multi-sede
-const MASTER_BRIDGE_EMAIL = "anyer@principal.controlstock.local";
-const MASTER_BRIDGE_HASH = "59d9a6df06b9f610f7db8e036896ed03662d168f0097a2f15804f1f89521265c";
-
 export async function getDirectoryFirestore() {
-  const secApp = getSecondaryApp();
-  const secAuth = getAuth(secApp);
-  const secDb = getFirestore(secApp);
-
-  if (!secAuth.currentUser || secAuth.currentUser.email !== MASTER_BRIDGE_EMAIL) {
-    try {
-      await signInWithEmailAndPassword(secAuth, MASTER_BRIDGE_EMAIL, MASTER_BRIDGE_HASH);
-    } catch {
-      try {
-        await createUserWithEmailAndPassword(secAuth, MASTER_BRIDGE_EMAIL, MASTER_BRIDGE_HASH);
-      } catch {
-        // Ignore if already signed in or unavailable
-      }
-    }
+  if (auth?.currentUser) {
+    return db;
   }
-  return secDb;
+  const secApp = getSecondaryApp();
+  return getFirestore(secApp);
 }
 
 export function normalizeFarmaciaId(rawId?: string | null): string {
@@ -245,15 +230,10 @@ export async function signInOrMigrateFirebaseAuth(
           try {
             return await createUserWithEmailAndPassword(auth, versionedEmail, passwordHash);
           } catch {
-            try {
-              return await signInWithEmailAndPassword(auth, versionedEmail, passwordHash);
-            } catch {
-              // Fallback final: token puente autorizado para la sede
-            }
+            return await signInWithEmailAndPassword(auth, versionedEmail, passwordHash);
           }
         }
-        // Fallback garantizado si el usuario ya validó su hash en Firestore
-        return await signInWithEmailAndPassword(auth, MASTER_BRIDGE_EMAIL, MASTER_BRIDGE_HASH);
+        throw createErr;
       }
     }
 
@@ -292,6 +272,22 @@ service cloud.firestore {
       );
     }
 
+    function isValidSolicitudUpdate() {
+      let oldStatus = resource.data.estado;
+      let newStatus = request.resource.data.estado;
+      let isAuthChange = (newStatus == 'Aprobada' || newStatus == 'Rechazada') && newStatus != oldStatus;
+      let notClosed = !(oldStatus in ['Entregada', 'Cancelada']);
+
+      return notClosed && (
+        !isAuthChange || (
+          request.resource.data.rolAutorizador == 'Administrador' &&
+          request.resource.data.usuarioAutorizador is string &&
+          request.resource.data.usuarioAutorizador.size() > 0 &&
+          request.resource.data.fechaAutorizacion is string
+        )
+      );
+    }
+
     // 1. Sede Principal (Colecciones raíz originales: conserva todos tus datos actuales)
     match /usuarios/{userId} {
       allow get: if true;
@@ -323,7 +319,8 @@ service cloud.firestore {
     }
 
     match /solicitudes/{docId} {
-      allow read, write: if belongsToPrincipal();
+      allow read, create, delete: if belongsToPrincipal();
+      allow update: if belongsToPrincipal() && isValidSolicitudUpdate();
     }
 
     match /historial/{docId} {
@@ -342,6 +339,11 @@ service cloud.firestore {
       match /usuarios/{userId} {
         allow get: if true;
         allow list, write: if belongsToFarmacia(farmaciaId);
+      }
+
+      match /solicitudes/{docId} {
+        allow read, create, delete: if belongsToFarmacia(farmaciaId);
+        allow update: if belongsToFarmacia(farmaciaId) && isValidSolicitudUpdate();
       }
 
       match /{subcollection}/{docId} {

@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from "react";
+import React, { useState, useEffect, useMemo, useRef } from "react";
 import { doc, query, orderBy, onSnapshot, addDoc, updateDoc, getCountFromServer, writeBatch, limit, deleteDoc, runTransaction } from "firebase/firestore";
 import { db, tenantCollection, tenantDoc, getActiveFarmaciaId, DEFAULT_FARMACIA_ID } from "../firebase";
 import {
@@ -19,7 +19,8 @@ import {
 import { playSound } from "../utils/audio";
 import { logSystemEvent } from "../utils/chatHelper";
 import { isLotExpiredWithStock } from "../utils/inventoryStatus";
-import { FileText, ClipboardList, Plus, Search, Filter, AlertCircle, Calendar, Clock, RefreshCw, Layers, LoaderCircle, User, X, PlusCircle, Trash2 } from "lucide-react";
+import { FileText, ClipboardList, Plus, Search, Filter, AlertCircle, Calendar, Clock, RefreshCw, Layers, LoaderCircle, User, X, PlusCircle, Trash2, Sparkles, ShieldCheck, CheckCircle2, XCircle, Eye, ChevronDown } from "lucide-react";
+import ReabastecimientoInteligente from "./ReabastecimientoInteligente";
 
 interface SolicitudesPanelProps {
   currentUser: Usuario;
@@ -44,9 +45,44 @@ const DEPARTAMENTOS = [
   "Farmacia Clínica"
 ];
 
+const cachedSolicitudesByTenant = new Map<
+  string,
+  { solicitudes: Solicitud[]; historial: RegistroHistorial[]; periods: string[] }
+>();
+
 export default function SolicitudesPanel({ currentUser, activePeriod, showToast, products, departamentos, activeCatalogId, catalogos, onSelectCatalog }: SolicitudesPanelProps) {
+  const tenantKey = currentUser.farmaciaId || getActiveFarmaciaId();
+  const initialCache = cachedSolicitudesByTenant.get(tenantKey);
   const dynamicDepts = departamentos.length > 0 ? departamentos.map((d) => d.nombre) : DEPARTAMENTOS;
-  const isWarehouseOrAdmin = currentUser.rol === "Administrador" || currentUser.departamento === "Almacén y Suministro" || currentUser.departamento === "Farmacia";
+  const isAdmin = currentUser.rol === "Administrador";
+  const isWarehouseOrAdmin = isAdmin || currentUser.departamento === "Almacén y Suministro" || currentUser.departamento === "Farmacia";
+  const submittingRef = useRef(false);
+  const actionLockRef = useRef<string | null>(null);
+
+  // Extrae quién autorizó o rechazó una solicitud y cuándo (compatible con solicitudes nuevas y previas)
+  const getAuthorizationMetadata = (sol: Solicitud) => {
+    if (sol.usuarioAutorizador) {
+      return {
+        autorizador: sol.usuarioAutorizador,
+        fecha: sol.fechaAutorizacion || "",
+        hora: sol.horaAutorizacion || "",
+        accion: sol.accionAutorizacion || (sol.estado === "Rechazada" ? "Rechazada" : "Autorizada")
+      };
+    }
+    const cambios = sol.historialCambios || [];
+    for (let i = cambios.length - 1; i >= 0; i--) {
+      const c = cambios[i];
+      if (c.estado === "Aprobada" || c.estado === "Rechazada" || c.estado === "Cancelada") {
+        return {
+          autorizador: c.usuarioResponsable,
+          fecha: c.fecha,
+          hora: c.hora,
+          accion: c.estado === "Aprobada" ? "Autorizada" : c.estado
+        };
+      }
+    }
+    return null;
+  };
 
   const getDaysToExpiration = (dateStr: string) => {
     if (!dateStr) return Infinity;
@@ -56,10 +92,10 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
     return Math.ceil((expDate.getTime() - today.getTime()) / 86400000);
   };
 
-  const [solicitudes, setSolicitudes] = useState<Solicitud[]>([]);
-  const [historialList, setHistorialList] = useState<RegistroHistorial[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [activeSubTab, setActiveSubTab] = useState<"list" | "create" | "history">("list");
+  const [solicitudes, setSolicitudes] = useState<Solicitud[]>(() => initialCache?.solicitudes || []);
+  const [historialList, setHistorialList] = useState<RegistroHistorial[]>(() => initialCache?.historial || []);
+  const [loading, setLoading] = useState<boolean>(() => !initialCache);
+  const [activeSubTab, setActiveSubTab] = useState<"list" | "create" | "history" | "reabastecimiento">("reabastecimiento");
 
   const availableCatalogosMemo = useMemo(
     () => getUserAvailableCatalogos(currentUser, catalogos),
@@ -113,7 +149,7 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
   const [statusFilter, setStatusFilter] = useState("todos");
   const [searchTerm, setSearchTerm] = useState("");
   const [periodFilter, setPeriodFilter] = useState(activePeriod);
-  const [availablePeriods, setAvailablePeriods] = useState<string[]>([activePeriod]);
+  const [availablePeriods, setAvailablePeriods] = useState<string[]>(() => initialCache?.periods || [activePeriod]);
 
   // Advanced Filters for Orders Query
   const [dateFilter, setDateFilter] = useState("");
@@ -121,11 +157,14 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
   const [orderNumberFilter, setOrderNumberFilter] = useState("");
   const [catalogFilterState, setCatalogFilterState] = useState("todos");
 
-  // History Filter State
+  // History Filter State & Pagination
   const [histDeptFilter, setHistDeptFilter] = useState("todos");
   const [histDateFilter, setHistDateFilter] = useState("");
   const [histStatusFilter, setHistStatusFilter] = useState("todos");
   const [histUserFilter, setHistUserFilter] = useState("");
+  const [historyViewMode, setHistoryViewMode] = useState<"solicitudes" | "eventos">("solicitudes");
+  const [visibleListCount, setVisibleListCount] = useState(25);
+  const [visibleHistoryCount, setVisibleHistoryCount] = useState(30);
 
   // Create Form State
   const [department, setDepartment] = useState(() => {
@@ -185,7 +224,8 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
         solList.forEach(s => {
           if (s.periodo) periodsSet.add(s.periodo);
         });
-        setAvailablePeriods(Array.from(periodsSet).sort());
+        const periodsArr = Array.from(periodsSet).sort();
+        setAvailablePeriods(periodsArr);
         setSolicitudes(solList);
 
         // 2. History
@@ -195,6 +235,11 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
           try { histList = JSON.parse(storedHist); } catch (e) {}
         }
         setHistorialList(histList);
+        cachedSolicitudesByTenant.set(tenantKey, {
+          solicitudes: solList,
+          historial: histList,
+          periods: periodsArr
+        });
         setLoading(false);
       };
 
@@ -208,7 +253,9 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
       };
     }
 
-    setLoading(true);
+    if (!cachedSolicitudesByTenant.has(tenantKey)) {
+      setLoading(true);
+    }
     const colRef = tenantCollection("solicitudes");
 
     // Main query ordered by timestamp (also populates availablePeriods in a single listener)
@@ -238,8 +285,15 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
         });
       });
 
-      setAvailablePeriods(Array.from(periodsSet).sort());
+      const periodsArr = Array.from(periodsSet).sort();
+      setAvailablePeriods(periodsArr);
       setSolicitudes(list);
+      const prevCache = cachedSolicitudesByTenant.get(tenantKey);
+      cachedSolicitudesByTenant.set(tenantKey, {
+        solicitudes: list,
+        historial: prevCache?.historial || [],
+        periods: periodsArr
+      });
       setLoading(false);
 
       // Play sound and show toast if a request is created or its state changes
@@ -286,39 +340,69 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
     };
   }, [activePeriod, currentUser, currentUser.farmaciaId]);
 
-  const handleCreateRequest = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (creating) return;
+  const submitSolicitudPayload = async (
+    rawItems: Omit<SolicitudItem, "id">[],
+    rawDesc: string,
+    rawObs: string,
+    allowOutOfStockReplenishment = false
+  ) => {
+    if (creating || submittingRef.current) return;
 
-    if (!solicitudCatalogId) {
-      alert("Por favor seleccione un catálogo de trabajo antes de registrar la solicitud.");
+    const targetCatalogId = solicitudCatalogId || activeCatalogId;
+    if (!targetCatalogId) {
+      showToast("Por favor seleccione un catálogo de trabajo antes de registrar la solicitud.");
       return;
     }
 
-    const desc = description.trim();
-    if (!desc && solicitudItems.length === 0) {
+    // Deduplicar ítems por productoCodigo para evitar productos duplicados en una misma solicitud
+    const dedupedMap = new Map<string, Omit<SolicitudItem, "id">>();
+    for (const item of rawItems) {
+      const code = (item.productoCodigo || "").trim();
+      if (!code) continue;
+      if (dedupedMap.has(code)) {
+        const existing = dedupedMap.get(code)!;
+        dedupedMap.set(code, {
+          ...existing,
+          cantidadSolicitada: Number(existing.cantidadSolicitada || 0) + Number(item.cantidadSolicitada || 0),
+          cantidadEntregada: Number(existing.cantidadEntregada || 0) + Number(item.cantidadEntregada || item.cantidadSolicitada || 0)
+        });
+      } else {
+        dedupedMap.set(code, { ...item });
+      }
+    }
+    const dedupedItems = Array.from(dedupedMap.values());
+
+    const desc = rawDesc.trim();
+    if (!desc && dedupedItems.length === 0) {
       playSound("negative");
       showToast("Por favor agregue una descripción o añada insumos específicos a la solicitud.");
       return;
     }
 
-    // Validar que todos los productos agregados tengan existencias suficientes tanto en Sistema como en Físico
-    for (const item of solicitudItems) {
-      const prod = products?.find((p) => p.codigo === item.productoCodigo);
-      const totalSys = prod?.lotes?.reduce((acc, l) => acc + Number(l.cantidad || 0), 0) || 0;
-      const totalPhys = prod?.lotes?.reduce((acc, l) => acc + Number(l.cantidadF || 0), 0) || 0;
-      const maxAvailableBoth = Math.min(totalSys, totalPhys);
-      if (!prod || item.cantidadSolicitada <= 0 || item.cantidadSolicitada > totalSys || item.cantidadSolicitada > totalPhys) {
+    // Validar existencias si no es un pedido de Reabastecimiento Inteligente
+    for (const item of dedupedItems) {
+      if (item.cantidadSolicitada <= 0) {
         playSound("negative");
-        showToast(
-          `Stock insuficiente para "${item.productoNombre}". Solicitado: ${item.cantidadSolicitada} und. | Disponible en Sistema: ${totalSys} und. | Físico: ${totalPhys} und. (Máx: ${maxAvailableBoth} und.)`
-        );
+        showToast(`La cantidad solicitada para "${item.productoNombre}" debe ser mayor a 0.`);
         return;
       }
-    }
+      const isReplenishmentItem =
+        allowOutOfStockReplenishment || Boolean(item.justificacion?.includes("Reabastecimiento"));
 
-    setCreating(true);
-    playSound("action");
+      if (!isReplenishmentItem) {
+        const prod = products?.find((p) => p.codigo === item.productoCodigo);
+        const totalSys = prod?.lotes?.reduce((acc, l) => acc + Number(l.cantidad || 0), 0) || 0;
+        const totalPhys = prod?.lotes?.reduce((acc, l) => acc + Number(l.cantidadF || 0), 0) || 0;
+        const maxAvailableBoth = Math.min(totalSys, totalPhys);
+        if (!prod || item.cantidadSolicitada > totalSys || item.cantidadSolicitada > totalPhys) {
+          playSound("negative");
+          showToast(
+            `Stock insuficiente para "${item.productoNombre}". Solicitado: ${item.cantidadSolicitada} und. | Disponible en Sistema: ${totalSys} und. | Físico: ${totalPhys} und. (Máx: ${maxAvailableBoth} und.)`
+          );
+          return;
+        }
+      }
+    }
 
     const canChooseDept =
       currentUser.rol === "Administrador" ||
@@ -328,7 +412,50 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
       ? department
       : currentUser.departamento || department;
 
+    const finalDesc =
+      desc ||
+      dedupedItems.map((it) => `${it.productoNombre} (Cant: ${it.cantidadSolicitada})`).join(", ");
+
+    // Construir huella única (fingerprint) para evitar guardar dos veces la misma solicitud
+    const itemsSignature = dedupedItems
+      .map((it) => `${it.productoCodigo}:${it.cantidadSolicitada}`)
+      .sort()
+      .join("|");
+    const requestFingerprint = `${effectiveDept}::${targetCatalogId}::${currentUser.usuario.toLowerCase()}::${itemsSignature}::${finalDesc.toLowerCase()}`;
+
+    // Verificar si ya existe una solicitud Pendiente con la misma huella en los últimos 3 minutos
+    const nowMs = Date.now();
+    const recentDuplicate = solicitudes.find(
+      (s) =>
+        s.estado === "Pendiente" &&
+        nowMs - (s.timestamp || 0) < 3 * 60 * 1000 &&
+        (s.requestFingerprint === requestFingerprint ||
+          (s.departamento === effectiveDept &&
+            s.usuarioCreador === `${currentUser.nombre} (${currentUser.usuario})` &&
+            s.descripcion === finalDesc &&
+            (s.items || []).length === dedupedItems.length))
+    );
+
+    if (recentDuplicate) {
+      playSound("negative");
+      showToast(
+        `Prevención de duplicados: Ya registraste esta misma solicitud (${recentDuplicate.numeroSolicitud}) hace unos instantes.`
+      );
+      return;
+    }
+
+    submittingRef.current = true;
+    setCreating(true);
+    playSound("action");
+
     const isLocalFileMode = typeof window !== "undefined" && window.location.protocol === "file:";
+
+    // Calcular máximo número SOL-XXXX actual para evitar números duplicados
+    const maxExistingSolNum = solicitudes.reduce((maxAcc, s) => {
+      const m = (s.numeroSolicitud || "").match(/(\d+)/);
+      const n = m ? parseInt(m[1], 10) : 0;
+      return n > maxAcc ? n : maxAcc;
+    }, 0);
 
     try {
       if (isLocalFileMode) {
@@ -337,14 +464,13 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
         if (storedSol) {
           try { solList = JSON.parse(storedSol); } catch (e) {}
         }
-        const nextNum = String(solList.length + 1).padStart(4, "0");
+        const nextNumeric = Math.max(solList.length, maxExistingSolNum) + 1;
+        const nextNum = String(nextNumeric).padStart(4, "0");
         const numeroSolicitud = `SOL-${nextNum}`;
 
         const now = new Date();
         const localDate = now.toLocaleDateString("en-CA"); // YYYY-MM-DD
         const localTime = now.toLocaleTimeString("es-DO", { hour12: false }).slice(0, 5); // HH:MM
-
-        const finalDesc = desc || (solicitudItems.map(it => `${it.productoNombre} (Cant: ${it.cantidadSolicitada})`).join(", "));
 
         const newId = `sol-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
         const docData: Solicitud = {
@@ -357,10 +483,11 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
           descripcion: finalDesc,
           prioridad: priority,
           estado: "Pendiente",
-          observaciones: observations.trim(),
+          observaciones: rawObs.trim(),
           periodo: activePeriod,
           timestamp: Date.now(),
-          catalogId: solicitudCatalogId,
+          catalogId: targetCatalogId,
+          requestFingerprint,
           historialCambios: [
             {
               estado: "Pendiente",
@@ -369,8 +496,8 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
               hora: localTime
             }
           ],
-          items: solicitudItems.map(it => ({
-            id: `item-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+          items: dedupedItems.map((it, idx) => ({
+            id: `item-${Date.now()}-${idx}-${Math.random().toString(36).slice(2, 6)}`,
             ...it
           }))
         };
@@ -378,7 +505,6 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
         solList.unshift(docData);
         localStorage.setItem("offline_solicitudes", JSON.stringify(solList));
 
-        // Create global history entry
         let storedHist = localStorage.getItem("offline_historial");
         let histList: RegistroHistorial[] = [];
         if (storedHist) {
@@ -394,12 +520,11 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
           fecha: localDate,
           hora: localTime,
           timestamp: Date.now(),
-          catalogId: solicitudCatalogId
+          catalogId: targetCatalogId
         };
         histList.unshift(histData);
         localStorage.setItem("offline_historial", JSON.stringify(histList));
 
-        // Notify chat
         logSystemEvent(`🆕 **Nueva Solicitud**: Se creó la solicitud **${numeroSolicitud}** de **${effectiveDept}** por el usuario **${currentUser.nombre}** (Prioridad: ${priority}).`);
 
         window.dispatchEvent(new Event("offline_solicitudes_update"));
@@ -410,27 +535,23 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
         setPriority("Media");
         setDepartment(canChooseDept ? dynamicDepts[0] || DEPARTAMENTOS[0] : effectiveDept);
         setSolicitudItems([]);
-        setActiveSubTab("list");
+        setActiveSubTab("history");
         playSound("positive");
-        showToast(`Solicitud ${numeroSolicitud} creada exitosamente.`);
-        setCreating(false);
+        showToast(`Solicitud ${numeroSolicitud} creada y registrada en el Historial.`);
         return;
       }
 
-      // 1. Get next auto SOL-XXXX number
+      // 1. Obtener siguiente número único SOL-XXXX sin colisión
       const colRef = tenantCollection("solicitudes");
       const countSnapshot = await getCountFromServer(colRef);
-      const nextNum = String(countSnapshot.data().count + 1).padStart(4, "0");
+      const nextNumeric = Math.max(countSnapshot.data().count, maxExistingSolNum) + 1;
+      const nextNum = String(nextNumeric).padStart(4, "0");
       const numeroSolicitud = `SOL-${nextNum}`;
 
       const now = new Date();
       const localDate = now.toLocaleDateString("en-CA"); // YYYY-MM-DD
       const localTime = now.toLocaleTimeString("es-DO", { hour12: false }).slice(0, 5); // HH:MM
 
-      // If desc is empty but we have items, create an auto-description listing the products
-      const finalDesc = desc || (solicitudItems.map(it => `${it.productoNombre} (Cant: ${it.cantidadSolicitada})`).join(", "));
-
-      // Create Solicitud document
       const docData: Omit<Solicitud, "id"> = {
         numeroSolicitud,
         fecha: localDate,
@@ -440,10 +561,11 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
         descripcion: finalDesc,
         prioridad: priority,
         estado: "Pendiente",
-        observaciones: observations.trim(),
+        observaciones: rawObs.trim(),
         periodo: activePeriod,
         timestamp: Date.now(),
-        catalogId: solicitudCatalogId,
+        catalogId: targetCatalogId,
+        requestFingerprint,
         historialCambios: [
           {
             estado: "Pendiente",
@@ -452,15 +574,14 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
             hora: localTime
           }
         ],
-        items: solicitudItems.map(it => ({
-          id: `item-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+        items: dedupedItems.map((it, idx) => ({
+          id: `item-${Date.now()}-${idx}-${Math.random().toString(36).slice(2, 6)}`,
           ...it
         }))
       };
 
       const docRef = await addDoc(colRef, docData);
 
-      // Create global history entry
       const histCol = tenantCollection("historial");
       const histData: Omit<RegistroHistorial, "id"> = {
         tipo: "Creación",
@@ -471,11 +592,10 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
         fecha: localDate,
         hora: localTime,
         timestamp: Date.now(),
-        catalogId: solicitudCatalogId
+        catalogId: targetCatalogId
       };
       await addDoc(histCol, histData);
-      
-      // Notify chat
+
       logSystemEvent(`🆕 **Nueva Solicitud**: Se creó la solicitud **${numeroSolicitud}** de **${effectiveDept}** por el usuario **${currentUser.nombre}** (Prioridad: ${priority}).`);
 
       setDescription("");
@@ -483,15 +603,21 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
       setPriority("Media");
       setDepartment(canChooseDept ? dynamicDepts[0] || DEPARTAMENTOS[0] : effectiveDept);
       setSolicitudItems([]);
-      setActiveSubTab("list");
+      setActiveSubTab("history");
       playSound("positive");
-      showToast(`Solicitud ${numeroSolicitud} creada exitosamente.`);
+      showToast(`Solicitud ${numeroSolicitud} registrada exitosamente en el Historial.`);
     } catch (err) {
       console.error("Error creating request:", err);
-      alert("Error al guardar la solicitud.");
+      showToast("Error al guardar la solicitud.");
     } finally {
+      submittingRef.current = false;
       setCreating(false);
     }
+  };
+
+  const handleCreateRequest = async (e: React.FormEvent) => {
+    e.preventDefault();
+    await submitSolicitudPayload(solicitudItems, description, observations, false);
   };
 
   const [deliveryItems, setDeliveryItems] = useState<SolicitudItem[]>([]);
@@ -963,7 +1089,26 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
 
   const handleUpdateStatusSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!selectedSolicitud || updating) return;
+    if (!selectedSolicitud || updating || actionLockRef.current === selectedSolicitud.id) return;
+
+    const isAuthTransition =
+      newStatus === "Aprobada" || newStatus === "Rechazada" || newStatus === "Cancelada";
+
+    if (isAuthTransition && !isAdmin) {
+      playSound("negative");
+      showToast("Acceso denegado: Solo los perfiles con rol ADMIN pueden autorizar, rechazar o cancelar solicitudes.");
+      return;
+    }
+
+    if (
+      selectedSolicitud.estado === "Entregada" ||
+      selectedSolicitud.estado === "Cancelada" ||
+      (isAuthTransition && selectedSolicitud.estado === newStatus)
+    ) {
+      playSound("negative");
+      showToast(`Esta solicitud ya se encuentra en estado "${selectedSolicitud.estado}" y no permite cambios duplicados.`);
+      return;
+    }
 
     const shouldDeductStock =
       newStatus === "Entregada" ||
@@ -1034,6 +1179,7 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
       }
     }
 
+    actionLockRef.current = selectedSolicitud.id;
     setUpdating(true);
     playSound("action");
 
@@ -1043,6 +1189,7 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
     try {
       if (isLocalFileMode) {
         const now = new Date();
+        const nowTs = now.getTime();
         const localDate = now.toLocaleDateString("en-CA");
         const localTime = now.toLocaleTimeString("es-DO", { hour12: false }).slice(0, 5);
 
@@ -1054,8 +1201,17 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
         };
 
         const updatedHistory = [...selectedSolicitud.historialCambios, nuevoCambio];
+        const authPatch = isAuthTransition
+          ? {
+              usuarioAutorizador: `${currentUser.nombre} (${currentUser.usuario})`,
+              rolAutorizador: currentUser.rol,
+              fechaAutorizacion: localDate,
+              horaAutorizacion: localTime,
+              timestampAutorizacion: nowTs,
+              accionAutorizacion: (newStatus === "Aprobada" ? "Autorizada" : "Rechazada") as "Autorizada" | "Rechazada"
+            }
+          : {};
 
-        // 1. Update offline solicitudes
         let storedSol = localStorage.getItem("offline_solicitudes");
         let solList: Solicitud[] = [];
         if (storedSol) {
@@ -1065,6 +1221,7 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
           if (s.id === selectedSolicitud.id) {
             return {
               ...s,
+              ...authPatch,
               estado: newStatus,
               observaciones: statusObs.trim() || s.observaciones,
               historialCambios: updatedHistory,
@@ -1075,7 +1232,6 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
         });
         localStorage.setItem("offline_solicitudes", JSON.stringify(solList));
 
-        // 2. Update offline products & movements only if dispatching/delivering
         if (shouldDeductStock) {
           let storedProds = localStorage.getItem("offline_productos");
           let prodList: Producto[] = [];
@@ -1132,7 +1288,6 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
           localStorage.setItem("offline_movimientos", JSON.stringify(movList));
         }
 
-        // 3. Register in global history
         let storedHist = localStorage.getItem("offline_historial");
         let histList: RegistroHistorial[] = [];
         if (storedHist) {
@@ -1154,7 +1309,6 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
         histList.unshift(histData);
         localStorage.setItem("offline_historial", JSON.stringify(histList));
 
-        // Notify chat & dispatches
         logSystemEvent(`🚚 **Actualización de Orden**: La orden **${selectedSolicitud.numeroSolicitud}** del departamento **${selectedSolicitud.departamento}** ha sido actualizada por **${currentUser.nombre}**. Nuevo estado: **${newStatus}**.`);
 
         window.dispatchEvent(new Event("offline_solicitudes_update"));
@@ -1167,7 +1321,6 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
         setSelectedSolicitud(null);
         playSound("positive");
         showToast(`Estado de la orden ${selectedSolicitud.numeroSolicitud} actualizado con éxito.`);
-        setUpdating(false);
         return;
       }
 
@@ -1184,7 +1337,6 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
         hora: localTime
       };
 
-      const updatedHistory = [...selectedSolicitud.historialCambios, nuevoCambio];
       const docRef = tenantDoc("solicitudes", selectedSolicitud.id);
       const validItemsToDeduct = shouldDeductStock
         ? deliveryItems.flatMap(item =>
@@ -1200,8 +1352,33 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
         : [];
       const uniqueProdCodes = Array.from(new Set<string>(validItemsToDeduct.map((it) => it.productoCodigo)));
 
-      // Transacción atómica en el servidor para validar stock real (Sistema y Físico) antes de descontar
+      // Transacción atómica en el servidor para validar permisos ADMIN, evitar cambios duplicados y descontar stock
       await runTransaction(db, async (transaction) => {
+        const solSnap = await transaction.get(docRef);
+        if (!solSnap.exists()) {
+          throw new Error("La solicitud ya no existe en el servidor.");
+        }
+        const serverSol = solSnap.data() as Solicitud;
+
+        if (serverSol.estado === "Entregada" || serverSol.estado === "Cancelada") {
+          throw new Error(`La solicitud ya fue procesada (${serverSol.estado}) y no admite modificaciones.`);
+        }
+
+        if (isAuthTransition) {
+          if (currentUser.rol !== "Administrador") {
+            throw new Error("Autorización denegada: Se requiere rol de Administrador.");
+          }
+          if (currentUser.id) {
+            const userSnap = await transaction.get(tenantDoc("usuarios", currentUser.id));
+            if (userSnap.exists() && (userSnap.data() as Usuario).rol !== "Administrador") {
+              throw new Error("Autorización rechazada por el servidor: El usuario no posee rol Administrador.");
+            }
+          }
+          if (serverSol.estado === newStatus) {
+            throw new Error(`Esta solicitud ya fue marcada como "${newStatus}".`);
+          }
+        }
+
         const prodSnaps = await Promise.all(
           uniqueProdCodes.map((code) => transaction.get(tenantDoc("productos", code.replace(/\//g, "_"))))
         );
@@ -1238,15 +1415,25 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
           targetLot.cantidadF = serverFis - reqQty;
         }
 
-        // Actualizar orden
-        transaction.update(docRef, {
+        const updatedHistory = [...(serverSol.historialCambios || []), nuevoCambio];
+        const updatePayload: Record<string, any> = {
           estado: newStatus,
-          observaciones: statusObs.trim() || selectedSolicitud.observaciones,
+          observaciones: statusObs.trim() || serverSol.observaciones,
           historialCambios: updatedHistory,
           items: deliveryItems.filter((item) => item.id !== "fallback-item")
-        });
+        };
 
-        // Guardar productos actualizados y movimientos
+        if (isAuthTransition) {
+          updatePayload.usuarioAutorizador = `${currentUser.nombre} (${currentUser.usuario})`;
+          updatePayload.rolAutorizador = "Administrador";
+          updatePayload.fechaAutorizacion = localDate;
+          updatePayload.horaAutorizacion = localTime;
+          updatePayload.timestampAutorizacion = nowTs;
+          updatePayload.accionAutorizacion = newStatus === "Aprobada" ? "Autorizada" : "Rechazada";
+        }
+
+        transaction.update(docRef, updatePayload);
+
         for (const [code, updatedProd] of serverProdsMap.entries()) {
           transaction.set(tenantDoc("productos", code.replace(/\//g, "_")), {
             ...updatedProd,
@@ -1277,7 +1464,6 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
         }
       });
 
-      // Register in global history
       const histCol = tenantCollection("historial");
       const histData: Omit<RegistroHistorial, "id"> = {
         tipo: "Cambio de Estado",
@@ -1292,7 +1478,6 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
       };
       await addDoc(histCol, histData);
       
-      // Notify chat
       logSystemEvent(`🚚 **Actualización de Orden**: La orden **${selectedSolicitud.numeroSolicitud}** del departamento **${selectedSolicitud.departamento}** ha sido actualizada por **${currentUser.nombre}**. Nuevo estado: **${newStatus}**.`);
 
       setSelectedSolicitud(null);
@@ -1303,6 +1488,7 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
       playSound("negative");
       showToast(err?.message || "Error al actualizar la entrega.");
     } finally {
+      actionLockRef.current = null;
       setUpdating(false);
     }
   };
@@ -1312,6 +1498,31 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
     nextStatus: "Pendiente" | "Aprobada" | "Rechazada" | "En Proceso" | "Entregada" | "En proceso" | "Completada" | "En preparación" | "Parcialmente entregada" | "Cancelada",
     obs = ""
   ) => {
+    if (actionLockRef.current === sol.id) return;
+
+    const isAuthorizationAction =
+      nextStatus === "Aprobada" || nextStatus === "Rechazada" || nextStatus === "Cancelada";
+
+    // REGLA ESTRICTA: Solo perfiles con rol ADMIN pueden autorizar o rechazar solicitudes
+    if (isAuthorizationAction && !isAdmin) {
+      playSound("negative");
+      showToast("Acción exclusiva para Administradores: No tienes permisos para autorizar o rechazar solicitudes.");
+      return;
+    }
+
+    // Evitar autorizaciones duplicadas o cambios de estado no permitidos
+    if (
+      sol.estado === nextStatus ||
+      sol.estado === "Entregada" ||
+      sol.estado === "Cancelada" ||
+      (isAuthorizationAction && (sol.estado === "Aprobada" || sol.estado === "Rechazada") && sol.estado === nextStatus)
+    ) {
+      playSound("negative");
+      showToast(`Esta solicitud ya se encuentra en estado "${sol.estado}".`);
+      return;
+    }
+
+    actionLockRef.current = sol.id;
     playSound("action");
     try {
       const now = new Date();
@@ -1327,13 +1538,11 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
         hora: localTime
       };
 
-      const updatedHistory = [...sol.historialCambios, nuevoCambio];
       const docRef = tenantDoc("solicitudes", sol.id);
 
       if (nextStatus === "Entregada") {
         const itemsToProcess = (sol.items || []).filter((it) => it.productoCodigo !== "Gral" && it.cantidadSolicitada > 0);
 
-        // 1. Validación en la interfaz verificando tanto el inventario del sistema como el físico
         for (const item of itemsToProcess) {
           const matchingProduct = products?.find((p) => p.codigo === item.productoCodigo);
           const totalSys = matchingProduct?.lotes?.reduce((acc, l) => acc + Number(l.cantidad || 0), 0) || 0;
@@ -1352,8 +1561,16 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
 
         const uniqueCodes = Array.from(new Set(itemsToProcess.map((it) => it.productoCodigo)));
 
-        // 2. Transacción en el servidor para evitar sobre-descuentos ante solicitudes simultáneas
         await runTransaction(db, async (transaction) => {
+          const solSnap = await transaction.get(docRef);
+          if (!solSnap.exists()) {
+            throw new Error("La solicitud no existe en el servidor.");
+          }
+          const serverSol = solSnap.data() as Solicitud;
+          if (serverSol.estado === "Entregada" || serverSol.estado === "Cancelada") {
+            throw new Error(`La solicitud ya fue procesada (${serverSol.estado}).`);
+          }
+
           const prodSnaps = await Promise.all(
             uniqueCodes.map((code) => transaction.get(tenantDoc("productos", code.replace(/\//g, "_"))))
           );
@@ -1410,9 +1627,10 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
             });
           }
 
+          const updatedHistory = [...(serverSol.historialCambios || []), nuevoCambio];
           transaction.update(docRef, {
             estado: nextStatus,
-            observaciones: obs.trim() || sol.observaciones,
+            observaciones: obs.trim() || serverSol.observaciones,
             historialCambios: updatedHistory
           });
 
@@ -1429,20 +1647,66 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
           }
         });
       } else {
-        await updateDoc(docRef, {
-          estado: nextStatus,
-          observaciones: obs.trim() || sol.observaciones,
-          historialCambios: updatedHistory
+        // Transacción atómica en el servidor para validar autorización ADMIN y evitar duplicados
+        await runTransaction(db, async (transaction) => {
+          const solSnap = await transaction.get(docRef);
+          if (!solSnap.exists()) {
+            throw new Error("La solicitud no existe en el servidor.");
+          }
+          const serverSol = solSnap.data() as Solicitud;
+
+          if (serverSol.estado === "Entregada" || serverSol.estado === "Cancelada") {
+            throw new Error(`La solicitud ya fue cerrada (${serverSol.estado}) y no admite cambios.`);
+          }
+          if (serverSol.estado === nextStatus) {
+            throw new Error(`La solicitud ya se encuentra en estado "${nextStatus}".`);
+          }
+
+          if (isAuthorizationAction) {
+            if (currentUser.rol !== "Administrador") {
+              throw new Error("Acción no autorizada: Se requiere perfil con rol Administrador.");
+            }
+            if (currentUser.id) {
+              const userSnap = await transaction.get(tenantDoc("usuarios", currentUser.id));
+              if (userSnap.exists() && (userSnap.data() as Usuario).rol !== "Administrador") {
+                throw new Error("Permiso denegado en el servidor: Solo un usuario ADMIN puede autorizar o rechazar.");
+              }
+            }
+          }
+
+          const updatedHistory = [...(serverSol.historialCambios || []), nuevoCambio];
+          const updateData: Record<string, any> = {
+            estado: nextStatus,
+            observaciones: obs.trim() || serverSol.observaciones,
+            historialCambios: updatedHistory
+          };
+
+          if (isAuthorizationAction) {
+            updateData.usuarioAutorizador = `${currentUser.nombre} (${currentUser.usuario})`;
+            updateData.rolAutorizador = "Administrador";
+            updateData.fechaAutorizacion = localDate;
+            updateData.horaAutorizacion = localTime;
+            updateData.timestampAutorizacion = nowTs;
+            updateData.accionAutorizacion = nextStatus === "Aprobada" ? "Autorizada" : "Rechazada";
+          }
+
+          transaction.update(docRef, updateData);
         });
       }
 
-      // Register in global history
       const histCol = tenantCollection("historial");
+      const accionTexto =
+        nextStatus === "Aprobada"
+          ? `fue AUTORIZADA por el administrador ${currentUser.nombre}`
+          : nextStatus === "Rechazada"
+          ? `fue RECHAZADA por el administrador ${currentUser.nombre}`
+          : `cambió su estado a "${nextStatus}"`;
+
       const histData: Omit<RegistroHistorial, "id"> = {
         tipo: "Cambio de Estado",
         solicitudId: sol.id,
         numeroSolicitud: sol.numeroSolicitud,
-        descripcionEvent: `La solicitud ${sol.numeroSolicitud} de ${sol.departamento} cambió su estado a "${nextStatus}".`,
+        descripcionEvent: `La solicitud ${sol.numeroSolicitud} de ${sol.departamento} ${accionTexto}.`,
         usuarioResponsable: `${currentUser.nombre} (${currentUser.usuario})`,
         fecha: localDate,
         hora: localTime,
@@ -1451,15 +1715,22 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
       };
       await addDoc(histCol, histData);
       
-      // Notify chat
-      logSystemEvent(`📢 **Actualización de Solicitud**: La solicitud **${sol.numeroSolicitud}** de **${sol.departamento}** cambió su estado a **"${nextStatus}"** (por ${currentUser.nombre}).`);
+      logSystemEvent(`📢 **Actualización de Solicitud**: La solicitud **${sol.numeroSolicitud}** de **${sol.departamento}** ${accionTexto}.`);
 
       playSound("positive");
-      showToast(`Solicitud ${sol.numeroSolicitud} cambiada a ${nextStatus} correctamente.`);
+      showToast(
+        nextStatus === "Aprobada"
+          ? `Solicitud ${sol.numeroSolicitud} AUTORIZADA correctamente por ${currentUser.nombre}.`
+          : nextStatus === "Rechazada"
+          ? `Solicitud ${sol.numeroSolicitud} RECHAZADA por ${currentUser.nombre}.`
+          : `Solicitud ${sol.numeroSolicitud} cambiada a ${nextStatus} correctamente.`
+      );
     } catch (err: any) {
       console.error("Error updating status:", err);
       playSound("negative");
       showToast(err?.message || "Error al actualizar el estado de la solicitud.");
+    } finally {
+      actionLockRef.current = null;
     }
   };
 
@@ -1697,7 +1968,21 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
                 : "Crea y supervisa las solicitudes de medicamentos y materiales para tu área"}
             </p>
           </div>
-          <div className="flex gap-2">
+          <div className="flex gap-2 flex-wrap">
+            <button
+              onClick={() => {
+                setActiveSubTab("reabastecimiento");
+                playSound("click");
+              }}
+              className={`px-4 py-2 text-xs font-bold rounded-xl transition flex items-center gap-1.5 shadow-2xs ${
+                activeSubTab === "reabastecimiento"
+                  ? "bg-gradient-to-r from-teal-700 to-emerald-700 text-white shadow-md shadow-teal-900/20 font-extrabold"
+                  : "bg-teal-50 hover:bg-teal-100 text-teal-800 border border-teal-200"
+              }`}
+            >
+              <Sparkles className="w-3.5 h-3.5 text-amber-300" />
+              <span>Reabastecimiento Inteligente</span>
+            </button>
             <button
               onClick={() => {
                 setActiveSubTab("list");
@@ -1719,7 +2004,7 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
               }`}
             >
               <Plus className="w-3.5 h-3.5" />
-              Nueva Solicitud
+              Nueva Solicitud Manual
             </button>
             <button
               onClick={() => {
@@ -1731,7 +2016,10 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
               }`}
             >
               <FileText className="w-3.5 h-3.5" />
-              Historial de Eventos
+              <span>Historial de Solicitudes</span>
+              <span className={`px-1.5 py-0.2 rounded-full text-[10px] font-black ${activeSubTab === "history" ? "bg-white/20 text-white" : "bg-teal-100 text-teal-800"}`}>
+                {solicitudes.length}
+              </span>
             </button>
           </div>
         </div>
@@ -1916,6 +2204,29 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
           <LoaderCircle className="w-10 h-10 animate-spin text-teal-600 mb-3" />
           <p className="text-sm font-semibold text-slate-500">Cargando módulos de solicitudes...</p>
         </div>
+      ) : activeSubTab === "reabastecimiento" ? (
+        <ReabastecimientoInteligente
+          products={products}
+          solicitudes={solicitudes}
+          catalogos={catalogos}
+          activeCatalogId={solicitudCatalogId || activeCatalogId}
+          userDepartment={currentUser.departamento || department}
+          onApplyItems={(items, summaryNote) => {
+            setSolicitudItems(items);
+            if (summaryNote) {
+              setObservations(summaryNote);
+              setDescription(summaryNote);
+            }
+            setActiveSubTab("create");
+            playSound("positive");
+            showToast(`Se cargaron ${items.length} insumos en el formulario de solicitud.`);
+          }}
+          onDirectSubmitSolicitud={async (items, summaryNote) => {
+            await submitSolicitudPayload(items, summaryNote, summaryNote, true);
+          }}
+          playSound={playSound}
+          showToast={showToast}
+        />
       ) : activeSubTab === "list" ? (
         <div className="space-y-4">
           {filteredList.length === 0 ? (
@@ -1925,136 +2236,170 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
               <p className="text-xs text-slate-400 mt-1">Intente cambiar los filtros o el periodo mensual.</p>
             </div>
           ) : (
-            filteredList.map((sol) => (
-              <div key={sol.id} className="bg-white rounded-3xl border border-slate-200 p-6 shadow-sm hover:shadow-md transition space-y-4">
-                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-100 pb-3">
-                  <div className="flex items-center gap-3">
-                    <span className="text-sm font-black text-teal-800 bg-teal-50 border border-teal-200 px-3 py-1.5 rounded-2xl">
-                      {sol.numeroSolicitud}
-                    </span>
-                    <span className={`text-[10px] font-black uppercase tracking-wider px-2.5 py-1 rounded-full ${getPriorityBadgeClass(sol.prioridad)}`}>
-                      Prioridad {sol.prioridad}
-                    </span>
-                    <span className={`text-[10px] font-black uppercase tracking-wider px-2.5 py-1 rounded-full ${getStatusBadgeClass(sol.estado)}`}>
-                      {sol.estado}
-                    </span>
-                  </div>
-                  <div className="text-slate-400 text-xs font-semibold flex items-center gap-1.5">
-                    <Calendar className="w-3.5 h-3.5 text-slate-300" />
-                    <span>
-                      {new Date(sol.fecha + "T00:00:00").toLocaleDateString("es-DO")} • {sol.hora}
-                    </span>
-                  </div>
-                </div>
-
-                <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-                  <div className="md:col-span-2 space-y-3">
-                    <div>
-                      <p className="text-[10px] font-black uppercase text-slate-400 tracking-wider">Departamento que solicita</p>
-                      <p className="text-slate-800 font-bold mt-0.5">{sol.departamento}</p>
-                    </div>
-                    <div>
-                      <p className="text-[10px] font-black uppercase text-slate-400 tracking-wider">Descripción del Pedido</p>
-                      <p className="text-slate-600 text-sm whitespace-pre-wrap mt-0.5">{sol.descripcion}</p>
-                    </div>
-                    {sol.observaciones && (
-                      <div className="bg-slate-50 border border-slate-200/50 rounded-2xl p-3.5">
-                        <p className="text-[10px] font-black uppercase text-slate-500 tracking-wider">Observaciones / Respuestas</p>
-                        <p className="text-xs text-slate-600 mt-1 italic">{sol.observaciones}</p>
+            <>
+              {filteredList.slice(0, visibleListCount).map((sol) => {
+                const authMeta = getAuthorizationMetadata(sol);
+                return (
+                  <div key={sol.id} className="bg-white rounded-3xl border border-slate-200 p-6 shadow-sm hover:shadow-md transition space-y-4">
+                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-100 pb-3">
+                      <div className="flex items-center gap-3 flex-wrap">
+                        <span className="text-sm font-black text-teal-800 bg-teal-50 border border-teal-200 px-3 py-1.5 rounded-2xl">
+                          {sol.numeroSolicitud}
+                        </span>
+                        <span className={`text-[10px] font-black uppercase tracking-wider px-2.5 py-1 rounded-full ${getPriorityBadgeClass(sol.prioridad)}`}>
+                          Prioridad {sol.prioridad}
+                        </span>
+                        <span className={`text-[10px] font-black uppercase tracking-wider px-2.5 py-1 rounded-full ${getStatusBadgeClass(sol.estado)}`}>
+                          {sol.estado}
+                        </span>
                       </div>
-                    )}
-                  </div>
+                      <div className="text-slate-400 text-xs font-semibold flex items-center gap-1.5">
+                        <Calendar className="w-3.5 h-3.5 text-slate-300" />
+                        <span>
+                          {new Date(sol.fecha + "T00:00:00").toLocaleDateString("es-DO")} • {sol.hora}
+                        </span>
+                      </div>
+                    </div>
 
-                  <div className="bg-slate-50 border border-slate-200 rounded-2xl p-4 flex flex-col justify-between gap-4">
-                    <div className="space-y-2.5">
-                      <div className="flex items-center gap-2">
-                        <div className="w-1.5 h-7 rounded-full bg-teal-600"></div>
+                    <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+                      <div className="md:col-span-2 space-y-3">
                         <div>
-                          <p className="text-[9px] font-black uppercase text-slate-400 leading-none">Creado por</p>
-                          <p className="text-xs font-bold text-slate-800 mt-1">{sol.usuarioCreador}</p>
+                          <p className="text-[10px] font-black uppercase text-slate-400 tracking-wider">Departamento que solicita</p>
+                          <p className="text-slate-800 font-bold mt-0.5">{sol.departamento}</p>
                         </div>
-                      </div>
-                      <div className="border-t border-slate-200/50 pt-2.5">
-                        <p className="text-[9px] font-black uppercase text-slate-400">Período Mensual</p>
-                        <p className="text-xs font-bold text-slate-700 mt-0.5">{sol.periodo}</p>
-                      </div>
-                    </div>
-
-                    <div className="space-y-2">
-                      <button
-                        onClick={() => {
-                          handleOpenStatusModal(sol);
-                          playSound("click");
-                        }}
-                        className="w-full py-2 px-3 text-xs font-bold rounded-xl transition bg-slate-100 text-slate-600 hover:bg-slate-200 cursor-pointer text-center"
-                      >
-                        {currentUser.rol === "Administrador" || currentUser.departamento === "Almacén y Suministro" || currentUser.departamento === "Farmacia"
-                          ? "Modificar Detalle / Lotes"
-                          : "Ver Historial de Cambios"}
-                      </button>
-
-                      {/* Exportación rápida */}
-                      <div className="grid grid-cols-2 gap-1.5 pt-1">
-                        <button
-                          type="button"
-                          onClick={() => exportToWord(sol)}
-                          className="bg-white hover:bg-slate-50 text-slate-600 border border-slate-200 font-extrabold text-[10px] py-1.5 px-1.5 rounded-lg transition active:scale-95 cursor-pointer text-center flex items-center justify-center gap-1"
-                        >
-                          <FileText className="w-3.5 h-3.5 text-blue-600" />
-                          Word (.doc)
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => exportToPDF(sol)}
-                          className="bg-white hover:bg-slate-50 text-slate-600 border border-slate-200 font-extrabold text-[10px] py-1.5 px-1.5 rounded-lg transition active:scale-95 cursor-pointer text-center flex items-center justify-center gap-1"
-                        >
-                          <FileText className="w-3.5 h-3.5 text-rose-600" />
-                          PDF (.pdf)
-                        </button>
+                        <div>
+                          <p className="text-[10px] font-black uppercase text-slate-400 tracking-wider">Descripción / Productos Solicitados</p>
+                          <p className="text-slate-600 text-sm whitespace-pre-wrap mt-0.5">{sol.descripcion}</p>
+                          {sol.items && sol.items.length > 0 && (
+                            <div className="flex flex-wrap gap-1.5 mt-2">
+                              {sol.items.map((it, idx) => (
+                                <span
+                                  key={it.id || `${it.productoCodigo}-${idx}`}
+                                  className="inline-flex items-center gap-1 px-2.5 py-1 rounded-xl text-[11px] font-bold bg-slate-100 text-slate-800 border border-slate-200"
+                                >
+                                  <span className="font-mono text-teal-700 font-black">{it.productoCodigo}</span>
+                                  <span>{it.productoNombre}</span>
+                                  <span className="bg-teal-700 text-white px-1.5 py-0.2 rounded-md text-[10px] font-black">
+                                    x{it.cantidadSolicitada}
+                                  </span>
+                                </span>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                        {sol.observaciones && (
+                          <div className="bg-slate-50 border border-slate-200/50 rounded-2xl p-3.5">
+                            <p className="text-[10px] font-black uppercase text-slate-500 tracking-wider">Observaciones / Respuestas</p>
+                            <p className="text-xs text-slate-600 mt-1 italic">{sol.observaciones}</p>
+                          </div>
+                        )}
                       </div>
 
-                      {/* Botón Eliminar Orden (exclusivo Anyer o Admin de sede cliente) */}
-                      {(currentUser.usuario.toLowerCase() === "anyer" ||
-                        currentUser.nombre.toLowerCase() === "anyer" ||
-                        (getActiveFarmaciaId() !== DEFAULT_FARMACIA_ID && currentUser.rol === "Administrador")) && (
-                        <button
-                          type="button"
-                          onClick={() => handleDeleteRequest(sol)}
-                          className="w-full mt-2 py-2 px-3 text-xs font-black text-rose-700 bg-rose-50 hover:bg-rose-100 border border-rose-200 rounded-xl transition active:scale-95 cursor-pointer text-center flex items-center justify-center gap-1.5 shadow-xs"
-                        >
-                          <Trash2 className="w-4 h-4 text-rose-600" />
-                          Eliminar Orden
-                        </button>
-                      )}
+                      <div className="bg-slate-50 border border-slate-200 rounded-2xl p-4 flex flex-col justify-between gap-4">
+                        <div className="space-y-2.5">
+                          <div className="flex items-center gap-2">
+                            <div className="w-1.5 h-7 rounded-full bg-teal-600"></div>
+                            <div>
+                              <p className="text-[9px] font-black uppercase text-slate-400 leading-none">Creado por</p>
+                              <p className="text-xs font-bold text-slate-800 mt-1">{sol.usuarioCreador}</p>
+                            </div>
+                          </div>
+                          {authMeta && (
+                            <div className="border-t border-slate-200/50 pt-2">
+                              <p className="text-[9px] font-black uppercase text-slate-400">
+                                {authMeta.accion === "Rechazada" ? "Rechazado por (ADMIN)" : "Autorizado por (ADMIN)"}
+                              </p>
+                              <p className="text-xs font-bold text-teal-900 mt-0.5">{authMeta.autorizador}</p>
+                              <p className="text-[10px] text-slate-500 font-semibold">
+                                {authMeta.fecha ? new Date(authMeta.fecha + "T00:00:00").toLocaleDateString("es-DO") : ""} {authMeta.hora ? `• ${authMeta.hora}` : ""}
+                              </p>
+                            </div>
+                          )}
+                          <div className="border-t border-slate-200/50 pt-2">
+                            <p className="text-[9px] font-black uppercase text-slate-400">Período Mensual</p>
+                            <p className="text-xs font-bold text-slate-700 mt-0.5">{sol.periodo}</p>
+                          </div>
+                        </div>
 
-                      {/* Botones rápidos para Administrador, Farmacia y Almacén */}
-                      {(currentUser.rol === "Administrador" || currentUser.departamento === "Almacén y Suministro" || currentUser.departamento === "Farmacia") && (
-                        <div className="grid grid-cols-2 gap-1.5 pt-1.5 border-t border-slate-200/40">
-                          {sol.estado === "Pendiente" && (
-                            <>
+                        <div className="space-y-2">
+                          <button
+                            onClick={() => {
+                              handleOpenStatusModal(sol);
+                              playSound("click");
+                            }}
+                            className="w-full py-2 px-3 text-xs font-bold rounded-xl transition bg-slate-100 text-slate-600 hover:bg-slate-200 cursor-pointer text-center"
+                          >
+                            {isWarehouseOrAdmin
+                              ? "Ver Detalle / Despacho"
+                              : "Consultar Detalle de Solicitud"}
+                          </button>
+
+                          {/* Exportación rápida */}
+                          <div className="grid grid-cols-2 gap-1.5 pt-1">
+                            <button
+                              type="button"
+                              onClick={() => exportToWord(sol)}
+                              className="bg-white hover:bg-slate-50 text-slate-600 border border-slate-200 font-extrabold text-[10px] py-1.5 px-1.5 rounded-lg transition active:scale-95 cursor-pointer text-center flex items-center justify-center gap-1"
+                            >
+                              <FileText className="w-3.5 h-3.5 text-blue-600" />
+                              Word (.doc)
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => exportToPDF(sol)}
+                              className="bg-white hover:bg-slate-50 text-slate-600 border border-slate-200 font-extrabold text-[10px] py-1.5 px-1.5 rounded-lg transition active:scale-95 cursor-pointer text-center flex items-center justify-center gap-1"
+                            >
+                              <FileText className="w-3.5 h-3.5 text-rose-600" />
+                              PDF (.pdf)
+                            </button>
+                          </div>
+
+                          {/* Botón Eliminar Orden (exclusivo Anyer o Admin de sede cliente) */}
+                          {(currentUser.usuario.toLowerCase() === "anyer" ||
+                            currentUser.nombre.toLowerCase() === "anyer" ||
+                            (getActiveFarmaciaId() !== DEFAULT_FARMACIA_ID && isAdmin)) && (
+                            <button
+                              type="button"
+                              onClick={() => handleDeleteRequest(sol)}
+                              className="w-full mt-2 py-2 px-3 text-xs font-black text-rose-700 bg-rose-50 hover:bg-rose-100 border border-rose-200 rounded-xl transition active:scale-95 cursor-pointer text-center flex items-center justify-center gap-1.5 shadow-xs"
+                            >
+                              <Trash2 className="w-4 h-4 text-rose-600" />
+                              Eliminar Orden
+                            </button>
+                          )}
+
+                          {/* AUTORIZACIÓN EXCLUSIVA PARA ADMINISTRADORES */}
+                          {isAdmin && sol.estado === "Pendiente" && (
+                            <div className="grid grid-cols-2 gap-1.5 pt-1.5 border-t border-slate-200/40">
                               <button
                                 onClick={() => handleDirectStatusChange(sol, "Aprobada")}
-                                className="bg-teal-700 hover:bg-teal-800 text-white font-black text-[10px] py-1.5 px-2 rounded-lg transition active:scale-95 cursor-pointer text-center"
+                                className="bg-teal-700 hover:bg-teal-800 text-white font-black text-[10px] py-1.5 px-2 rounded-lg transition active:scale-95 cursor-pointer text-center flex items-center justify-center gap-1"
                               >
-                                Aprobar
+                                <CheckCircle2 className="w-3.5 h-3.5" />
+                                Autorizar
                               </button>
                               <button
                                 onClick={() => handleDirectStatusChange(sol, "Rechazada")}
-                                className="bg-rose-600 hover:bg-rose-700 text-white font-black text-[10px] py-1.5 px-2 rounded-lg transition active:scale-95 cursor-pointer text-center"
+                                className="bg-rose-600 hover:bg-rose-700 text-white font-black text-[10px] py-1.5 px-2 rounded-lg transition active:scale-95 cursor-pointer text-center flex items-center justify-center gap-1"
                               >
+                                <XCircle className="w-3.5 h-3.5" />
                                 Rechazar
                               </button>
-                              <button
-                                onClick={() => handleDirectStatusChange(sol, "En Proceso")}
-                                className="col-span-2 bg-blue-600 hover:bg-blue-700 text-white font-black text-[10px] py-1.5 px-2 rounded-lg transition active:scale-95 cursor-pointer text-center"
-                              >
-                                En Proceso
-                              </button>
-                            </>
+                            </div>
                           )}
 
-                          {(sol.estado === "Aprobada" || sol.estado === "En Proceso") && (
-                            <>
+                          {!isAdmin && sol.estado === "Pendiente" && (
+                            <div className="pt-1.5 border-t border-slate-200/40 text-center">
+                              <span className="inline-flex items-center gap-1 text-[10px] font-bold text-amber-800 bg-amber-50 border border-amber-200 px-2.5 py-1 rounded-lg">
+                                <ShieldCheck className="w-3.5 h-3.5 text-amber-600" />
+                                Pendiente de Autorización ADMIN
+                              </span>
+                            </div>
+                          )}
+
+                          {/* Despacho tras autorización (Almacén / Farmacia / Admin) */}
+                          {isWarehouseOrAdmin && (sol.estado === "Aprobada" || sol.estado === "En Proceso") && (
+                            <div className="grid grid-cols-2 gap-1.5 pt-1.5 border-t border-slate-200/40">
                               <button
                                 onClick={() => handleDirectStatusChange(sol, "Entregada")}
                                 className="col-span-2 bg-emerald-600 hover:bg-emerald-700 text-white font-black text-[10px] py-2 px-2 rounded-lg transition active:scale-95 cursor-pointer text-center flex items-center justify-center gap-1"
@@ -2062,21 +2407,39 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
                                 <RefreshCw className="w-3.5 h-3.5 animate-spin-slow" />
                                 Entregar y Descontar
                               </button>
-                              <button
-                                onClick={() => handleDirectStatusChange(sol, "Rechazada")}
-                                className="col-span-2 bg-rose-600 hover:bg-rose-700 text-white font-black text-[10px] py-1.5 px-2 rounded-lg transition active:scale-95 cursor-pointer text-center"
-                              >
-                                Rechazar
-                              </button>
-                            </>
+                              {isAdmin && (
+                                <button
+                                  onClick={() => handleDirectStatusChange(sol, "Rechazada")}
+                                  className="col-span-2 bg-rose-600 hover:bg-rose-700 text-white font-black text-[10px] py-1.5 px-2 rounded-lg transition active:scale-95 cursor-pointer text-center"
+                                >
+                                  Rechazar (ADMIN)
+                                </button>
+                              )}
+                            </div>
                           )}
                         </div>
-                      )}
+                      </div>
                     </div>
                   </div>
+                );
+              })}
+
+              {filteredList.length > visibleListCount && (
+                <div className="flex justify-center pt-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      playSound("click");
+                      setVisibleListCount((prev) => prev + 25);
+                    }}
+                    className="inline-flex items-center gap-2 px-5 py-2.5 rounded-2xl bg-white hover:bg-slate-50 text-teal-800 border border-slate-200 font-extrabold text-xs shadow-xs transition cursor-pointer"
+                  >
+                    <ChevronDown className="w-4 h-4" />
+                    <span>Cargar más solicitudes ({filteredList.length - visibleListCount} restantes)</span>
+                  </button>
                 </div>
-              </div>
-            ))
+              )}
+            </>
           )}
         </div>
       ) : activeSubTab === "create" ? (
@@ -2401,15 +2764,24 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
                                 );
                                 return;
                               }
-                              setSolicitudItems(prev => [
-                                ...prev,
-                                {
-                                  productoCodigo: p.codigo,
-                                  productoNombre: p.nombre,
-                                  cantidadSolicitada: qty,
-                                  cantidadEntregada: qty
+                              setSolicitudItems(prev => {
+                                if (prev.some(it => it.productoCodigo === p.codigo)) {
+                                  return prev.map(it =>
+                                    it.productoCodigo === p.codigo
+                                      ? { ...it, cantidadSolicitada: qty, cantidadEntregada: qty }
+                                      : it
+                                  );
                                 }
-                              ]);
+                                return [
+                                  ...prev,
+                                  {
+                                    productoCodigo: p.codigo,
+                                    productoNombre: p.nombre,
+                                    cantidadSolicitada: qty,
+                                    cantidadEntregada: qty
+                                  }
+                                ];
+                              });
                               playSound("click");
                             }}
                             className={`px-3 py-1.5 text-xs font-bold rounded-lg transition active:scale-95 cursor-pointer ${
@@ -2434,15 +2806,52 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
       ) : (
         activeSubTab === "history" && (() => {
           const allowedCatIds = new Set(availableCatalogosMemo.map((c) => c.id));
-          const canSeeAll = currentUser.rol === "Administrador" || currentUser.departamento === "Almacén y Suministro" || currentUser.departamento === "Farmacia";
+          const canSeeAll = isAdmin || currentUser.departamento === "Almacén y Suministro" || currentUser.departamento === "Farmacia";
 
+          // 1. Filtrar todas las solicitudes almacenadas para el Historial de Solicitudes
+          const filteredHistorialSolicitudes = solicitudes.filter((sol) => {
+            const solCatalogId = sol.catalogId || "default-cat";
+            if (!canSeeAll && !allowedCatIds.has(solCatalogId) && !isCatalogAllowedForUser(currentUser, solCatalogId, catalogos)) {
+              return false;
+            }
+            if (!canSeeAll) {
+              const isOwnCreator =
+                sol.usuarioCreador.toLowerCase().includes(currentUser.usuario.toLowerCase()) ||
+                sol.usuarioCreador.toLowerCase().includes(currentUser.nombre.toLowerCase());
+              const isOwnDept = sol.departamento === currentUser.departamento;
+              const isAllowedDeptCatalog =
+                (currentUser.departamento === "Laboratorio" && matchesCatalog(solCatalogId, "laboratorio", catalogos)) ||
+                (currentUser.departamento === "Odontología" && matchesCatalog(solCatalogId, "odontologia", catalogos));
+              if (!isOwnCreator && !isOwnDept && !isAllowedDeptCatalog) return false;
+            }
+
+            if (histDeptFilter !== "todos" && sol.departamento !== histDeptFilter) {
+              return false;
+            }
+            if (histDateFilter && sol.fecha !== histDateFilter) {
+              return false;
+            }
+            if (histStatusFilter !== "todos" && sol.estado !== histStatusFilter) {
+              return false;
+            }
+            if (histUserFilter.trim()) {
+              const u = histUserFilter.trim().toLowerCase();
+              const authMeta = getAuthorizationMetadata(sol);
+              const matchCreator = (sol.usuarioCreador || "").toLowerCase().includes(u);
+              const matchAuth = (authMeta?.autorizador || "").toLowerCase().includes(u);
+              const matchNum = (sol.numeroSolicitud || "").toLowerCase().includes(u);
+              if (!matchCreator && !matchAuth && !matchNum) return false;
+            }
+            return true;
+          });
+
+          // 2. Filtrar eventos de la bitácora secundaria
           const filteredHistorial = historialList.filter((hist) => {
             const histCatalogId = hist.catalogId || "default-cat";
             if (!canSeeAll && !allowedCatIds.has(histCatalogId) && !isCatalogAllowedForUser(currentUser, histCatalogId, catalogos)) {
               return false;
             }
 
-            // Strict Role-Based and Department-Based Access Control for History events
             if (!canSeeAll) {
               const sol = solicitudes.find(s => s.id === hist.solicitudId || s.numeroSolicitud === hist.numeroSolicitud);
               if (sol) {
@@ -2483,23 +2892,118 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
             return true;
           });
 
+          const paginatedHistorySolicitudes = filteredHistorialSolicitudes.slice(0, visibleHistoryCount);
+
           return (
             <div className="bg-white rounded-3xl border border-slate-200 shadow-sm overflow-hidden anim-card-in">
               <div className="px-6 py-4 bg-slate-50 border-b border-slate-200 flex flex-col gap-4">
-                <div className="flex items-center justify-between">
-                  <h4 className="font-bold text-slate-900 text-sm flex items-center gap-2">
-                    <ClipboardList className="w-5 h-5 text-teal-600" />
-                    Historial de Eventos del Módulo Solicitudes
-                  </h4>
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                  <div>
+                    <h4 className="font-extrabold text-slate-900 text-sm sm:text-base flex items-center gap-2">
+                      <ClipboardList className="w-5 h-5 text-teal-600" />
+                      Historial General de Solicitudes y Autorizaciones
+                    </h4>
+                    <p className="text-xs text-slate-500 mt-0.5">
+                      {isAdmin
+                        ? "Perfil ADMIN activo: Puedes autorizar o rechazar solicitudes pendientes y auditar todo el historial."
+                        : "Consulta el estado de tus solicitudes, los productos pedidos y quién autorizó o rechazó cada registro."}
+                    </p>
+                  </div>
+
+                  <div className="flex items-center gap-1.5 bg-white p-1 rounded-xl border border-slate-200 self-start sm:self-auto">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setHistoryViewMode("solicitudes");
+                        playSound("click");
+                      }}
+                      className={`px-3 py-1.5 rounded-lg text-xs font-extrabold transition cursor-pointer ${
+                        historyViewMode === "solicitudes"
+                          ? "bg-teal-800 text-white shadow-2xs"
+                          : "text-slate-600 hover:bg-slate-100"
+                      }`}
+                    >
+                      Solicitudes ({filteredHistorialSolicitudes.length})
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setHistoryViewMode("eventos");
+                        playSound("click");
+                      }}
+                      className={`px-3 py-1.5 rounded-lg text-xs font-extrabold transition cursor-pointer ${
+                        historyViewMode === "eventos"
+                          ? "bg-teal-800 text-white shadow-2xs"
+                          : "text-slate-600 hover:bg-slate-100"
+                      }`}
+                    >
+                      Bitácora de Eventos ({filteredHistorial.length})
+                    </button>
+                  </div>
                 </div>
 
-                {/* Panel de Filtros para el Historial */}
+                {/* Panel de Filtros para el Historial (Fecha, Usuario, Estado y Departamento) */}
                 <div className="grid grid-cols-1 sm:grid-cols-4 gap-3 bg-white p-4 rounded-2xl border border-slate-200/80">
+                  <div>
+                    <label className="block text-[10px] font-black uppercase text-slate-400 mb-1">Fecha de Creación</label>
+                    <input
+                      type="date"
+                      value={histDateFilter}
+                      onChange={(e) => {
+                        setHistDateFilter(e.target.value);
+                        setVisibleHistoryCount(30);
+                      }}
+                      className="w-full bg-slate-50 border border-slate-200 rounded-xl px-2.5 py-1.5 text-xs font-semibold text-slate-700 outline-none focus:ring-1 focus:ring-teal-400"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-[10px] font-black uppercase text-slate-400 mb-1">Usuario o N.º Solicitud</label>
+                    <div className="relative">
+                      <Search className="w-3.5 h-3.5 absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400" />
+                      <input
+                        type="text"
+                        placeholder="Solicitante, autorizador o SOL-..."
+                        value={histUserFilter}
+                        onChange={(e) => {
+                          setHistUserFilter(e.target.value);
+                          setVisibleHistoryCount(30);
+                        }}
+                        className="w-full bg-slate-50 border border-slate-200 rounded-xl pl-8 pr-2 py-2 text-xs font-semibold text-slate-700 outline-none focus:ring-1 focus:ring-teal-400"
+                      />
+                    </div>
+                  </div>
+
+                  <div>
+                    <label className="block text-[10px] font-black uppercase text-slate-400 mb-1">Estado de Solicitud</label>
+                    <select
+                      value={histStatusFilter}
+                      onChange={(e) => {
+                        setHistStatusFilter(e.target.value);
+                        setVisibleHistoryCount(30);
+                      }}
+                      className="w-full bg-slate-50 border border-slate-200 rounded-xl px-2.5 py-2 text-xs font-semibold text-slate-700 outline-none focus:ring-1 focus:ring-teal-400"
+                    >
+                      <option value="todos">Todos los estados</option>
+                      <option value="Pendiente">Pendiente</option>
+                      <option value="Aprobada">Aprobada (Autorizada)</option>
+                      <option value="Rechazada">Rechazada</option>
+                      <option value="En Proceso">En Proceso</option>
+                      <option value="En preparación">En preparación</option>
+                      <option value="Parcialmente entregada">Parcialmente entregada</option>
+                      <option value="Entregada">Entregada</option>
+                      <option value="Cancelada">Cancelada</option>
+                    </select>
+                  </div>
+
                   <div>
                     <label className="block text-[10px] font-black uppercase text-slate-400 mb-1">Departamento</label>
                     <select
                       value={histDeptFilter}
-                      onChange={(e) => setHistDeptFilter(e.target.value)}
+                      onChange={(e) => {
+                        setHistDeptFilter(e.target.value);
+                        setVisibleHistoryCount(30);
+                      }}
                       className="w-full bg-slate-50 border border-slate-200 rounded-xl px-2.5 py-2 text-xs font-semibold text-slate-700 outline-none focus:ring-1 focus:ring-teal-400"
                     >
                       <option value="todos">Todos los depts.</option>
@@ -2508,97 +3012,276 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
                       ))}
                     </select>
                   </div>
-
-                  <div>
-                    <label className="block text-[10px] font-black uppercase text-slate-400 mb-1">Fecha</label>
-                    <input
-                      type="date"
-                      value={histDateFilter}
-                      onChange={(e) => setHistDateFilter(e.target.value)}
-                      className="w-full bg-slate-50 border border-slate-200 rounded-xl px-2.5 py-1.5 text-xs font-semibold text-slate-700 outline-none focus:ring-1 focus:ring-teal-400"
-                    />
-                  </div>
-
-                  <div>
-                    <label className="block text-[10px] font-black uppercase text-slate-400 mb-1">Estado</label>
-                    <select
-                      value={histStatusFilter}
-                      onChange={(e) => setHistStatusFilter(e.target.value)}
-                      className="w-full bg-slate-50 border border-slate-200 rounded-xl px-2.5 py-2 text-xs font-semibold text-slate-700 outline-none focus:ring-1 focus:ring-teal-400"
-                    >
-                      <option value="todos">Todos los estados</option>
-                      <option value="Pendiente">Pendiente</option>
-                      <option value="Aprobada">Aprobada</option>
-                      <option value="Rechazada">Rechazada</option>
-                      <option value="En Proceso">En Proceso</option>
-                      <option value="Entregada">Entregada</option>
-                    </select>
-                  </div>
-
-                  <div>
-                    <label className="block text-[10px] font-black uppercase text-slate-400 mb-1">Usuario</label>
-                    <div className="relative">
-                      <Search className="w-3.5 h-3.5 absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400" />
-                      <input
-                        type="text"
-                        placeholder="Buscar por usuario..."
-                        value={histUserFilter}
-                        onChange={(e) => setHistUserFilter(e.target.value)}
-                        className="w-full bg-slate-50 border border-slate-200 rounded-xl pl-8 pr-2 py-2 text-xs font-semibold text-slate-700 outline-none focus:ring-1 focus:ring-teal-400"
-                      />
-                    </div>
-                  </div>
                 </div>
-              </div>
 
-              <div className="p-6">
-                {filteredHistorial.length === 0 ? (
-                  <div className="text-center py-12 text-slate-400">
-                    <AlertCircle className="w-8 h-8 mx-auto mb-2 text-slate-300 animate-bounce" />
-                    <p className="text-xs font-semibold">No se encontraron eventos con los filtros seleccionados.</p>
-                  </div>
-                ) : (
-                  <div className="flow-root">
-                    <ul className="-mb-8">
-                      {filteredHistorial.map((hist, histIdx) => (
-                        <li key={hist.id}>
-                          <div className="relative pb-8">
-                            {histIdx !== filteredHistorial.length - 1 ? (
-                              <span className="absolute top-4 left-4 -ml-px h-full w-0.5 bg-slate-200" aria-hidden="true" />
-                            ) : null}
-                            <div className="relative flex space-x-3">
-                              <div>
-                                <span className={`h-8 w-8 rounded-full flex items-center justify-center ring-8 ring-white ${
-                                  hist.tipo === "Creación" ? "bg-emerald-50 text-emerald-700 border border-emerald-200" : "bg-blue-50 text-blue-700 border border-blue-200"
-                                }`}>
-                                  {hist.tipo === "Creación" ? <Plus className="w-4 h-4" /> : <RefreshCw className="w-4 h-4" />}
-                                </span>
-                              </div>
-                              <div className="flex-1 min-w-0 pt-1.5 flex justify-between space-x-4">
-                                <div>
-                                  <p className="text-sm font-semibold text-slate-800">
-                                    {hist.descripcionEvent}{" "}
-                                    <span className="font-black text-teal-800 bg-teal-50 px-2 py-0.5 rounded-md border border-teal-100 text-xs">
-                                      {hist.numeroSolicitud}
-                                    </span>
-                                  </p>
-                                  <p className="text-xs text-slate-500 mt-1 flex items-center gap-1.5">
-                                    <User className="w-3.5 h-3.5 text-slate-400" /> Responsable: <span className="font-semibold text-slate-700">{hist.usuarioResponsable}</span>
-                                  </p>
-                                </div>
-                                <div className="text-right text-xs whitespace-nowrap text-slate-400 font-semibold flex flex-col sm:flex-row items-end sm:items-center gap-1">
-                                  <Calendar className="w-3.5 h-3.5 text-slate-300" />
-                                  <span>{new Date(hist.fecha + "T00:00:00").toLocaleDateString("es-DO")} • {hist.hora}</span>
-                                </div>
-                              </div>
-                            </div>
-                          </div>
-                        </li>
-                      ))}
-                    </ul>
+                {(histDateFilter || histUserFilter || histStatusFilter !== "todos" || histDeptFilter !== "todos") && (
+                  <div className="flex justify-end">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setHistDateFilter("");
+                        setHistUserFilter("");
+                        setHistStatusFilter("todos");
+                        setHistDeptFilter("todos");
+                        setVisibleHistoryCount(30);
+                        playSound("click");
+                      }}
+                      className="inline-flex items-center gap-1 text-[10px] font-black text-rose-600 hover:text-rose-700 uppercase tracking-wider cursor-pointer border border-rose-200/50 hover:bg-rose-50 px-2.5 py-1 rounded-lg transition"
+                    >
+                      <X className="w-3.5 h-3.5" />
+                      Limpiar Filtros del Historial
+                    </button>
                   </div>
                 )}
               </div>
+
+              {historyViewMode === "solicitudes" ? (
+                <div className="divide-y divide-slate-200">
+                  {filteredHistorialSolicitudes.length === 0 ? (
+                    <div className="text-center py-12 text-slate-400">
+                      <AlertCircle className="w-8 h-8 mx-auto mb-2 text-slate-300" />
+                      <p className="text-xs font-semibold">No se encontraron solicitudes registradas con los filtros seleccionados.</p>
+                    </div>
+                  ) : (
+                    <>
+                      <div className="overflow-x-auto">
+                        <table className="w-full text-left border-collapse min-w-[980px] text-xs">
+                          <thead>
+                            <tr className="bg-slate-100/90 border-b border-slate-200 text-[10px] font-black uppercase tracking-wider text-slate-600">
+                              <th className="py-3.5 px-4 whitespace-nowrap">N.º Solicitud</th>
+                              <th className="py-3.5 px-4 whitespace-nowrap">Fecha de Creación</th>
+                              <th className="py-3.5 px-4 whitespace-nowrap">Usuario Solicitante</th>
+                              <th className="py-3.5 px-4 min-w-[260px]">Productos y Cantidades Solicitadas</th>
+                              <th className="py-3.5 px-4 text-center whitespace-nowrap">Estado</th>
+                              <th className="py-3.5 px-4 whitespace-nowrap">Autorizado / Rechazado por</th>
+                              <th className="py-3.5 px-4 whitespace-nowrap">Fecha Autorización / Rechazo</th>
+                              <th className="py-3.5 px-4 text-right whitespace-nowrap">Acciones</th>
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-slate-100">
+                            {paginatedHistorySolicitudes.map((sol) => {
+                              const authMeta = getAuthorizationMetadata(sol);
+                              const itemsList = sol.items || [];
+
+                              return (
+                                <tr key={sol.id} className="hover:bg-slate-50/80 transition-colors align-top">
+                                  {/* 1. Número o identificador de solicitud */}
+                                  <td className="py-3.5 px-4 whitespace-nowrap">
+                                    <span className="inline-block font-black text-teal-800 bg-teal-50 border border-teal-200 px-2.5 py-1 rounded-xl text-xs">
+                                      {sol.numeroSolicitud}
+                                    </span>
+                                    <span className="block text-[10px] font-bold text-slate-400 mt-1">
+                                      {sol.departamento}
+                                    </span>
+                                  </td>
+
+                                  {/* 2. Fecha de creación */}
+                                  <td className="py-3.5 px-4 whitespace-nowrap">
+                                    <p className="font-bold text-slate-800">
+                                      {new Date(sol.fecha + "T00:00:00").toLocaleDateString("es-DO")}
+                                    </p>
+                                    <p className="text-[10px] text-slate-500 font-semibold mt-0.5">
+                                      {sol.hora} hrs
+                                    </p>
+                                  </td>
+
+                                  {/* 3. Usuario solicitante */}
+                                  <td className="py-3.5 px-4">
+                                    <p className="font-bold text-slate-800">{sol.usuarioCreador}</p>
+                                    <span className={`inline-block mt-1 text-[9px] font-black uppercase px-2 py-0.5 rounded-full ${getPriorityBadgeClass(sol.prioridad)}`}>
+                                      Prioridad {sol.prioridad}
+                                    </span>
+                                  </td>
+
+                                  {/* 4. Productos y cantidades solicitadas */}
+                                  <td className="py-3.5 px-4">
+                                    {itemsList.length > 0 ? (
+                                      <div className="space-y-1 max-h-28 overflow-y-auto pr-1">
+                                        {itemsList.map((it, idx) => (
+                                          <div
+                                            key={it.id || `${it.productoCodigo}-${idx}`}
+                                            className="flex items-center justify-between gap-2 bg-slate-50 border border-slate-200/80 rounded-lg px-2.5 py-1"
+                                          >
+                                            <span className="truncate font-semibold text-slate-800" title={it.productoNombre}>
+                                              <strong className="font-mono text-[10px] text-teal-700 mr-1">{it.productoCodigo}</strong>
+                                              {it.productoNombre}
+                                            </span>
+                                            <span className="shrink-0 font-black text-[11px] text-teal-900 bg-teal-100/80 px-2 py-0.5 rounded-md">
+                                              Cant: {it.cantidadSolicitada}
+                                            </span>
+                                          </div>
+                                        ))}
+                                      </div>
+                                    ) : (
+                                      <p className="text-xs text-slate-600 line-clamp-2" title={sol.descripcion}>
+                                        {sol.descripcion}
+                                      </p>
+                                    )}
+                                  </td>
+
+                                  {/* 5. Estado de la solicitud */}
+                                  <td className="py-3.5 px-4 text-center whitespace-nowrap">
+                                    <span className={`inline-block text-[10px] font-black uppercase tracking-wider px-2.5 py-1 rounded-full ${getStatusBadgeClass(sol.estado)}`}>
+                                      {sol.estado}
+                                    </span>
+                                  </td>
+
+                                  {/* 6. Usuario que autorizó o rechazó */}
+                                  <td className="py-3.5 px-4 whitespace-nowrap">
+                                    {authMeta ? (
+                                      <div>
+                                        <p className="font-bold text-slate-800">{authMeta.autorizador}</p>
+                                        <span
+                                          className={`inline-block mt-0.5 text-[9px] font-black uppercase px-1.5 py-0.2 rounded ${
+                                            authMeta.accion === "Rechazada" || authMeta.accion === "Cancelada"
+                                              ? "bg-rose-50 text-rose-700 border border-rose-200"
+                                              : "bg-teal-50 text-teal-800 border border-teal-200"
+                                          }`}
+                                        >
+                                          {authMeta.accion} (ADMIN)
+                                        </span>
+                                      </div>
+                                    ) : (
+                                      <span className="text-[11px] text-slate-400 italic">
+                                        Pendiente de revisión
+                                      </span>
+                                    )}
+                                  </td>
+
+                                  {/* 7. Fecha de autorización o rechazo */}
+                                  <td className="py-3.5 px-4 whitespace-nowrap">
+                                    {authMeta && authMeta.fecha ? (
+                                      <div>
+                                        <p className="font-bold text-slate-800">
+                                          {new Date(authMeta.fecha + "T00:00:00").toLocaleDateString("es-DO")}
+                                        </p>
+                                        <p className="text-[10px] text-slate-500 font-semibold mt-0.5">
+                                          {authMeta.hora} hrs
+                                        </p>
+                                      </div>
+                                    ) : (
+                                      <span className="text-[11px] text-slate-400">—</span>
+                                    )}
+                                  </td>
+
+                                  {/* 8. Acciones (Ver Detalle + Autorizar/Rechazar exclusivo para ADMIN) */}
+                                  <td className="py-3.5 px-4 text-right whitespace-nowrap">
+                                    <div className="flex flex-col items-end gap-1.5">
+                                      <button
+                                        type="button"
+                                        onClick={() => {
+                                          handleOpenStatusModal(sol);
+                                          playSound("click");
+                                        }}
+                                        className="inline-flex items-center gap-1 px-3 py-1.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 font-extrabold text-[11px] transition cursor-pointer"
+                                      >
+                                        <Eye className="w-3.5 h-3.5 text-teal-700" />
+                                        <span>Ver Detalle</span>
+                                      </button>
+
+                                      {isAdmin && sol.estado === "Pendiente" && (
+                                        <div className="flex items-center gap-1">
+                                          <button
+                                            type="button"
+                                            onClick={() => handleDirectStatusChange(sol, "Aprobada")}
+                                            className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-teal-700 hover:bg-teal-800 text-white font-black text-[10px] transition cursor-pointer shadow-2xs"
+                                            title="Autorizar solicitud (Exclusivo ADMIN)"
+                                          >
+                                            <CheckCircle2 className="w-3 h-3" />
+                                            <span>Autorizar</span>
+                                          </button>
+                                          <button
+                                            type="button"
+                                            onClick={() => handleDirectStatusChange(sol, "Rechazada")}
+                                            className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-rose-600 hover:bg-rose-700 text-white font-black text-[10px] transition cursor-pointer shadow-2xs"
+                                            title="Rechazar solicitud (Exclusivo ADMIN)"
+                                          >
+                                            <XCircle className="w-3 h-3" />
+                                            <span>Rechazar</span>
+                                          </button>
+                                        </div>
+                                      )}
+                                    </div>
+                                  </td>
+                                </tr>
+                              );
+                            })}
+                          </tbody>
+                        </table>
+                      </div>
+
+                      {filteredHistorialSolicitudes.length > visibleHistoryCount && (
+                        <div className="p-4 bg-slate-50 flex items-center justify-between">
+                          <span className="text-xs font-semibold text-slate-600">
+                            Mostrando <strong>{paginatedHistorySolicitudes.length}</strong> de{" "}
+                            <strong>{filteredHistorialSolicitudes.length}</strong> solicitudes
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              playSound("click");
+                              setVisibleHistoryCount((prev) => prev + 30);
+                            }}
+                            className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl bg-white hover:bg-slate-100 text-teal-800 border border-slate-300 text-xs font-extrabold shadow-2xs transition cursor-pointer"
+                          >
+                            <ChevronDown className="w-4 h-4" />
+                            <span>Cargar más registros ({filteredHistorialSolicitudes.length - visibleHistoryCount} restantes)</span>
+                          </button>
+                        </div>
+                      )}
+                    </>
+                  )}
+                </div>
+              ) : (
+                <div className="p-6">
+                  {filteredHistorial.length === 0 ? (
+                    <div className="text-center py-12 text-slate-400">
+                      <AlertCircle className="w-8 h-8 mx-auto mb-2 text-slate-300 animate-bounce" />
+                      <p className="text-xs font-semibold">No se encontraron eventos con los filtros seleccionados.</p>
+                    </div>
+                  ) : (
+                    <div className="flow-root">
+                      <ul className="-mb-8">
+                        {filteredHistorial.map((hist, histIdx) => (
+                          <li key={hist.id}>
+                            <div className="relative pb-8">
+                              {histIdx !== filteredHistorial.length - 1 ? (
+                                <span className="absolute top-4 left-4 -ml-px h-full w-0.5 bg-slate-200" aria-hidden="true" />
+                              ) : null}
+                              <div className="relative flex space-x-3">
+                                <div>
+                                  <span className={`h-8 w-8 rounded-full flex items-center justify-center ring-8 ring-white ${
+                                    hist.tipo === "Creación" ? "bg-emerald-50 text-emerald-700 border border-emerald-200" : "bg-blue-50 text-blue-700 border border-blue-200"
+                                  }`}>
+                                    {hist.tipo === "Creación" ? <Plus className="w-4 h-4" /> : <RefreshCw className="w-4 h-4" />}
+                                  </span>
+                                </div>
+                                <div className="flex-1 min-w-0 pt-1.5 flex justify-between space-x-4">
+                                  <div>
+                                    <p className="text-sm font-semibold text-slate-800">
+                                      {hist.descripcionEvent}{" "}
+                                      <span className="font-black text-teal-800 bg-teal-50 px-2 py-0.5 rounded-md border border-teal-100 text-xs">
+                                        {hist.numeroSolicitud}
+                                      </span>
+                                    </p>
+                                    <p className="text-xs text-slate-500 mt-1 flex items-center gap-1.5">
+                                      <User className="w-3.5 h-3.5 text-slate-400" /> Responsable: <span className="font-semibold text-slate-700">{hist.usuarioResponsable}</span>
+                                    </p>
+                                  </div>
+                                  <div className="text-right text-xs whitespace-nowrap text-slate-400 font-semibold flex flex-col sm:flex-row items-end sm:items-center gap-1">
+                                    <Calendar className="w-3.5 h-3.5 text-slate-300" />
+                                    <span>{new Date(hist.fecha + "T00:00:00").toLocaleDateString("es-DO")} • {hist.hora}</span>
+                                  </div>
+                                </div>
+                              </div>
+                            </div>
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
           );
         })()
@@ -2613,7 +3296,7 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
             <div className="flex items-center justify-between px-6 py-4 border-b border-slate-200 bg-slate-50 shrink-0">
               <h3 className="font-black text-slate-900 flex items-center gap-2 font-sans text-base">
                 <Layers className="w-5 h-5 text-teal-600" />
-                Detalle de Orden {selectedSolicitud.numeroSolicitud}
+                Detalle de Solicitud {selectedSolicitud.numeroSolicitud}
               </h3>
               <button
                 onClick={() => setSelectedSolicitud(null)}
@@ -2623,35 +3306,66 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
               </button>
             </div>
 
-            {/* Export Actions Bar */}
-            <div className="px-6 py-3 bg-teal-50/50 border-b border-slate-200 flex flex-wrap gap-2 justify-end shrink-0">
-              {/* Botón Eliminar Orden (exclusivo Anyer) */}
-              {(currentUser.usuario.toLowerCase() === "anyer" || currentUser.nombre.toLowerCase() === "anyer") && (
+            {/* Export & Admin Authorization Actions Bar */}
+            <div className="px-6 py-3 bg-teal-50/50 border-b border-slate-200 flex flex-wrap gap-2 justify-between items-center shrink-0">
+              <div className="flex flex-wrap items-center gap-2">
+                {isAdmin && selectedSolicitud.estado === "Pendiente" && (
+                  <>
+                    <button
+                      type="button"
+                      onClick={async () => {
+                        await handleDirectStatusChange(selectedSolicitud, "Aprobada");
+                        setSelectedSolicitud(null);
+                      }}
+                      className="flex items-center gap-1.5 px-4 py-2 rounded-xl bg-teal-700 hover:bg-teal-800 text-white font-extrabold text-xs shadow-xs transition active:scale-95 cursor-pointer"
+                    >
+                      <CheckCircle2 className="w-4 h-4" />
+                      Autorizar Solicitud (ADMIN)
+                    </button>
+                    <button
+                      type="button"
+                      onClick={async () => {
+                        await handleDirectStatusChange(selectedSolicitud, "Rechazada");
+                        setSelectedSolicitud(null);
+                      }}
+                      className="flex items-center gap-1.5 px-4 py-2 rounded-xl bg-rose-600 hover:bg-rose-700 text-white font-extrabold text-xs shadow-xs transition active:scale-95 cursor-pointer"
+                    >
+                      <XCircle className="w-4 h-4" />
+                      Rechazar Solicitud (ADMIN)
+                    </button>
+                  </>
+                )}
+              </div>
+
+              <div className="flex flex-wrap gap-2 justify-end">
+                {/* Botón Eliminar Orden (exclusivo Anyer) */}
+                {(currentUser.usuario.toLowerCase() === "anyer" || currentUser.nombre.toLowerCase() === "anyer") && (
+                  <button
+                    type="button"
+                    onClick={() => handleDeleteRequest(selectedSolicitud)}
+                    className="flex items-center gap-1.5 px-4 py-2 rounded-xl bg-rose-600 hover:bg-rose-700 text-white font-extrabold text-xs shadow-xs transition active:scale-95 cursor-pointer border border-rose-750/10"
+                  >
+                    <Trash2 className="w-4 h-4" />
+                    Eliminar Orden
+                  </button>
+                )}
                 <button
                   type="button"
-                  onClick={() => handleDeleteRequest(selectedSolicitud)}
-                  className="flex items-center gap-1.5 px-4 py-2 rounded-xl bg-rose-600 hover:bg-rose-700 text-white font-extrabold text-xs shadow-xs transition active:scale-95 cursor-pointer border border-rose-750/10"
+                  onClick={() => exportToWord(selectedSolicitud)}
+                  className="flex items-center gap-1.5 px-4 py-2 rounded-xl bg-teal-700 hover:bg-teal-800 text-white font-extrabold text-xs shadow-xs transition active:scale-95 cursor-pointer border border-teal-800/10"
                 >
-                  <Trash2 className="w-4 h-4" />
-                  Eliminar Orden
+                  <FileText className="w-4 h-4" />
+                  Exportar a Word (.docx)
                 </button>
-              )}
-              <button
-                type="button"
-                onClick={() => exportToWord(selectedSolicitud)}
-                className="flex items-center gap-1.5 px-4 py-2 rounded-xl bg-teal-700 hover:bg-teal-800 text-white font-extrabold text-xs shadow-xs transition active:scale-95 cursor-pointer border border-teal-800/10"
-              >
-                <FileText className="w-4 h-4" />
-                Exportar a Word (.docx)
-              </button>
-              <button
-                type="button"
-                onClick={() => exportToPDF(selectedSolicitud)}
-                className="flex items-center gap-1.5 px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-900 text-white font-extrabold text-xs shadow-xs transition active:scale-95 cursor-pointer border border-slate-950/10"
-              >
-                <FileText className="w-4 h-4" />
-                Exportar a PDF (.pdf)
-              </button>
+                <button
+                  type="button"
+                  onClick={() => exportToPDF(selectedSolicitud)}
+                  className="flex items-center gap-1.5 px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-900 text-white font-extrabold text-xs shadow-xs transition active:scale-95 cursor-pointer border border-slate-950/10"
+                >
+                  <FileText className="w-4 h-4" />
+                  Exportar a PDF (.pdf)
+                </button>
+              </div>
             </div>
 
             {/* Content (Scrollable) */}
@@ -2659,7 +3373,7 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
               {/* Info General en Grid Responsivo */}
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 bg-slate-50 p-4 rounded-2xl border border-slate-200/80 text-xs sm:text-sm">
                 <div>
-                  <p className="text-[10px] font-black uppercase text-slate-400">Número de Orden</p>
+                  <p className="text-[10px] font-black uppercase text-slate-400">Número de Solicitud</p>
                   <p className="font-extrabold text-teal-900">{selectedSolicitud.numeroSolicitud}</p>
                 </div>
                 <div>
@@ -2669,7 +3383,7 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
                   </span>
                 </div>
                 <div>
-                  <p className="text-[10px] font-black uppercase text-slate-400">Fecha y Hora de Solicitud</p>
+                  <p className="text-[10px] font-black uppercase text-slate-400">Fecha y Hora de Creación</p>
                   <p className="font-bold text-slate-800">
                     {new Date(selectedSolicitud.fecha + "T00:00:00").toLocaleDateString("es-DO")} a las {selectedSolicitud.hora}
                   </p>
@@ -2686,6 +3400,28 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
                   <p className="text-[10px] font-black uppercase text-slate-400">Período de Registro</p>
                   <p className="font-bold text-slate-800">{selectedSolicitud.periodo}</p>
                 </div>
+                {(() => {
+                  const authMeta = getAuthorizationMetadata(selectedSolicitud);
+                  if (!authMeta) return null;
+                  return (
+                    <>
+                      <div>
+                        <p className="text-[10px] font-black uppercase text-slate-400">
+                          {authMeta.accion === "Rechazada" ? "Usuario que Rechazó (ADMIN)" : "Usuario que Autorizó (ADMIN)"}
+                        </p>
+                        <p className="font-extrabold text-teal-900">{authMeta.autorizador}</p>
+                      </div>
+                      <div>
+                        <p className="text-[10px] font-black uppercase text-slate-400">
+                          Fecha de Autorización / Rechazo
+                        </p>
+                        <p className="font-bold text-slate-800">
+                          {authMeta.fecha ? new Date(authMeta.fecha + "T00:00:00").toLocaleDateString("es-DO") : "—"} {authMeta.hora ? `a las ${authMeta.hora}` : ""}
+                        </p>
+                      </div>
+                    </>
+                  );
+                })()}
                 <div>
                   <p className="text-[10px] font-black uppercase text-slate-400">Catálogo de Suministros</p>
                   <p className="font-extrabold text-teal-800">
@@ -2969,10 +3705,12 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
                             className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-700 outline-none focus:ring-1 focus:ring-teal-400"
                           >
                             <option value="Pendiente">Pendiente</option>
+                            {isAdmin && <option value="Aprobada">Aprobada (Autorizar - ADMIN)</option>}
+                            {isAdmin && <option value="Rechazada">Rechazada (Rechazar - ADMIN)</option>}
                             <option value="En preparación">En preparación</option>
                             <option value="Parcialmente entregada">Parcialmente entregada</option>
                             <option value="Entregada">Entregada</option>
-                            <option value="Cancelada">Cancelada</option>
+                            {isAdmin && <option value="Cancelada">Cancelada (ADMIN)</option>}
                           </select>
                         </div>
 
