@@ -40,6 +40,7 @@ import Login from "./components/Login";
 import SolicitudesPanel from "./components/SolicitudesPanel";
 import ConfiguracionPanel from "./components/ConfiguracionPanel";
 import VentaPanel from "./components/VentaPanel";
+import FiscalDGIIPanel from "./components/FiscalDGIIPanel";
 import DashboardPanel from "./components/DashboardPanel";
 import ChatLateral from "./components/ChatLateral";
 import ProductPhotosEditor from "./components/ProductPhotosEditor";
@@ -50,6 +51,16 @@ import { logSystemEvent } from "./utils/chatHelper";
 import { exportToWord, exportToPDF } from "./utils/exportUtils";
 import { createAdjustedLot, getProductImages } from "./utils/productPhotos";
 import { isLotExpiredWithStock } from "./utils/inventoryStatus";
+import {
+  loadCompras606,
+  saveCompras606List,
+  appendAuditoriaFiscal,
+  validateRncOrCedulaDGII,
+  validateNCFFormat,
+  FORMAS_PAGO_DGII,
+  TIPOS_BIENES_SERVICIOS_606
+} from "./utils/dgiiUtils";
+import { FormaPagoDGII, RegistroCompra606 } from "./types";
 
 // Suministros predefinidos para autosembrado (si la base de datos está vacía)
 import { bH as DEFAULT_PRODUCTS } from "./defaultProducts";
@@ -193,6 +204,12 @@ export default function App() {
   const [invoiceNum, setInvoiceNum] = useState("");
   const [invoiceDate, setInvoiceDate] = useState(() => new Date().toISOString().slice(0, 10));
   const [invoiceSupplier, setInvoiceSupplier] = useState("");
+  const [invoiceIncluirEn606, setInvoiceIncluirEn606] = useState(false);
+  const [invoiceRncSuplidor, setInvoiceRncSuplidor] = useState("");
+  const [invoiceNcfCompra, setInvoiceNcfCompra] = useState("");
+  const [invoiceItbisFacturado, setInvoiceItbisFacturado] = useState("");
+  const [invoiceTipoBienes606, setInvoiceTipoBienes606] = useState("09");
+  const [invoiceFormaPago606, setInvoiceFormaPago606] = useState<FormaPagoDGII>("04");
   const [pendingEntryItems, setPendingEntryItems] = useState<
     Array<{
       tempId: string;
@@ -2238,6 +2255,29 @@ export default function App() {
       return;
     }
 
+    const cleanRncSuplidor = invoiceRncSuplidor.replace(/[^0-9]/g, "");
+    const cleanNcfCompra = invoiceNcfCompra.trim().toUpperCase();
+    const shouldRegister606 = invoiceIncluirEn606 || (cleanRncSuplidor.length >= 9 && cleanNcfCompra.length >= 11);
+
+    let existing606: RegistroCompra606[] = [];
+    if (shouldRegister606) {
+      const rncCheck = validateRncOrCedulaDGII(cleanRncSuplidor);
+      if (!rncCheck.valid) {
+        alert(`Error Fiscal DGII (606): ${rncCheck.message}`);
+        return;
+      }
+      const ncfCheck = validateNCFFormat(cleanNcfCompra);
+      if (!ncfCheck.valid) {
+        alert(`Error Fiscal DGII (606): ${ncfCheck.message}`);
+        return;
+      }
+      existing606 = await loadCompras606(activeFarmaciaId);
+      if (existing606.some((c) => c.ncf === cleanNcfCompra && c.rncCedulaProveedor === cleanRncSuplidor && !c.anulado)) {
+        alert(`Duplicado Fiscal DGII: El comprobante ${cleanNcfCompra} del suplidor RNC ${cleanRncSuplidor} ya está registrado en el Formato 606.`);
+        return;
+      }
+    }
+
     setConfirmingEntry(true);
     playSound("action");
 
@@ -2289,6 +2329,63 @@ export default function App() {
         }
       }
 
+      const totalMontoBienes = Number(
+        pendingEntryItems.reduce((sum, it) => sum + Number(it.cantidad || 0) * Number(it.precio || 0), 0).toFixed(2)
+      );
+      const itbisCompraVal = Number(Number(invoiceItbisFacturado || 0).toFixed(2));
+      const compra606Id = shouldRegister606 ? `606-inv-${Date.now()}` : undefined;
+
+      if (shouldRegister606 && compra606Id) {
+        const periodoMes = cleanInvoiceDate.replace(/-/g, "").slice(0, 6);
+        const newCompra606: RegistroCompra606 = {
+          id: compra606Id,
+          periodoMes,
+          rncCedulaProveedor: cleanRncSuplidor,
+          tipoIdentificacion: cleanRncSuplidor.length === 9 ? "1" : "2",
+          nombreProveedor: cleanSupplier || "Suplidor de Inventario",
+          tipoBienesServicios: invoiceTipoBienes606 || "09",
+          ncf: cleanNcfCompra,
+          fechaComprobante: cleanInvoiceDate,
+          fechaPago: cleanInvoiceDate,
+          montoFacturadoServicios: 0,
+          montoFacturadoBienes: totalMontoBienes,
+          totalMontoFacturado: totalMontoBienes,
+          itbisFacturado: itbisCompraVal,
+          itbisRetenido: 0,
+          itbisSujetoProporcionalidad: 0,
+          itbisLlevadoAlCosto: 0,
+          itbisPorAdelantar: itbisCompraVal,
+          itbisPercibidoEnCompras: 0,
+          montoRetencionRenta: 0,
+          isrPercibidoEnCompras: 0,
+          impuestoSelectivoConsumo: 0,
+          otrosImpuestosTasas: 0,
+          montoPropinaLegal: 0,
+          formaPago: invoiceFormaPago606,
+          numeroFacturaInterna: cleanInvoiceNum,
+          catalogId: activeCatalogId,
+          observaciones: pendingEntryItems.map((it) => `${it.cantidad}x ${it.nombre} (Lote ${it.numeroLote})`).join(", "),
+          usuarioRegistro: currentUser ? `${currentUser.nombre} (${currentUser.usuario})` : "Sistema",
+          createdAt: Date.now(),
+          anulado: false
+        };
+        const current606 = existing606.length > 0 ? existing606 : await loadCompras606(activeFarmaciaId);
+        await saveCompras606List([newCompra606, ...current606], activeFarmaciaId);
+        await appendAuditoriaFiscal(
+          {
+            tipoAccion: "REGISTRO_COMPRA_606",
+            comprobanteNcf: cleanNcfCompra,
+            documentoReferenciaId: compra606Id,
+            descripcion: `Entrada de inventario vinculada a Formato 606: ${cleanNcfCompra} (${cleanSupplier || cleanRncSuplidor}) por RD$ ${totalMontoBienes.toFixed(2)}`,
+            usuario: currentUser?.usuario || "sistema",
+            rolUsuario: currentUser?.rol || "Operador",
+            ambienteDGII: "TesteCF",
+            resultado: "EXITO"
+          },
+          activeFarmaciaId
+        );
+      }
+
       const isLocalFileMode = typeof window !== "undefined" && window.location.protocol === "file:";
       if (isLocalFileMode) {
         for (const prod of updatedProductsMap.values()) {
@@ -2313,7 +2410,17 @@ export default function App() {
             catalogId: activeCatalogId,
             numeroFactura: cleanInvoiceNum,
             fechaEntrada: cleanInvoiceDate,
-            proveedor: cleanSupplier
+            proveedor: cleanSupplier,
+            ...(shouldRegister606
+              ? {
+                  rncProveedor: cleanRncSuplidor,
+                  ncfCompra: cleanNcfCompra,
+                  itbisCompra: itbisCompraVal,
+                  tipoBienesServicios606: invoiceTipoBienes606,
+                  formaPagoDGII: invoiceFormaPago606,
+                  compra606Id
+                }
+              : {})
           };
           await saveMovementLog(movLog);
         }
@@ -2357,13 +2464,23 @@ export default function App() {
             catalogId: activeCatalogId,
             numeroFactura: cleanInvoiceNum,
             fechaEntrada: cleanInvoiceDate,
-            proveedor: cleanSupplier
+            proveedor: cleanSupplier,
+            ...(shouldRegister606
+              ? {
+                  rncProveedor: cleanRncSuplidor,
+                  ncfCompra: cleanNcfCompra,
+                  itbisCompra: itbisCompraVal,
+                  tipoBienesServicios606: invoiceTipoBienes606,
+                  formaPagoDGII: invoiceFormaPago606,
+                  compra606Id
+                }
+              : {})
           };
           batch.set(tenantDoc("movimientos", movId, activeFarmaciaId), movData);
         }
 
         await batch.commit();
-        logSystemEvent(`📦 **Movimiento de Inventario**: Se registró una **Entrada** de ${pendingEntryItems.length} producto(s) bajo la factura **${cleanInvoiceNum}** por el usuario ${userLabel}.`);
+        logSystemEvent(`📦 **Movimiento de Inventario**: Se registró una **Entrada** de ${pendingEntryItems.length} producto(s) bajo la factura **${cleanInvoiceNum}**${shouldRegister606 ? ` (NCF 606: **${cleanNcfCompra}**)` : ""} por el usuario ${userLabel}.`);
       }
 
       const count = pendingEntryItems.length;
@@ -2371,9 +2488,17 @@ export default function App() {
       setInvoiceNum("");
       setInvoiceDate(new Date().toISOString().slice(0, 10));
       setInvoiceSupplier("");
+      setInvoiceIncluirEn606(false);
+      setInvoiceRncSuplidor("");
+      setInvoiceNcfCompra("");
+      setInvoiceItbisFacturado("");
       setShowProductAdd(false);
       playSound("positive");
-      showToast(`Entrada confirmada: ${count} producto(s) registrados bajo la factura ${cleanInvoiceNum}.`);
+      showToast(
+        shouldRegister606
+          ? `Entrada confirmada (${count} prod.) y vinculada al Formato 606 (${cleanNcfCompra}).`
+          : `Entrada confirmada: ${count} producto(s) registrados bajo la factura ${cleanInvoiceNum}.`
+      );
     } catch (err) {
       console.error("Error confirming invoice entry:", err);
       alert("Ocurrió un error al confirmar la entrada de productos.");
@@ -3138,6 +3263,13 @@ export default function App() {
                 conceptos={conceptos}
                 showToast={showToast}
                 onProductsUpdated={(updated) => setProducts(updated)}
+              />
+            )}
+
+            {activeTab === "dgii" && enabledModules.includes("dgii") && (
+              <FiscalDGIIPanel
+                currentUser={currentUser}
+                showToast={showToast}
               />
             )}
 
@@ -4059,6 +4191,98 @@ export default function App() {
                           className="w-full rounded-xl border border-slate-300 px-3.5 py-2.5 text-xs font-semibold text-slate-900 bg-white outline-none focus:ring-2 focus:ring-teal-500/30 transition"
                         />
                       </div>
+                    </div>
+
+                    {/* Integración Fiscal DGII (Formato 606 Opcional en Entradas de Inventario) */}
+                    <div className="pt-2 border-t border-slate-100">
+                      <div className="flex items-center justify-between gap-2">
+                        <label className="inline-flex items-center gap-2 text-xs font-extrabold text-teal-900 cursor-pointer select-none">
+                          <input
+                            type="checkbox"
+                            checked={invoiceIncluirEn606}
+                            onChange={(e) => setInvoiceIncluirEn606(e.target.checked)}
+                            className="w-4 h-4 rounded text-teal-600 focus:ring-teal-500 cursor-pointer"
+                          />
+                          <span>Registrar Comprobante Fiscal de Compra en Formato 606 (DGII)</span>
+                        </label>
+                        <span className="text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded bg-teal-50 text-teal-800 border border-teal-200">
+                          Norma 07-2018
+                        </span>
+                      </div>
+
+                      {invoiceIncluirEn606 && (
+                        <div className="mt-3 grid grid-cols-1 sm:grid-cols-4 gap-3 bg-teal-50/50 border border-teal-200/80 rounded-xl p-3.5">
+                          <div>
+                            <label className="block text-[10px] font-extrabold text-slate-700 uppercase tracking-wider mb-1">
+                              RNC / Cédula Suplidor *
+                            </label>
+                            <input
+                              type="text"
+                              value={invoiceRncSuplidor}
+                              onChange={(e) => setInvoiceRncSuplidor(e.target.value.replace(/[^0-9]/g, "").slice(0, 11))}
+                              placeholder="9 u 11 dígitos"
+                              className="w-full rounded-lg border border-slate-300 px-2.5 py-2 text-xs font-mono font-bold text-slate-900 bg-white outline-none"
+                            />
+                          </div>
+                          <div>
+                            <label className="block text-[10px] font-extrabold text-slate-700 uppercase tracking-wider mb-1">
+                              NCF / e-CF del Suplidor *
+                            </label>
+                            <input
+                              type="text"
+                              value={invoiceNcfCompra}
+                              onChange={(e) => setInvoiceNcfCompra(e.target.value.toUpperCase().slice(0, 13))}
+                              placeholder="B0100000001 / E310000000001"
+                              className="w-full rounded-lg border border-slate-300 px-2.5 py-2 text-xs font-mono font-bold uppercase text-slate-900 bg-white outline-none"
+                            />
+                          </div>
+                          <div>
+                            <label className="block text-[10px] font-extrabold text-slate-700 uppercase tracking-wider mb-1">
+                              ITBIS Facturado (RD$)
+                            </label>
+                            <input
+                              type="number"
+                              min="0"
+                              step="0.01"
+                              value={invoiceItbisFacturado}
+                              onChange={(e) => setInvoiceItbisFacturado(e.target.value)}
+                              placeholder="0.00"
+                              className="w-full rounded-lg border border-slate-300 px-2.5 py-2 text-xs font-mono font-bold text-slate-900 bg-white outline-none"
+                            />
+                          </div>
+                          <div>
+                            <label className="block text-[10px] font-extrabold text-slate-700 uppercase tracking-wider mb-1">
+                              Tipo Gasto / Pago 606
+                            </label>
+                            <div className="grid grid-cols-2 gap-1.5">
+                              <select
+                                value={invoiceTipoBienes606}
+                                onChange={(e) => setInvoiceTipoBienes606(e.target.value)}
+                                className="rounded-lg border border-slate-300 px-2 py-2 text-[11px] font-bold text-slate-800 bg-white outline-none"
+                                title="Tipo de Bienes y Servicios 606"
+                              >
+                                {TIPOS_BIENES_SERVICIOS_606.map((t) => (
+                                  <option key={t.codigo} value={t.codigo}>
+                                    {t.codigo} - {t.nombre}
+                                  </option>
+                                ))}
+                              </select>
+                              <select
+                                value={invoiceFormaPago606}
+                                onChange={(e) => setInvoiceFormaPago606(e.target.value as FormaPagoDGII)}
+                                className="rounded-lg border border-slate-300 px-2 py-2 text-[11px] font-bold text-slate-800 bg-white outline-none"
+                                title="Forma de Pago DGII"
+                              >
+                                {FORMAS_PAGO_DGII.map((f) => (
+                                  <option key={f.codigo} value={f.codigo}>
+                                    {f.codigo} - {f.nombre}
+                                  </option>
+                                ))}
+                              </select>
+                            </div>
+                          </div>
+                        </div>
+                      )}
                     </div>
                   </div>
 

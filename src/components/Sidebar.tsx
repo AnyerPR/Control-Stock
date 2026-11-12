@@ -15,10 +15,11 @@ import {
   VolumeX,
   Building2,
   Layers,
-  ShoppingCart
+  ShoppingCart,
+  ShieldCheck
 } from "lucide-react";
 import { Usuario } from "../types";
-import { APP_ICON_PATH } from "./PWAInstallButton";
+import { APP_ICON_PATH, PWAInstallButton } from "./PWAInstallButton";
 
 export interface NavigationItem {
   id: string;
@@ -99,6 +100,17 @@ function Sidebar({
       label: "Ventas",
       icon: Receipt,
       sublabel: "Facturación y Despacho"
+    });
+  }
+
+  if (enabledModules.includes("dgii")) {
+    navItems.push({
+      id: "dgii",
+      label: "Cumplimiento DGII",
+      icon: ShieldCheck,
+      sublabel: "e-CF, NCF, 606, 607 y 608",
+      badge: "Ley 32-23",
+      badgeColor: "bg-emerald-500/20 text-emerald-200 border-emerald-400/30"
     });
   }
 
@@ -407,7 +419,10 @@ function Sidebar({
         </div>
 
         {/* Pie del Panel Lateral: Usuario, Sonido y Cerrar Sesión */}
-        <div className="p-3 border-t border-slate-800 bg-slate-950/60 shrink-0 space-y-2">
+        <div className="p-3 border-t border-slate-800 bg-slate-950/60 shrink-0 space-y-2.5">
+          {/* Botón directo de instalación en el menú lateral */}
+          <PWAInstallButton variant="sidebar" />
+
           <div className="flex items-center gap-2.5 p-2 rounded-2xl bg-slate-800/40 border border-slate-800">
             <div className="w-8 h-8 rounded-xl bg-gradient-to-tr from-teal-600 to-emerald-500 flex items-center justify-center font-black text-white text-xs shrink-0">
               {currentUser.nombre.charAt(0).toUpperCase()}

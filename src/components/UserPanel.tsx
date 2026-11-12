@@ -6,6 +6,7 @@ import { UserPlus, User, Users, Trash2, Key, Pen, ShieldAlert, X, CheckCircle } 
 export const MODULOS_DISPONIBLES = [
   { id: "inventory", nombre: "Suministros (Inventario)" },
   { id: "venta", nombre: "Venta (Facturación)" },
+  { id: "dgii", nombre: "Cumplimiento DGII (e-CF / 606 / 607)" },
   { id: "carga_masiva", nombre: "Carga Masiva" },
   { id: "solicitudes", nombre: "Órdenes / Solicitudes" },
   { id: "historial", nombre: "Historial Movs" },
@@ -72,7 +73,7 @@ export default function UserPanel({
   // Auto-fill modules defaults based on selected role for new user
   useEffect(() => {
     if (newRole === "Administrador") {
-      setNewModulos(["inventory", "carga_masiva", "solicitudes", "historial", "usuarios", "configuracion"]);
+      setNewModulos(["inventory", "dgii", "carga_masiva", "solicitudes", "historial", "usuarios", "configuracion"]);
     } else {
       setNewModulos(["solicitudes", "historial"]);
     }
@@ -93,7 +94,7 @@ export default function UserPanel({
     if (user.modulos && Array.isArray(user.modulos)) {
       setEditModulos(user.modulos);
     } else if (user.rol === "Administrador") {
-      setEditModulos(["inventory", "carga_masiva", "solicitudes", "historial", "usuarios", "configuracion"]);
+      setEditModulos(["inventory", "dgii", "carga_masiva", "solicitudes", "historial", "usuarios", "configuracion"]);
     } else {
       setEditModulos(["solicitudes", "historial"]);
     }
@@ -131,7 +132,7 @@ export default function UserPanel({
     }
     // Default modules
     if (newRole === "Administrador") {
-      setNewModulos(["inventory", "carga_masiva", "solicitudes", "historial", "usuarios", "configuracion"]);
+      setNewModulos(["inventory", "dgii", "carga_masiva", "solicitudes", "historial", "usuarios", "configuracion"]);
     } else {
       setNewModulos(["solicitudes", "historial"]);
     }
@@ -323,13 +324,14 @@ export default function UserPanel({
                               ? u.modulos
                               : u.rol === "Administrador"
                               ? u.usuario?.toLowerCase() === "anyer"
-                                ? ["inventory", "venta", "carga_masiva", "solicitudes", "historial", "usuarios", "configuracion"]
-                                : ["inventory", "carga_masiva", "solicitudes", "historial", "usuarios", "configuracion"]
+                                ? ["inventory", "venta", "dgii", "carga_masiva", "solicitudes", "historial", "usuarios", "configuracion"]
+                                : ["inventory", "dgii", "carga_masiva", "solicitudes", "historial", "usuarios", "configuracion"]
                               : ["solicitudes", "historial"];
                           const mapModNames: Record<string, string> = {
                             dashboard: "Dashboard",
                             inventory: "Suministros",
                             venta: "Venta",
+                            dgii: "DGII Fiscal",
                             carga_masiva: "Carga Masiva",
                             solicitudes: u.rol === "Administrador" ? "Órdenes" : "Solicitudes",
                             historial: "Historial",

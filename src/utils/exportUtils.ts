@@ -2,6 +2,11 @@ import jsPDF from "jspdf";
 import autoTable from "jspdf-autotable";
 import { Producto, Movimiento, InstitucionInfo, FacturaVenta } from "../types";
 import { isLotExpiredWithStock } from "./inventoryStatus";
+import {
+  FORMAS_PAGO_DGII,
+  generateQrCanvasPngDataUrl,
+  getMetadataTipoComprobante
+} from "./dgiiUtils";
 
 export const getActiveInstitucionInfo = (): InstitucionInfo => {
   if (typeof window !== "undefined") {
@@ -865,6 +870,7 @@ export const exportInvoiceToWord = (
 
 /**
  * Exports a Sale / Operation Invoice (Módulo de Venta) to PDF with Institutional Logo
+ * and full DGII NCF / e-CF Representación Impresa (RI) compliance (Ley 32-23)
  */
 export const exportSaleInvoiceToPDF = (
   factura: FacturaVenta,
@@ -872,58 +878,113 @@ export const exportSaleInvoiceToPDF = (
 ) => {
   const inst = institucion || getActiveInstitucionInfo();
   const doc = new jsPDF("p", "pt", "a4");
+  const metaTipo = getMetadataTipoComprobante(factura.tipoComprobante);
+  const isFiscal = Boolean(factura.ncf && factura.tipoComprobante);
+  const isECF = Boolean(factura.ncf && factura.ncf.startsWith("E"));
 
-  drawPdfInstitutionHeader(
-    doc,
-    `Factura de ${factura.concepto || "Venta"} • N.º ${factura.numeroFactura}`,
-    inst,
-    515
-  );
+  const docTitle = isFiscal
+    ? `${metaTipo?.nombre || factura.tipoComprobante} • ${factura.ncf}`
+    : `Factura de ${factura.concepto || "Venta"} • N.º ${factura.numeroFactura}`;
 
+  drawPdfInstitutionHeader(doc, docTitle, inst, 515);
+
+  // Bloque Fiscal DGII (RNC, NCF/e-CF, Vencimiento Secuencia, Cliente RNC)
   doc.setFont("helvetica", "bold");
   doc.setFontSize(8.5);
   doc.setTextColor(30, 41, 59);
-  doc.text("N.º de Factura:", 45, 110);
-  doc.text("Concepto:", 45, 123);
-  doc.text("Cliente:", 45, 136);
+  doc.text("N.º Interno / Concepto:", 45, 108);
+  doc.text("Comprador / Razón Soc.:", 45, 121);
+  doc.text("RNC / Cédula Cliente:", 45, 134);
 
-  doc.text("Fecha / Hora:", 315, 110);
-  doc.text("Contacto Cliente:", 315, 123);
-  doc.text("Catálogo / Resp.:", 315, 136);
+  doc.text("Fecha y Hora Emisión:", 305, 108);
+  doc.text(isECF ? "e-NCF (Electrónico):" : "NCF Fiscal:", 305, 121);
+  doc.text("Vencimiento Secuencia:", 305, 134);
 
   doc.setFont("helvetica", "normal");
   doc.setTextColor(71, 85, 105);
-  doc.text(factura.numeroFactura, 125, 110);
-  doc.text(factura.concepto || "Venta", 125, 123);
-  doc.text((factura.clienteNombre || "Consumidor Final / General").slice(0, 38), 125, 136);
-
-  doc.text(`${factura.fecha} ${factura.hora || ""}`, 400, 110);
-  doc.text(factura.clienteContacto || "No especificado", 400, 123);
+  doc.text(`${factura.numeroFactura} (${factura.concepto || "Venta"})`, 150, 108);
+  doc.text((factura.clienteNombre || "CONSUMIDOR FINAL").slice(0, 34), 150, 121);
   doc.text(
-    `${(factura.catalogNombre || "General").slice(0, 18)} • ${factura.usuarioResponsable}`.slice(0, 32),
-    400,
-    136
+    factura.rncCliente
+      ? `${factura.rncCliente}${factura.clienteContacto ? ` • ${factura.clienteContacto}` : ""}`
+      : factura.clienteContacto || "Sin RNC / Consumidor Final",
+    150,
+    134
   );
 
-  let startY = 150;
-  if (factura.observaciones) {
+  doc.text(`${factura.fecha} ${factura.hora || ""}`, 410, 108);
+  doc.setFont("courier", "bold");
+  doc.setTextColor(15, 118, 110);
+  doc.text(factura.ncf || "DOCUMENTO INTERNO", 410, 121);
+  doc.setFont("helvetica", "normal");
+  doc.setTextColor(71, 85, 105);
+  doc.text(factura.fechaVencimientoSecuencia || "N/A", 410, 134);
+
+  const formaPagoLabel =
+    FORMAS_PAGO_DGII.find((f) => f.codigo === (factura.formaPagoDGII || "01"))?.nombre ||
+    "01 - Efectivo";
+
+  doc.setFont("helvetica", "bold");
+  doc.setTextColor(30, 41, 59);
+  doc.text("Forma de Pago DGII:", 45, 147);
+  doc.text("Sucursal / Responsable:", 305, 147);
+
+  doc.setFont("helvetica", "normal");
+  doc.setTextColor(71, 85, 105);
+  doc.text(formaPagoLabel, 150, 147);
+  doc.text(
+    `Suc. ${factura.sucursalEmision || "001"}-${factura.puntoEmision || "001"} • ${factura.usuarioResponsable}`.slice(
+      0,
+      34
+    ),
+    410,
+    147
+  );
+
+  let startY = 162;
+
+  if (factura.ncfModificado) {
+    doc.setFont("helvetica", "bold");
+    doc.setFontSize(8);
+    doc.setTextColor(180, 83, 9);
+    doc.text(
+      `COMPROBANTE MODIFICADO: ${factura.ncfModificado} (Cód. Modificación: ${
+        factura.codigoModificacion || "03"
+      }) • Motivo: ${(factura.motivoModificacion || factura.observaciones || "Ajuste / Devolución").slice(0, 55)}`,
+      45,
+      160
+    );
+    startY = 172;
+  } else if (factura.observaciones) {
     doc.setFont("helvetica", "italic");
     doc.setFontSize(8);
     doc.setTextColor(100, 116, 139);
-    doc.text(`Nota / Observación: ${factura.observaciones.slice(0, 95)}`, 45, 148);
-    startY = 160;
+    doc.text(`Nota / Observación: ${factura.observaciones.slice(0, 95)}`, 45, 160);
+    startY = 172;
+  }
+
+  if (factura.anulada || factura.estadoFiscal === "ANULADO") {
+    doc.setFont("helvetica", "bold");
+    doc.setFontSize(10);
+    doc.setTextColor(220, 38, 38);
+    doc.text(
+      `COMPROBANTE ANULADO (FORMATO 608 - MOTIVO ${factura.motivoAnulacion608 || "04"})`,
+      45,
+      startY
+    );
+    startY += 14;
   }
 
   const columns = [
     { header: "N.º", dataKey: "index" },
     { header: "Código", dataKey: "code" },
-    { header: "Descripción del Producto / Insumo", dataKey: "name" },
+    { header: "Descripción del Bien / Medicamento", dataKey: "name" },
     { header: "Lote", dataKey: "lot" },
     { header: "Vence", dataKey: "expiration" },
     { header: "Cant.", dataKey: "quantity" },
     { header: "Precio Unit.", dataKey: "price" },
-    { header: "ITBIS 18%", dataKey: "itbis" },
-    { header: "Subtotal", dataKey: "subtotal" }
+    { header: "ITBIS", dataKey: "itbis" },
+    { header: "Valor Neto", dataKey: "subtotal" }
   ];
 
   const calcSubtotal =
@@ -945,6 +1006,8 @@ export const exportSaleInvoiceToPDF = (
           0
         );
 
+  const calcDescuento = Number(factura.descuentoTotal || 0);
+
   const calcTotal =
     factura.totalMonto !== undefined
       ? Number(factura.totalMonto)
@@ -952,13 +1015,16 @@ export const exportSaleInvoiceToPDF = (
 
   const rows: any[] = factura.items.map((item, idx) => {
     const parts = (item.fechaVencimiento || "").split("-");
-    const formattedDate = parts.length === 3 ? `${parts[2]}/${parts[1]}/${parts[0]}` : item.fechaVencimiento || "—";
+    const formattedDate =
+      parts.length === 3 ? `${parts[2]}/${parts[1]}/${parts[0]}` : item.fechaVencimiento || "—";
     const itemItbis =
       item.itbisMonto !== undefined
         ? Number(item.itbisMonto)
         : item.aplicaItbis
         ? Number(item.subtotal || 0) * 0.18
         : 0;
+    const tasaLabel =
+      item.tasaItbis !== undefined ? `${item.tasaItbis}%` : item.aplicaItbis || itemItbis > 0 ? "18%" : "Exento";
 
     return {
       index: idx + 1,
@@ -968,7 +1034,7 @@ export const exportSaleInvoiceToPDF = (
       expiration: formattedDate,
       quantity: item.cantidad,
       price: `RD$ ${Number(item.precioUnitario || 0).toFixed(2)}`,
-      itbis: item.aplicaItbis || itemItbis > 0 ? `RD$ ${itemItbis.toFixed(2)}` : "Exento",
+      itbis: itemItbis > 0 ? `RD$ ${itemItbis.toFixed(2)} (${tasaLabel})` : "Exento (0%)",
       subtotal: `RD$ ${Number(item.subtotal || 0).toFixed(2)}`
     };
   });
@@ -976,31 +1042,31 @@ export const exportSaleInvoiceToPDF = (
   rows.push({
     index: "",
     code: "",
-    name: "SUBTOTAL BASE",
+    name: "SUBTOTAL SIN ITBIS",
     lot: "",
     expiration: "",
     quantity: factura.totalUnidades as any,
     price: "—",
-    itbis: "—",
+    itbis: calcDescuento > 0 ? `Desc: -RD$ ${calcDescuento.toFixed(2)}` : "—",
     subtotal: `RD$ ${calcSubtotal.toFixed(2)}`
   });
 
   rows.push({
     index: "",
     code: "",
-    name: "ITBIS (18%)",
+    name: "TOTAL ITBIS FACTURADO",
     lot: "",
     expiration: "",
     quantity: "" as any,
     price: "—",
-    itbis: calcItbis > 0 ? "18%" : "0%",
+    itbis: calcItbis > 0 ? "Gravado" : "Exento",
     subtotal: `RD$ ${calcItbis.toFixed(2)}`
   });
 
   rows.push({
     index: "",
     code: "",
-    name: `TOTAL FACTURA (${(factura.concepto || "VENTA").toUpperCase()})`,
+    name: `MONTO TOTAL DEL COMPROBANTE (${factura.ncf || factura.numeroFactura})`,
     lot: "",
     expiration: "",
     quantity: factura.totalUnidades as any,
@@ -1030,12 +1096,12 @@ export const exportSaleInvoiceToPDF = (
       index: { cellWidth: 22, halign: "center" },
       code: { cellWidth: 45, fontStyle: "bold", textColor: [15, 118, 110] },
       name: { cellWidth: 135 },
-      lot: { cellWidth: 52, halign: "center" },
-      expiration: { cellWidth: 52, halign: "center" },
+      lot: { cellWidth: 50, halign: "center" },
+      expiration: { cellWidth: 50, halign: "center" },
       quantity: { cellWidth: 35, halign: "right", fontStyle: "bold" },
       price: { cellWidth: 55, halign: "right" },
-      itbis: { cellWidth: 55, halign: "right" },
-      subtotal: { cellWidth: 64, halign: "right", fontStyle: "bold" }
+      itbis: { cellWidth: 58, halign: "right" },
+      subtotal: { cellWidth: 65, halign: "right", fontStyle: "bold" }
     },
     margin: { left: 40, right: 40 },
     willDrawCell: (data) => {
@@ -1052,13 +1118,63 @@ export const exportSaleInvoiceToPDF = (
       doc.setFontSize(7.5);
       doc.setTextColor(148, 163, 184);
       const footerLeft =
-        inst.piePagina || `Factura ${factura.numeroFactura} (${factura.concepto}) • ${inst.nombre}`;
+        inst.piePagina || `Comprobante ${factura.ncf || factura.numeroFactura} • ${inst.nombre}`;
       doc.text(footerLeft, 40, doc.internal.pageSize.height - 20);
       doc.text(`Página ${data.pageNumber}`, doc.internal.pageSize.width - 80, doc.internal.pageSize.height - 20);
     }
   });
 
-  doc.save(`Factura_${factura.numeroFactura.replace(/[^a-zA-Z0-9_-]/g, "_")}.pdf`);
+  // Si es Facturación Electrónica e-CF (Serie E - Ley 32-23), dibujar Timbre Fiscal con Código QR y Código de Seguridad
+  if (isECF) {
+    const finalY = (doc as any).lastAutoTable?.finalY ? (doc as any).lastAutoTable.finalY + 14 : 520;
+    const pageHeight = doc.internal.pageSize.height;
+    const boxY = finalY + 115 < pageHeight - 30 ? finalY : 60;
+    if (finalY + 115 >= pageHeight - 30) {
+      doc.addPage();
+    }
+
+    doc.setDrawColor(203, 213, 225);
+    doc.setFillColor(248, 250, 252);
+    doc.roundedRect(40, boxY, 515, 95, 6, 6, "FD");
+
+    const qrUrl =
+      factura.urlQrDGII ||
+      `https://ecf.dgii.gov.do/${factura.ambienteDGII || "TesteCF"}/ConsultaTimbre?ENCF=${
+        factura.ncf
+      }&MontoTotal=${calcTotal.toFixed(2)}&CodigoSeguridad=${factura.codigoSeguridadECF || "000000"}`;
+    const qrDataUrl = generateQrCanvasPngDataUrl(qrUrl, 180);
+    if (qrDataUrl) {
+      try {
+        doc.addImage(qrDataUrl, "PNG", 48, boxY + 7, 80, 80);
+      } catch {}
+    }
+
+    doc.setFont("helvetica", "bold");
+    doc.setFontSize(9);
+    doc.setTextColor(15, 23, 42);
+    doc.text("REPRESENTACIÓN IMPRESA (RI) DE COMPROBANTE FISCAL ELECTRÓNICO (e-CF • LEY 32-23)", 138, boxY + 18);
+
+    doc.setFont("courier", "bold");
+    doc.setFontSize(9);
+    doc.setTextColor(15, 118, 110);
+    doc.text(`Código de Seguridad: ${factura.codigoSeguridadECF || "PENDIENTE"}`, 138, boxY + 34);
+    doc.text(`Fecha y Hora Firma:  ${factura.fechaHoraFirmaECF || `${factura.fecha} ${factura.hora}`}`, 138, boxY + 47);
+
+    doc.setFont("helvetica", "normal");
+    doc.setFontSize(8);
+    doc.setTextColor(71, 85, 105);
+    doc.text(
+      `Ambiente DGII: ${factura.ambienteDGII || "TesteCF"} • Estado Fiscal: ${
+        factura.estadoFiscal || "GENERADO_LOCAL"
+      }${factura.trackIdDGII ? ` • TrackId: ${factura.trackIdDGII}` : ""}`,
+      138,
+      boxY + 62
+    );
+    doc.text(`Verifique la validez de este e-CF escaneando el código QR o en ecf.dgii.gov.do`, 138, boxY + 75);
+  }
+
+  const fileSuffix = (factura.ncf || factura.numeroFactura).replace(/[^a-zA-Z0-9_-]/g, "_");
+  doc.save(`Comprobante_${fileSuffix}.pdf`);
 };
 
 /**

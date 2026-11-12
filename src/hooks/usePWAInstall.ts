@@ -20,6 +20,11 @@ export function usePWAInstall() {
   const [isIOS, setIsIOS] = useState<boolean>(false);
   const [isMobile, setIsMobile] = useState<boolean>(false);
   const [isInIframe, setIsInIframe] = useState<boolean>(false);
+  const [isBrave, setIsBrave] = useState<boolean>(false);
+  const [isSamsung, setIsSamsung] = useState<boolean>(false);
+  const [isFirefox, setIsFirefox] = useState<boolean>(false);
+  const [isEdge, setIsEdge] = useState<boolean>(false);
+  const [isChrome, setIsChrome] = useState<boolean>(false);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -41,7 +46,7 @@ export function usePWAInstall() {
       mediaQuery.addEventListener("change", handleDisplayModeChange);
     }
 
-    // Detect iOS and mobile devices
+    // Detect browser and device types
     const ua = window.navigator.userAgent.toLowerCase();
     const iosDevice =
       /iphone|ipad|ipod/.test(ua) ||
@@ -49,6 +54,26 @@ export function usePWAInstall() {
     const mobileDevice = iosDevice || /android|webos|blackberry|iemobile|opera mini/i.test(ua);
     setIsIOS(iosDevice);
     setIsMobile(mobileDevice);
+
+    const samsung = /samsungbrowser/i.test(ua);
+    const firefox = /firefox|fxios/i.test(ua);
+    const edge = /edg/i.test(ua);
+    setIsSamsung(samsung);
+    setIsFirefox(firefox);
+    setIsEdge(edge);
+
+    // Detect Brave Browser
+    const nav = window.navigator as any;
+    if (nav.brave && typeof nav.brave.isBrave === "function") {
+      nav.brave.isBrave().then((b: boolean) => {
+        setIsBrave(!!b);
+        setIsChrome(!b && /chrome|crios/i.test(ua) && !samsung && !edge);
+      }).catch(() => {
+        setIsChrome(/chrome|crios/i.test(ua) && !samsung && !edge);
+      });
+    } else {
+      setIsChrome(/chrome|crios/i.test(ua) && !samsung && !edge);
+    }
 
     // Detect if running inside an iframe (e.g. preview container)
     try {
@@ -68,6 +93,12 @@ export function usePWAInstall() {
       setDeferredPrompt(e as BeforeInstallPromptEvent);
     };
 
+    const handlePromptReady = () => {
+      if (window.__deferredPWAInstallPrompt) {
+        setDeferredPrompt(window.__deferredPWAInstallPrompt as BeforeInstallPromptEvent);
+      }
+    };
+
     const handleAppInstalled = () => {
       window.__deferredPWAInstallPrompt = null;
       setDeferredPrompt(null);
@@ -75,10 +106,12 @@ export function usePWAInstall() {
     };
 
     window.addEventListener("beforeinstallprompt", handleBeforeInstallPrompt);
+    window.addEventListener("pwa-prompt-ready", handlePromptReady);
     window.addEventListener("appinstalled", handleAppInstalled);
 
     return () => {
       window.removeEventListener("beforeinstallprompt", handleBeforeInstallPrompt);
+      window.removeEventListener("pwa-prompt-ready", handlePromptReady);
       window.removeEventListener("appinstalled", handleAppInstalled);
       if (mediaQuery.removeEventListener) {
         mediaQuery.removeEventListener("change", handleDisplayModeChange);
@@ -116,6 +149,11 @@ export function usePWAInstall() {
     isIOS,
     isMobile,
     isInIframe,
+    isBrave,
+    isSamsung,
+    isFirefox,
+    isEdge,
+    isChrome,
     install
   };
 }
