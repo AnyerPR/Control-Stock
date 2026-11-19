@@ -1,0 +1,4409 @@
+import React, { useState, useEffect, useMemo, useRef } from "react";
+import { doc, query, orderBy, onSnapshot, addDoc, updateDoc, getCountFromServer, writeBatch, limit, deleteDoc, runTransaction } from "firebase/firestore";
+import { db, tenantCollection, tenantDoc, getActiveFarmaciaId, DEFAULT_FARMACIA_ID } from "../firebase";
+import {
+  Usuario,
+  Solicitud,
+  RegistroHistorial,
+  CambioEstado,
+  Producto,
+  Lote,
+  Movimiento,
+  SolicitudItem,
+  DespachoLote,
+  Departamento,
+  ResponsableDepartamento,
+  TipoConsumoConfig,
+  ConsumoItem,
+  getUserAvailableCatalogos,
+  isCatalogAllowedForUser,
+  matchesCatalog
+} from "../types";
+import {
+  ensureDefaultTiposConsumoPresent,
+  ensureLicIrisAybarPresent,
+  loadLocalConsumos,
+  loadLocalResponsables,
+  loadLocalTiposConsumo,
+  mergeDepartamentosSinDuplicados,
+  persistConsumosConfig,
+  registrarConsumoAtomico,
+  registrarNuevoResponsableRapido,
+  validarRelacionResponsableDepartamento
+} from "../utils/consumosUtils";
+import { playSound } from "../utils/audio";
+import { logSystemEvent } from "../utils/chatHelper";
+import { isLotExpiredWithStock } from "../utils/inventoryStatus";
+import { FileText, ClipboardList, Plus, Search, Filter, AlertCircle, Calendar, Clock, RefreshCw, Layers, LoaderCircle, User, X, PlusCircle, Trash2, Sparkles, ShieldCheck, CheckCircle2, XCircle, Eye, ChevronDown, UserPlus, Globe } from "lucide-react";
+import ReabastecimientoInteligente from "./ReabastecimientoInteligente";
+
+interface SolicitudesPanelProps {
+  currentUser: Usuario;
+  activePeriod: string; // Ej: "Julio 2026"
+  showToast: (message: string) => void;
+  products: Producto[];
+  departamentos: Departamento[];
+  activeCatalogId: string;
+  catalogos: any[];
+  onSelectCatalog?: (catalogId: string) => void;
+}
+
+const DEPARTAMENTOS = [
+  "Farmacia",
+  "Laboratorio",
+  "Enfermería",
+  "Administración",
+  "Emergencia",
+  "Odontología",
+  "Quirófano",
+  "Urgencias",
+  "Pediatría",
+  "Gineco-Obstetricia",
+  "Cirugía General",
+  "Consulta Externa",
+  "Farmacia Clínica"
+];
+
+const cachedSolicitudesByTenant = new Map<
+  string,
+  { solicitudes: Solicitud[]; historial: RegistroHistorial[]; periods: string[] }
+>();
+
+export default function SolicitudesPanel({ currentUser, activePeriod, showToast, products, departamentos, activeCatalogId, catalogos, onSelectCatalog }: SolicitudesPanelProps) {
+  const tenantKey = currentUser.farmaciaId || getActiveFarmaciaId();
+  const initialCache = cachedSolicitudesByTenant.get(tenantKey);
+  const dynamicDepts = useMemo(
+    () => mergeDepartamentosSinDuplicados(departamentos, DEPARTAMENTOS).map((d) => d.nombre),
+    [departamentos]
+  );
+  const isAdmin = currentUser.rol === "Administrador";
+  const isWarehouseOrAdmin = isAdmin || currentUser.departamento === "Almacén y Suministro" || currentUser.departamento === "Farmacia";
+  const submittingRef = useRef(false);
+  const actionLockRef = useRef<string | null>(null);
+
+  // Extrae quién autorizó o rechazó una solicitud y cuándo (compatible con solicitudes nuevas y previas)
+  const getAuthorizationMetadata = (sol: Solicitud) => {
+    if (sol.usuarioAutorizador) {
+      return {
+        autorizador: sol.usuarioAutorizador,
+        fecha: sol.fechaAutorizacion || "",
+        hora: sol.horaAutorizacion || "",
+        accion: sol.accionAutorizacion || (sol.estado === "Rechazada" ? "Rechazada" : "Autorizada")
+      };
+    }
+    const cambios = sol.historialCambios || [];
+    for (let i = cambios.length - 1; i >= 0; i--) {
+      const c = cambios[i];
+      if (c.estado === "Aprobada" || c.estado === "Rechazada" || c.estado === "Cancelada") {
+        return {
+          autorizador: c.usuarioResponsable,
+          fecha: c.fecha,
+          hora: c.hora,
+          accion: c.estado === "Aprobada" ? "Autorizada" : c.estado
+        };
+      }
+    }
+    return null;
+  };
+
+  const getDaysToExpiration = (dateStr: string) => {
+    if (!dateStr) return Infinity;
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const expDate = new Date(dateStr + "T00:00:00");
+    return Math.ceil((expDate.getTime() - today.getTime()) / 86400000);
+  };
+
+  const [solicitudes, setSolicitudes] = useState<Solicitud[]>(() => initialCache?.solicitudes || []);
+  const [historialList, setHistorialList] = useState<RegistroHistorial[]>(() => initialCache?.historial || []);
+  const [loading, setLoading] = useState<boolean>(() => !initialCache);
+  const [activeSubTab, setActiveSubTab] = useState<"list" | "create" | "history" | "reabastecimiento">("reabastecimiento");
+
+  const availableCatalogosMemo = useMemo(
+    () => getUserAvailableCatalogos(currentUser, catalogos),
+    [currentUser, catalogos]
+  );
+
+  const getAvailableCatalogos = () => availableCatalogosMemo;
+
+  // Catalog Active state for new solicitud
+  const [solicitudCatalogId, setSolicitudCatalogId] = useState<string>(() => {
+    const allowed = getUserAvailableCatalogos(currentUser, catalogos);
+    if (activeCatalogId && allowed.some((c) => c.id === activeCatalogId)) {
+      return activeCatalogId;
+    }
+    return allowed[0]?.id || "";
+  });
+
+  // Sync solicitudCatalogId if activeCatalogId changes and draft is empty, or if current selection is not in availableCatalogos
+  useEffect(() => {
+    if (availableCatalogosMemo.length === 0) return;
+    const currentValid = availableCatalogosMemo.some((c) => c.id === solicitudCatalogId);
+    if (!solicitudCatalogId || !currentValid) {
+      const preferred = availableCatalogosMemo.find((c) => c.id === activeCatalogId) || availableCatalogosMemo[0];
+      if (preferred) {
+        setSolicitudCatalogId(preferred.id);
+      }
+    }
+  }, [availableCatalogosMemo, activeCatalogId, solicitudCatalogId]);
+
+  const handleSetSolicitudCatalogId = (catId: string) => {
+    const allowed = availableCatalogosMemo.some((c) => c.id === catId);
+    if (catId && !allowed) {
+      showToast("No tiene permisos para acceder a este catálogo.");
+      return;
+    }
+
+    if (solicitudItems.length > 0 && catId !== solicitudCatalogId) {
+      const confirmChange = window.confirm("Cambiar el catálogo eliminará los productos ya seleccionados en la solicitud actual. ¿Desea continuar?");
+      if (!confirmChange) return;
+      setSolicitudItems([]);
+    }
+    setSolicitudCatalogId(catId);
+    if (catId && onSelectCatalog) {
+      onSelectCatalog(catId);
+    }
+    playSound("click");
+  };
+
+  // Filters for Admin (Órdenes) or Operator (Mis Solicitudes)
+  const [deptFilter, setDeptFilter] = useState("todos");
+  const [statusFilter, setStatusFilter] = useState("todos");
+  const [searchTerm, setSearchTerm] = useState("");
+  const [periodFilter, setPeriodFilter] = useState(activePeriod);
+  const [availablePeriods, setAvailablePeriods] = useState<string[]>(() => initialCache?.periods || [activePeriod]);
+
+  // Advanced Filters for Orders Query
+  const [dateFilter, setDateFilter] = useState("");
+  const [creatorFilter, setCreatorFilter] = useState("");
+  const [orderNumberFilter, setOrderNumberFilter] = useState("");
+  const [catalogFilterState, setCatalogFilterState] = useState("todos");
+
+  // History Filter State & Pagination
+  const [histDeptFilter, setHistDeptFilter] = useState("todos");
+  const [histDateFilter, setHistDateFilter] = useState("");
+  const [histStatusFilter, setHistStatusFilter] = useState("todos");
+  const [histUserFilter, setHistUserFilter] = useState("");
+  const [historyViewMode, setHistoryViewMode] = useState<"solicitudes" | "eventos">("solicitudes");
+  const [visibleListCount, setVisibleListCount] = useState(25);
+  const [visibleHistoryCount, setVisibleHistoryCount] = useState(30);
+
+  // Create Form State
+  const [department, setDepartment] = useState(() => {
+    const canChooseDept =
+      currentUser.rol === "Administrador" ||
+      currentUser.departamento === "Farmacia" ||
+      currentUser.departamento === "Almacén y Suministro";
+    return canChooseDept
+      ? dynamicDepts[0] || DEPARTAMENTOS[0]
+      : currentUser.departamento || DEPARTAMENTOS[0];
+  });
+  const [description, setDescription] = useState("");
+  const [priority, setPriority] = useState<"Baja" | "Media" | "Alta">("Media");
+  const [observations, setObservations] = useState("");
+  const [creating, setCreating] = useState(false);
+
+  // Estado de Responsables y Tipos de Consumo para integración Solicitudes -> Consumos
+  const [responsablesList, setResponsablesList] = useState<ResponsableDepartamento[]>(() =>
+    loadLocalResponsables(tenantKey)
+  );
+  const [tiposConsumoList, setTiposConsumoList] = useState<TipoConsumoConfig[]>(() =>
+    loadLocalTiposConsumo(tenantKey)
+  );
+  const [responsableId, setResponsableId] = useState<string>("");
+  const [asignacionEspecialAdmin, setAsignacionEspecialAdmin] = useState<boolean>(false);
+  const [tipoConsumoId, setTipoConsumoId] = useState<string>("tipo-interno");
+  const [destinoExternoInstitucion, setDestinoExternoInstitucion] = useState<string>("");
+  const [destinoExternoPersona, setDestinoExternoPersona] = useState<string>("");
+
+  // Modal rápido "+ Nuevo" responsable dentro de Solicitudes
+  const [showNewRespModal, setShowNewRespModal] = useState<boolean>(false);
+  const [newRespNombre, setNewRespNombre] = useState<string>("");
+  const [newRespDept, setNewRespDept] = useState<string>(department);
+  const [newRespCargo, setNewRespCargo] = useState<string>("");
+
+  useEffect(() => {
+    const syncLocalConfig = () => {
+      setResponsablesList(loadLocalResponsables(tenantKey));
+      setTiposConsumoList(loadLocalTiposConsumo(tenantKey));
+    };
+    syncLocalConfig();
+    window.addEventListener("consumos_config_updated", syncLocalConfig);
+
+    const isLocalFileMode = typeof window !== "undefined" && window.location.protocol === "file:";
+    if (isLocalFileMode) {
+      return () => window.removeEventListener("consumos_config_updated", syncLocalConfig);
+    }
+
+    const configRef = tenantDoc("configuracion", "consumos_config");
+    const unsubCfg = onSnapshot(
+      configRef,
+      (snap) => {
+        if (snap.exists()) {
+          const data = snap.data();
+          if (Array.isArray(data.responsables)) {
+            setResponsablesList(ensureLicIrisAybarPresent(data.responsables, tenantKey));
+          }
+          if (Array.isArray(data.tiposConsumo)) {
+            setTiposConsumoList(ensureDefaultTiposConsumoPresent(data.tiposConsumo, tenantKey));
+          }
+        }
+      },
+      () => {}
+    );
+    return () => {
+      unsubCfg();
+      window.removeEventListener("consumos_config_updated", syncLocalConfig);
+    };
+  }, [tenantKey]);
+
+  const activeResponsablesForDept = useMemo(() => {
+    const active = responsablesList.filter((r) => r.activo !== false);
+    if (isAdmin && asignacionEspecialAdmin) return active;
+    return active.filter(
+      (r) => r.departamentoNombre.trim().toLowerCase() === (department || "").trim().toLowerCase()
+    );
+  }, [responsablesList, department, isAdmin, asignacionEspecialAdmin]);
+
+  useEffect(() => {
+    const currentResp = responsablesList.find((r) => r.id === responsableId);
+    if (currentResp) {
+      const check = validarRelacionResponsableDepartamento({
+        responsable: currentResp,
+        departamentoNombre: department,
+        esAdmin: isAdmin,
+        asignacionEspecialAdmin
+      });
+      if (check.valido) return;
+    }
+    const matching = activeResponsablesForDept[0];
+    setResponsableId(matching ? matching.id : "");
+  }, [department, activeResponsablesForDept, responsablesList, responsableId, isAdmin, asignacionEspecialAdmin]);
+
+  const selectedResponsableObj = useMemo(
+    () => responsablesList.find((r) => r.id === responsableId) || null,
+    [responsablesList, responsableId]
+  );
+
+  const activeTiposConsumo = useMemo(
+    () => tiposConsumoList.filter((t) => t.activo !== false),
+    [tiposConsumoList]
+  );
+
+  const selectedTipoConsumoObj = useMemo(
+    () => activeTiposConsumo.find((t) => t.id === tipoConsumoId) || activeTiposConsumo[0] || null,
+    [activeTiposConsumo, tipoConsumoId]
+  );
+
+  const handleQuickCreateResponsableInSolicitud = async (e: React.FormEvent) => {
+    e.preventDefault();
+    try {
+      const targetDept = newRespDept || department;
+      const res = await registrarNuevoResponsableRapido({
+        nombre: newRespNombre,
+        departamentoNombre: targetDept,
+        cargo: newRespCargo,
+        sedeId: tenantKey,
+        creadoPor: `${currentUser.nombre} (${currentUser.usuario})`,
+        existingResponsables: responsablesList
+      });
+      if (!res.exito || !res.responsable) {
+        playSound("negative");
+        showToast(res.error || "No se pudo registrar el responsable.");
+        return;
+      }
+      setResponsablesList(res.listaActualizada);
+      await persistConsumosConfig(res.listaActualizada, tiposConsumoList, tenantKey);
+
+      const canChooseDept =
+        currentUser.rol === "Administrador" ||
+        currentUser.departamento === "Farmacia" ||
+        currentUser.departamento === "Almacén y Suministro";
+      if (canChooseDept && targetDept !== department) {
+        setDepartment(targetDept);
+      }
+      setResponsableId(res.responsable.id);
+      setNewRespNombre("");
+      setNewRespCargo("");
+      setShowNewRespModal(false);
+      playSound("positive");
+      showToast(`Responsable "${res.responsable.nombre}" registrado y asociado a ${res.responsable.departamentoNombre}.`);
+    } catch (err: any) {
+      playSound("negative");
+      showToast(err?.message || "No se pudo registrar el responsable.");
+    }
+  };
+
+  // Sync department with currentUser.departamento for non-admin/non-warehouse operators (e.g. Laboratorio)
+  useEffect(() => {
+    const canChooseDept =
+      currentUser.rol === "Administrador" ||
+      currentUser.departamento === "Farmacia" ||
+      currentUser.departamento === "Almacén y Suministro";
+    if (!canChooseDept && currentUser.departamento && department !== currentUser.departamento) {
+      setDepartment(currentUser.departamento);
+    }
+  }, [currentUser.rol, currentUser.departamento, department]);
+
+  // Custom structured products in solicitud creation
+  const [solicitudItems, setSolicitudItems] = useState<Omit<SolicitudItem, "id">[]>([]);
+  const [selectedProdCode, setSelectedProdCode] = useState("");
+  const [qtyRequested, setQtyRequested] = useState("1");
+  const [itemSearch, setItemSearch] = useState("");
+  const [onlyUnverified, setOnlyUnverified] = useState(false);
+
+  // Edit Status State
+  const [selectedSolicitud, setSelectedSolicitud] = useState<Solicitud | null>(null);
+  const [newStatus, setNewState] = useState<
+    "Pendiente" | "Aprobada" | "Rechazada" | "En Proceso" | "En preparación" | "Parcialmente entregada" | "Entregada" | "Cancelada"
+  >("Pendiente");
+  const [statusObs, setStatusObs] = useState("");
+  const [updating, setUpdating] = useState(false);
+
+  // Listen to Solicitudes in real-time
+  useEffect(() => {
+    const isLocalFileMode = typeof window !== "undefined" && window.location.protocol === "file:";
+
+    if (isLocalFileMode) {
+      const loadOfflineData = () => {
+        // 1. Periods
+        let storedSol = localStorage.getItem("offline_solicitudes");
+        let solList: Solicitud[] = [];
+        if (storedSol) {
+          try { solList = JSON.parse(storedSol); } catch (e) {}
+        }
+        const periodsSet = new Set<string>();
+        periodsSet.add(activePeriod);
+        solList.forEach(s => {
+          if (s.periodo) periodsSet.add(s.periodo);
+        });
+        const periodsArr = Array.from(periodsSet).sort();
+        setAvailablePeriods(periodsArr);
+        setSolicitudes(solList);
+
+        // 2. History
+        let storedHist = localStorage.getItem("offline_historial");
+        let histList: RegistroHistorial[] = [];
+        if (storedHist) {
+          try { histList = JSON.parse(storedHist); } catch (e) {}
+        }
+        setHistorialList(histList);
+        cachedSolicitudesByTenant.set(tenantKey, {
+          solicitudes: solList,
+          historial: histList,
+          periods: periodsArr
+        });
+        setLoading(false);
+      };
+
+      loadOfflineData();
+
+      window.addEventListener("offline_solicitudes_update", loadOfflineData);
+      window.addEventListener("offline_historial_update", loadOfflineData);
+      return () => {
+        window.removeEventListener("offline_solicitudes_update", loadOfflineData);
+        window.removeEventListener("offline_historial_update", loadOfflineData);
+      };
+    }
+
+    if (!cachedSolicitudesByTenant.has(tenantKey)) {
+      setLoading(true);
+    }
+    const colRef = tenantCollection("solicitudes");
+
+    // Main query ordered by timestamp (also populates availablePeriods in a single listener)
+    const q = query(colRef, orderBy("timestamp", "desc"));
+    
+    // Track known requests and their states
+    let isFirstLoad = true;
+    let knownRequestsMap = new Map<string, { id: string, numeroSolicitud: string, departamento: string, estado: string, usuarioCreador: string }>();
+
+    const unsub = onSnapshot(q, (snapshot) => {
+      const list: Solicitud[] = [];
+      const periodsSet = new Set<string>();
+      periodsSet.add(activePeriod);
+      const newRequestsMap = new Map<string, { id: string, numeroSolicitud: string, departamento: string, estado: string, usuarioCreador: string }>();
+      
+      snapshot.forEach((docSnap) => {
+        const data = docSnap.data() as Omit<Solicitud, "id">;
+        const item = { id: docSnap.id, ...data } as Solicitud;
+        list.push(item);
+        if (item.periodo) periodsSet.add(item.periodo);
+        newRequestsMap.set(item.id, {
+          id: item.id,
+          numeroSolicitud: item.numeroSolicitud,
+          departamento: item.departamento,
+          estado: item.estado,
+          usuarioCreador: item.usuarioCreador
+        });
+      });
+
+      const periodsArr = Array.from(periodsSet).sort();
+      setAvailablePeriods(periodsArr);
+      setSolicitudes(list);
+      const prevCache = cachedSolicitudesByTenant.get(tenantKey);
+      cachedSolicitudesByTenant.set(tenantKey, {
+        solicitudes: list,
+        historial: prevCache?.historial || [],
+        periods: periodsArr
+      });
+      setLoading(false);
+
+      // Play sound and show toast if a request is created or its state changes
+      if (!isFirstLoad && list.length > 0) {
+        newRequestsMap.forEach((newVal, id) => {
+          const oldVal = knownRequestsMap.get(id);
+          const selfCreator = `${currentUser.nombre} (${currentUser.usuario})`;
+          
+          if (!oldVal) {
+            if (newVal.usuarioCreador !== selfCreator) {
+              playSound("notify");
+              showToast(`Nueva solicitud creada: ${newVal.numeroSolicitud} - ${newVal.departamento}`);
+            }
+          } else if (oldVal.estado !== newVal.estado) {
+            const belongsToDept = currentUser.departamento === newVal.departamento;
+            const canSeeAll = currentUser.rol === "Administrador" || currentUser.departamento === "Almacén y Suministro" || currentUser.departamento === "Farmacia";
+            
+            if (belongsToDept || canSeeAll) {
+              playSound("notify");
+              showToast(`Solicitud ${newVal.numeroSolicitud} cambió a: ${newVal.estado}`);
+            }
+          }
+        });
+      }
+
+      knownRequestsMap = newRequestsMap;
+      isFirstLoad = false;
+    });
+
+    // Listen to global history
+    const histCol = tenantCollection("historial");
+    const qHist = query(histCol, orderBy("timestamp", "desc"), limit(100));
+    const unsubHist = onSnapshot(qHist, (snapshot) => {
+      const list: RegistroHistorial[] = [];
+      snapshot.forEach(docSnap => {
+        list.push({ id: docSnap.id, ...docSnap.data() } as RegistroHistorial);
+      });
+      setHistorialList(list);
+    });
+
+    return () => {
+      unsub();
+      unsubHist();
+    };
+  }, [activePeriod, currentUser, currentUser.farmaciaId]);
+
+  const submitSolicitudPayload = async (
+    rawItems: Omit<SolicitudItem, "id">[],
+    rawDesc: string,
+    rawObs: string,
+    allowOutOfStockReplenishment = false
+  ) => {
+    if (creating || submittingRef.current) return;
+
+    const targetCatalogId = solicitudCatalogId || activeCatalogId;
+    if (!targetCatalogId) {
+      showToast("Por favor seleccione un catálogo de trabajo antes de registrar la solicitud.");
+      return;
+    }
+
+    // Deduplicar ítems por productoCodigo para evitar productos duplicados en una misma solicitud
+    const dedupedMap = new Map<string, Omit<SolicitudItem, "id">>();
+    for (const item of rawItems) {
+      const code = (item.productoCodigo || "").trim();
+      if (!code) continue;
+      if (dedupedMap.has(code)) {
+        const existing = dedupedMap.get(code)!;
+        dedupedMap.set(code, {
+          ...existing,
+          cantidadSolicitada: Number(existing.cantidadSolicitada || 0) + Number(item.cantidadSolicitada || 0),
+          cantidadEntregada: Number(existing.cantidadEntregada || 0) + Number(item.cantidadEntregada || item.cantidadSolicitada || 0)
+        });
+      } else {
+        dedupedMap.set(code, { ...item });
+      }
+    }
+    const dedupedItems = Array.from(dedupedMap.values());
+
+    const desc = rawDesc.trim();
+    if (!desc && dedupedItems.length === 0) {
+      playSound("negative");
+      showToast("Por favor agregue una descripción o añada insumos específicos a la solicitud.");
+      return;
+    }
+
+    // Validar existencias si no es un pedido de Reabastecimiento Inteligente
+    for (const item of dedupedItems) {
+      if (item.cantidadSolicitada <= 0) {
+        playSound("negative");
+        showToast(`La cantidad solicitada para "${item.productoNombre}" debe ser mayor a 0.`);
+        return;
+      }
+      const isReplenishmentItem =
+        allowOutOfStockReplenishment || Boolean(item.justificacion?.includes("Reabastecimiento"));
+
+      if (!isReplenishmentItem) {
+        const prod = products?.find((p) => p.codigo === item.productoCodigo);
+        const totalSys = prod?.lotes?.reduce((acc, l) => acc + Number(l.cantidad || 0), 0) || 0;
+        const totalPhys = prod?.lotes?.reduce((acc, l) => acc + Number(l.cantidadF || 0), 0) || 0;
+        const maxAvailableBoth = Math.min(totalSys, totalPhys);
+        if (!prod || item.cantidadSolicitada > totalSys || item.cantidadSolicitada > totalPhys) {
+          playSound("negative");
+          showToast(
+            `Stock insuficiente para "${item.productoNombre}". Solicitado: ${item.cantidadSolicitada} und. | Disponible en Sistema: ${totalSys} und. | Físico: ${totalPhys} und. (Máx: ${maxAvailableBoth} und.)`
+          );
+          return;
+        }
+      }
+    }
+
+    const canChooseDept =
+      currentUser.rol === "Administrador" ||
+      currentUser.departamento === "Farmacia" ||
+      currentUser.departamento === "Almacén y Suministro";
+    const effectiveDept = canChooseDept
+      ? department
+      : currentUser.departamento || department;
+
+    // Resolver responsable y tipo de consumo para la solicitud
+    let resolvedResponsable = selectedResponsableObj;
+    if (!resolvedResponsable) {
+      resolvedResponsable =
+        responsablesList.find(
+          (r) =>
+            r.activo !== false &&
+            r.departamentoNombre.trim().toLowerCase() === effectiveDept.trim().toLowerCase()
+        ) || null;
+    }
+
+    if (!allowOutOfStockReplenishment) {
+      if (!resolvedResponsable) {
+        playSound("negative");
+        showToast(`Seleccione o registre con el botón "Nuevo" un Responsable para el departamento ${effectiveDept}.`);
+        return;
+      }
+      const relCheck = validarRelacionResponsableDepartamento({
+        responsable: resolvedResponsable,
+        departamentoNombre: effectiveDept,
+        esAdmin: isAdmin,
+        asignacionEspecialAdmin
+      });
+      if (!relCheck.valido) {
+        playSound("negative");
+        showToast(relCheck.mensaje || "El responsable no corresponde al departamento seleccionado.");
+        return;
+      }
+      if (selectedTipoConsumoObj?.categoria === "Externo" && !destinoExternoInstitucion.trim()) {
+        playSound("negative");
+        showToast("Para solicitudes con consumo Externo debe especificar el Destino o Institución receptora.");
+        return;
+      }
+    }
+
+    const finalDesc =
+      desc ||
+      dedupedItems.map((it) => `${it.productoNombre} (Cant: ${it.cantidadSolicitada})`).join(", ");
+
+    // Construir huella única (fingerprint) para evitar guardar dos veces la misma solicitud
+    const itemsSignature = dedupedItems
+      .map((it) => `${it.productoCodigo}:${it.cantidadSolicitada}`)
+      .sort()
+      .join("|");
+    const requestFingerprint = `${effectiveDept}::${targetCatalogId}::${currentUser.usuario.toLowerCase()}::${itemsSignature}::${finalDesc.toLowerCase()}`;
+
+    // Verificar si ya existe una solicitud Pendiente con la misma huella en los últimos 3 minutos
+    const nowMs = Date.now();
+    const recentDuplicate = solicitudes.find(
+      (s) =>
+        s.estado === "Pendiente" &&
+        nowMs - (s.timestamp || 0) < 3 * 60 * 1000 &&
+        (s.requestFingerprint === requestFingerprint ||
+          (s.departamento === effectiveDept &&
+            s.usuarioCreador === `${currentUser.nombre} (${currentUser.usuario})` &&
+            s.descripcion === finalDesc &&
+            (s.items || []).length === dedupedItems.length))
+    );
+
+    if (recentDuplicate) {
+      playSound("negative");
+      showToast(
+        `Prevención de duplicados: Ya registraste esta misma solicitud (${recentDuplicate.numeroSolicitud}) hace unos instantes.`
+      );
+      return;
+    }
+
+    submittingRef.current = true;
+    setCreating(true);
+    playSound("action");
+
+    const isLocalFileMode = typeof window !== "undefined" && window.location.protocol === "file:";
+
+    // Calcular máximo número SOL-XXXX actual para evitar números duplicados
+    const maxExistingSolNum = solicitudes.reduce((maxAcc, s) => {
+      const m = (s.numeroSolicitud || "").match(/(\d+)/);
+      const n = m ? parseInt(m[1], 10) : 0;
+      return n > maxAcc ? n : maxAcc;
+    }, 0);
+
+    const consumoPatchForSol = {
+      responsableId: resolvedResponsable?.id || "resp-default",
+      responsableNombre: resolvedResponsable?.nombre || currentUser.nombre,
+      responsableCargo: resolvedResponsable?.cargo || "",
+      asignacionEspecialAdmin: Boolean(isAdmin && asignacionEspecialAdmin),
+      tipoConsumoId: selectedTipoConsumoObj?.id || "tipo-interno",
+      tipoConsumoNombre: selectedTipoConsumoObj?.nombre || "Interno",
+      categoriaConsumo: selectedTipoConsumoObj?.categoria || "Interno",
+      ...(selectedTipoConsumoObj?.categoria === "Externo"
+        ? {
+            destinoExternoInstitucion: destinoExternoInstitucion.trim(),
+            destinoExternoPersona: destinoExternoPersona.trim()
+          }
+        : {})
+    };
+
+    try {
+      if (isLocalFileMode) {
+        let storedSol = localStorage.getItem("offline_solicitudes");
+        let solList: Solicitud[] = [];
+        if (storedSol) {
+          try { solList = JSON.parse(storedSol); } catch (e) {}
+        }
+        const nextNumeric = Math.max(solList.length, maxExistingSolNum) + 1;
+        const nextNum = String(nextNumeric).padStart(4, "0");
+        const numeroSolicitud = `SOL-${nextNum}`;
+
+        const now = new Date();
+        const localDate = now.toLocaleDateString("en-CA"); // YYYY-MM-DD
+        const localTime = now.toLocaleTimeString("es-DO", { hour12: false }).slice(0, 5); // HH:MM
+
+        const newId = `sol-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+        const docData: Solicitud = {
+          id: newId,
+          numeroSolicitud,
+          fecha: localDate,
+          hora: localTime,
+          departamento: effectiveDept,
+          ...consumoPatchForSol,
+          usuarioCreador: `${currentUser.nombre} (${currentUser.usuario})`,
+          descripcion: finalDesc,
+          prioridad: priority,
+          estado: "Pendiente",
+          observaciones: rawObs.trim(),
+          periodo: activePeriod,
+          timestamp: Date.now(),
+          catalogId: targetCatalogId,
+          requestFingerprint,
+          historialCambios: [
+            {
+              estado: "Pendiente",
+              usuarioResponsable: `${currentUser.nombre} (${currentUser.usuario})`,
+              fecha: localDate,
+              hora: localTime
+            }
+          ],
+          items: dedupedItems.map((it, idx) => ({
+            id: `item-${Date.now()}-${idx}-${Math.random().toString(36).slice(2, 6)}`,
+            ...it
+          }))
+        };
+
+        solList.unshift(docData);
+        localStorage.setItem("offline_solicitudes", JSON.stringify(solList));
+
+        let storedHist = localStorage.getItem("offline_historial");
+        let histList: RegistroHistorial[] = [];
+        if (storedHist) {
+          try { histList = JSON.parse(storedHist); } catch (e) {}
+        }
+        const histData: RegistroHistorial = {
+          id: `hist-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+          tipo: "Creación",
+          solicitudId: newId,
+          numeroSolicitud,
+          descripcionEvent: `Se creó la solicitud ${numeroSolicitud} para el departamento de ${effectiveDept} (Responsable: ${consumoPatchForSol.responsableNombre} • Consumo: ${consumoPatchForSol.tipoConsumoNombre}).`,
+          usuarioResponsable: `${currentUser.nombre} (${currentUser.usuario})`,
+          fecha: localDate,
+          hora: localTime,
+          timestamp: Date.now(),
+          catalogId: targetCatalogId
+        };
+        histList.unshift(histData);
+        localStorage.setItem("offline_historial", JSON.stringify(histList));
+
+        logSystemEvent(`🆕 **Nueva Solicitud**: Se creó la solicitud **${numeroSolicitud}** de **${effectiveDept}** (Responsable: **${consumoPatchForSol.responsableNombre}**) por **${currentUser.nombre}** (Prioridad: ${priority}).`);
+
+        window.dispatchEvent(new Event("offline_solicitudes_update"));
+        window.dispatchEvent(new Event("offline_historial_update"));
+
+        setDescription("");
+        setObservations("");
+        setPriority("Media");
+        setDepartment(canChooseDept ? dynamicDepts[0] || DEPARTAMENTOS[0] : effectiveDept);
+        setSolicitudItems([]);
+        setDestinoExternoInstitucion("");
+        setDestinoExternoPersona("");
+        setActiveSubTab("history");
+        playSound("positive");
+        showToast(`Solicitud ${numeroSolicitud} creada y registrada en el Historial.`);
+        return;
+      }
+
+      // 1. Obtener siguiente número único SOL-XXXX sin colisión
+      const colRef = tenantCollection("solicitudes");
+      const countSnapshot = await getCountFromServer(colRef);
+      const nextNumeric = Math.max(countSnapshot.data().count, maxExistingSolNum) + 1;
+      const nextNum = String(nextNumeric).padStart(4, "0");
+      const numeroSolicitud = `SOL-${nextNum}`;
+
+      const now = new Date();
+      const localDate = now.toLocaleDateString("en-CA"); // YYYY-MM-DD
+      const localTime = now.toLocaleTimeString("es-DO", { hour12: false }).slice(0, 5); // HH:MM
+
+      const docData: Omit<Solicitud, "id"> = {
+        numeroSolicitud,
+        fecha: localDate,
+        hora: localTime,
+        departamento: effectiveDept,
+        ...consumoPatchForSol,
+        usuarioCreador: `${currentUser.nombre} (${currentUser.usuario})`,
+        descripcion: finalDesc,
+        prioridad: priority,
+        estado: "Pendiente",
+        observaciones: rawObs.trim(),
+        periodo: activePeriod,
+        timestamp: Date.now(),
+        catalogId: targetCatalogId,
+        requestFingerprint,
+        historialCambios: [
+          {
+            estado: "Pendiente",
+            usuarioResponsable: `${currentUser.nombre} (${currentUser.usuario})`,
+            fecha: localDate,
+            hora: localTime
+          }
+        ],
+        items: dedupedItems.map((it, idx) => ({
+          id: `item-${Date.now()}-${idx}-${Math.random().toString(36).slice(2, 6)}`,
+          ...it
+        }))
+      };
+
+      const docRef = await addDoc(colRef, docData);
+
+      const histCol = tenantCollection("historial");
+      const histData: Omit<RegistroHistorial, "id"> = {
+        tipo: "Creación",
+        solicitudId: docRef.id,
+        numeroSolicitud,
+        descripcionEvent: `Se creó la solicitud ${numeroSolicitud} para el departamento de ${effectiveDept} (Responsable: ${consumoPatchForSol.responsableNombre} • Consumo: ${consumoPatchForSol.tipoConsumoNombre}).`,
+        usuarioResponsable: `${currentUser.nombre} (${currentUser.usuario})`,
+        fecha: localDate,
+        hora: localTime,
+        timestamp: Date.now(),
+        catalogId: targetCatalogId
+      };
+      await addDoc(histCol, histData);
+
+      logSystemEvent(`🆕 **Nueva Solicitud**: Se creó la solicitud **${numeroSolicitud}** de **${effectiveDept}** (Responsable: **${consumoPatchForSol.responsableNombre}**) por **${currentUser.nombre}** (Prioridad: ${priority}).`);
+
+      setDescription("");
+      setObservations("");
+      setPriority("Media");
+      setDepartment(canChooseDept ? dynamicDepts[0] || DEPARTAMENTOS[0] : effectiveDept);
+      setSolicitudItems([]);
+      setDestinoExternoInstitucion("");
+      setDestinoExternoPersona("");
+      setActiveSubTab("history");
+      playSound("positive");
+      showToast(`Solicitud ${numeroSolicitud} registrada exitosamente en el Historial.`);
+    } catch (err) {
+      console.error("Error creating request:", err);
+      showToast("Error al guardar la solicitud.");
+    } finally {
+      submittingRef.current = false;
+      setCreating(false);
+    }
+  };
+
+  const handleCreateRequest = async (e: React.FormEvent) => {
+    e.preventDefault();
+    await submitSolicitudPayload(solicitudItems, description, observations, false);
+  };
+
+  const [deliveryItems, setDeliveryItems] = useState<SolicitudItem[]>([]);
+
+  const getItemDeliveryLots = (item: SolicitudItem): DespachoLote[] => {
+    if (item.despachoLotes?.length) return item.despachoLotes;
+    if (item.loteId && item.cantidadEntregada > 0) {
+      return [{
+        loteId: item.loteId,
+        loteNumero: item.loteNumero || "",
+        cantidad: item.cantidadEntregada
+      }];
+    }
+    return [];
+  };
+
+  const getExportItems = (sol: Solicitud) => {
+    if (selectedSolicitud && selectedSolicitud.id === sol.id && deliveryItems && deliveryItems.length > 0) {
+      return deliveryItems;
+    }
+    const itemsList = sol.items || [];
+    if (itemsList.length === 0) {
+      return [{
+        id: "fallback-item",
+        productoCodigo: "Gral",
+        productoNombre: sol.descripcion,
+        cantidadSolicitada: 1,
+        cantidadEntregada: 1,
+        motivoDiferencia: ""
+      }];
+    }
+    return itemsList.map(item => {
+      const cantidadEntregada = item.cantidadEntregada !== undefined ? item.cantidadEntregada : item.cantidadSolicitada;
+      return {
+        ...item,
+        cantidadEntregada,
+        despachoLotes: item.despachoLotes?.length
+          ? item.despachoLotes
+          : item.loteId && cantidadEntregada > 0
+            ? [{ loteId: item.loteId, loteNumero: item.loteNumero || "", cantidad: cantidadEntregada }]
+            : []
+      };
+    });
+  };
+
+  const exportToWord = (sol: Solicitud) => {
+    const items = getExportItems(sol);
+    let total = 0;
+    
+    const itemsRows = items.map((item, idx) => {
+      const prod = products?.find(p => p.codigo === item.productoCodigo);
+      const deliveryLots = getItemDeliveryLots(item);
+      const qty = item.cantidadEntregada;
+      const sub = deliveryLots.length && prod
+        ? deliveryLots.reduce((sum, allocation) => {
+            const lot = prod.lotes?.find((entry: Lote) => entry.id === allocation.loteId);
+            return sum + allocation.cantidad * Number(lot?.precio || 0);
+          }, 0)
+        : qty * Number(prod?.lotes?.[0]?.precio || 0);
+      const price = qty > 0 ? sub / qty : 0;
+      const lotDetails = deliveryLots.map(allocation => `Lote ${allocation.loteNumero || allocation.loteId}: ${allocation.cantidad}`).join("<br/>") || "—";
+      total += sub;
+      
+      return `
+        <tr>
+          <td style="border: 1px solid #cbd5e1; padding: 10px; text-align: center; font-size: 11px;">${idx + 1}</td>
+          <td style="border: 1px solid #cbd5e1; padding: 10px; text-align: left; font-size: 11px; font-weight: bold; color: #1e293b;">${item.productoCodigo}</td>
+          <td style="border: 1px solid #cbd5e1; padding: 10px; text-align: left; font-size: 11px;">${item.productoNombre}</td>
+          <td style="border: 1px solid #cbd5e1; padding: 10px; text-align: center; font-size: 11px;">${item.cantidadSolicitada}</td>
+          <td style="border: 1px solid #cbd5e1; padding: 10px; text-align: center; font-size: 11px; font-weight: bold;">${qty}</td>
+          <td style="border: 1px solid #cbd5e1; padding: 10px; text-align: left; font-size: 11px;">${lotDetails}</td>
+          <td style="border: 1px solid #cbd5e1; padding: 10px; text-align: right; font-size: 11px;">RD$ ${price.toFixed(2)}</td>
+          <td style="border: 1px solid #cbd5e1; padding: 10px; text-align: right; font-size: 11px; font-weight: bold;">RD$ ${sub.toFixed(2)}</td>
+        </tr>
+      `;
+    }).join("");
+
+    const wordHtml = `
+      <html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:w="urn:schemas-microsoft-com:office:word" xmlns="http://www.w3.org/TR/REC-html40">
+      <head>
+        <meta charset="utf-8">
+        <title>Orden de Servicio - ${sol.numeroSolicitud}</title>
+        <style>
+          body { font-family: 'Segoe UI', Arial, sans-serif; color: #334155; margin: 40px; }
+          .header-table { width: 100%; border-collapse: collapse; margin-bottom: 30px; }
+          .title { font-size: 20px; font-weight: bold; color: #0f766e; text-transform: uppercase; }
+          .subtitle { font-size: 11px; color: #64748b; margin-top: 5px; }
+          .info-box { background-color: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; padding: 15px; margin-bottom: 25px; }
+          .info-table { width: 100%; border-collapse: collapse; }
+          .info-table td { padding: 4px 0; font-size: 12px; }
+          .info-label { font-weight: bold; color: #475569; width: 30%; }
+          .info-value { color: #1e293b; }
+          .product-table { width: 100%; border-collapse: collapse; margin-top: 20px; margin-bottom: 25px; }
+          .product-table th { background-color: #0f766e; color: #ffffff; font-size: 11px; font-weight: bold; text-transform: uppercase; padding: 10px; text-align: left; border: 1px solid #0f766e; }
+          .total-section { text-align: right; font-size: 14px; margin-top: 20px; }
+          .obs-box { margin-top: 30px; padding: 15px; border-left: 4px solid #0f766e; background-color: #f8fafc; font-size: 12px; }
+          .signatures { margin-top: 60px; width: 100%; }
+          .signatures td { text-align: center; font-size: 11px; width: 50%; }
+          .sig-line { width: 60%; border-top: 1px solid #cbd5e1; margin: 0 auto 8px auto; }
+        </style>
+      </head>
+      <body>
+        <table class="header-table">
+          <tr>
+            <td style="vertical-align: top;">
+              <div class="title">CONTROL DE STOCK - ORDEN DE SERVICIO</div>
+              <div class="subtitle">Suministros Hospitalarios &bull; Dr. José Manuel Rodríguez</div>
+            </td>
+            <td style="text-align: right; vertical-align: top; font-size: 12px; font-weight: bold; color: #0f766e;">
+              ${sol.numeroSolicitud}
+            </td>
+          </tr>
+        </table>
+
+        <div class="info-box">
+          <table class="info-table">
+            <tr>
+              <td class="info-label">Número de Orden:</td>
+              <td class="info-value"><strong>${sol.numeroSolicitud}</strong></td>
+              <td class="info-label">Fecha / Hora:</td>
+              <td class="info-value">${new Date(sol.fecha + "T00:00:00").toLocaleDateString("es-DO")} a las ${sol.hora}</td>
+            </tr>
+            <tr>
+              <td class="info-label">Departamento Solicitante:</td>
+              <td class="info-value"><strong>${sol.departamento}</strong></td>
+              <td class="info-label">Usuario Solicitante:</td>
+              <td class="info-value">${sol.usuarioCreador}</td>
+            </tr>
+            <tr>
+              <td class="info-label">Estado de la Orden:</td>
+              <td class="info-value"><span style="color: #0f766e; font-weight: bold;">${sol.estado}</span></td>
+              <td class="info-label">Periodo Mensual:</td>
+              <td class="info-value">${sol.periodo}</td>
+            </tr>
+          </table>
+        </div>
+
+        <h3 style="font-size: 14px; font-weight: bold; color: #1e293b; margin-bottom: 10px; text-transform: uppercase;">Detalle de Insumos Despachados</h3>
+        <table class="product-table">
+          <thead>
+            <tr>
+              <th style="width: 5%; text-align: center;">#</th>
+              <th style="width: 15%;">Código</th>
+              <th style="width: 35%;">Nombre del Insumo / Medicamento</th>
+              <th style="width: 10%; text-align: center;">Cant. Sol.</th>
+              <th style="width: 10%; text-align: center;">Cant. Ent.</th>
+              <th style="width: 20%;">Lotes despachados</th>
+              <th style="width: 12%; text-align: right;">Precio Unit.</th>
+              <th style="width: 13%; text-align: right;">Importe</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${itemsRows}
+          </tbody>
+        </table>
+
+        <div class="total-section">
+          <table style="width: 100%; border-collapse: collapse;">
+            <tr>
+              <td style="width: 70%; border: none;"></td>
+              <td style="width: 15%; text-align: right; padding: 5px; font-size: 12px; color: #475569;">Subtotal:</td>
+              <td style="width: 15%; text-align: right; padding: 5px; font-size: 12px; color: #475569; font-weight: bold;">RD$ ${total.toFixed(2)}</td>
+            </tr>
+            <tr>
+              <td style="border: none;"></td>
+              <td style="text-align: right; padding: 5px; font-size: 14px; font-weight: bold; color: #0f766e; border-top: 2px solid #cbd5e1;">TOTAL NETO:</td>
+              <td style="text-align: right; padding: 5px; font-size: 14px; font-weight: bold; color: #0f766e; border-top: 2px solid #cbd5e1;">RD$ ${total.toFixed(2)}</td>
+            </tr>
+          </table>
+        </div>
+
+        ${sol.observaciones ? `
+        <div class="obs-box">
+          <strong>Observaciones Generales de Entrega:</strong><br/>
+          <span style="font-style: italic;">${sol.observaciones}</span>
+        </div>
+        ` : ""}
+
+        <table class="signatures" style="margin-top: 50px;">
+          <tr>
+            <td>
+              <div class="sig-line"></div>
+              <strong>Entregado por (Almacén)</strong><br/>
+              Firma y Sello
+            </td>
+            <td>
+              <div class="sig-line"></div>
+              <strong>Recibido por (${sol.departamento})</strong><br/>
+              Firma y Sello
+            </td>
+          </tr>
+        </table>
+      </body>
+      </html>
+    `;
+
+    const blob = new Blob(['\ufeff' + wordHtml], { type: "application/msword;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `Orden_${sol.numeroSolicitud}_${sol.departamento.replace(/[^a-zA-Z0-9]/g, "_")}.doc`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    playSound("positive");
+    showToast("Orden exportada a Word (.doc) correctamente.");
+  };
+
+  const exportToPDF = (sol: Solicitud) => {
+    const items = getExportItems(sol);
+    let total = 0;
+    
+    const itemsRows = items.map((item, idx) => {
+      const prod = products?.find(p => p.codigo === item.productoCodigo);
+      const deliveryLots = getItemDeliveryLots(item);
+      const qty = item.cantidadEntregada;
+      const sub = deliveryLots.length && prod
+        ? deliveryLots.reduce((sum, allocation) => {
+            const lot = prod.lotes?.find((entry: Lote) => entry.id === allocation.loteId);
+            return sum + allocation.cantidad * Number(lot?.precio || 0);
+          }, 0)
+        : qty * Number(prod?.lotes?.[0]?.precio || 0);
+      const price = qty > 0 ? sub / qty : 0;
+      const lotDetails = deliveryLots.map(allocation => `Lote ${allocation.loteNumero || allocation.loteId}: ${allocation.cantidad}`).join("<br/>") || "—";
+      total += sub;
+      
+      return `
+        <tr class="border-b border-slate-200 text-slate-700">
+          <td class="py-3 px-4 text-slate-500 text-center">${idx + 1}</td>
+          <td class="py-3 px-4 font-black text-teal-800">${item.productoCodigo}</td>
+          <td class="py-3 px-4 font-medium text-slate-800">${item.productoNombre}</td>
+          <td class="py-3 px-4 text-center font-bold text-slate-600">${item.cantidadSolicitada}</td>
+          <td class="py-3 px-4 text-center font-extrabold text-slate-800">${qty}</td>
+          <td class="py-3 px-4 text-slate-700">${lotDetails}</td>
+          <td class="py-3 px-4 text-right font-semibold text-slate-600">RD$ ${price.toFixed(2)}</td>
+          <td class="py-3 px-4 text-right font-bold text-teal-900">RD$ ${sub.toFixed(2)}</td>
+        </tr>
+      `;
+    }).join("");
+
+    const printWindow = window.open("", "_blank");
+    if (!printWindow) {
+      alert("Por favor permita las ventanas emergentes (popups) para exportar el documento.");
+      return;
+    }
+
+    printWindow.document.write(`
+      <html>
+        <head>
+          <title>Orden de Servicio - ${sol.numeroSolicitud}</title>
+          <script src="https://cdn.tailwindcss.com"></script>
+          <style>
+            @media print {
+              body { margin: 0; padding: 20px; -webkit-print-color-adjust: exact; }
+              .no-print { display: none; }
+              @page { size: letter; margin: 15mm; }
+            }
+          </style>
+        </head>
+        <body class="bg-white text-slate-700 font-sans p-8">
+          <div class="max-w-4xl mx-auto space-y-8">
+            <!-- Header Letterhead -->
+            <div class="flex justify-between items-start border-b-2 border-teal-600 pb-5">
+              <div>
+                <h1 class="text-2xl font-black text-teal-800 uppercase tracking-tight">CONTROL DE STOCK</h1>
+                <p class="text-sm font-bold text-slate-500 uppercase tracking-widest mt-1">Órden de Servicio y Suministro</p>
+                <p class="text-xs font-semibold text-slate-400 mt-2">Dr. José Manuel Rodríguez &bull; Suministros Hospitalarios</p>
+              </div>
+              <div class="text-right">
+                <span class="text-lg font-black text-teal-800 bg-teal-50 border border-teal-200 px-4 py-2 rounded-2xl inline-block shadow-sm">
+                  ${sol.numeroSolicitud}
+                </span>
+                <p class="text-xs text-slate-400 font-semibold mt-2">Fecha: ${new Date(sol.fecha + "T00:00:00").toLocaleDateString("es-DO")} a las ${sol.hora}</p>
+              </div>
+            </div>
+
+            <!-- Meta details grid -->
+            <div class="grid grid-cols-2 gap-6 bg-slate-50 p-6 rounded-2xl border border-slate-200">
+              <div>
+                <p class="text-[10px] font-black uppercase text-slate-400 tracking-wider">Departamento Solicitante</p>
+                <p class="text-sm font-black text-slate-800 mt-1">${sol.departamento}</p>
+              </div>
+              <div>
+                <p class="text-[10px] font-black uppercase text-slate-400 tracking-wider">Usuario Solicitante</p>
+                <p class="text-sm font-bold text-slate-700 mt-1">${sol.usuarioCreador}</p>
+              </div>
+              <div>
+                <p class="text-[10px] font-black uppercase text-slate-400 tracking-wider">Período Mensual</p>
+                <p class="text-sm font-bold text-slate-700 mt-1">${sol.periodo}</p>
+              </div>
+              <div>
+                <p class="text-[10px] font-black uppercase text-slate-400 tracking-wider">Estado de la Orden</p>
+                <p class="text-sm font-extrabold text-teal-800 mt-1 uppercase">${sol.estado}</p>
+              </div>
+              <div class="col-span-2 border-t border-slate-200 pt-3 mt-1">
+                <p class="text-[10px] font-black uppercase text-slate-400 tracking-wider">Descripción / Justificación</p>
+                <p class="text-xs text-slate-600 mt-1 font-medium leading-relaxed">${sol.descripcion}</p>
+              </div>
+            </div>
+
+            <!-- Table -->
+            <div>
+              <h3 class="text-xs font-black text-slate-500 uppercase tracking-wider mb-3">Listado de Insumos Despachados</h3>
+              <div class="border border-slate-200 rounded-2xl overflow-hidden shadow-sm">
+                <table class="w-full text-left text-xs border-collapse">
+                  <thead>
+                    <tr class="bg-teal-800 text-white font-black uppercase text-[10px] tracking-wider">
+                      <th class="py-3 px-4 text-center w-12">#</th>
+                      <th class="py-3 px-4 w-24">Código</th>
+                      <th class="py-3 px-4">Descripción del Insumo</th>
+                      <th class="py-3 px-4 text-center w-20">Cant. Sol.</th>
+                      <th class="py-3 px-4 text-center w-20">Cant. Ent.</th>
+                      <th class="py-3 px-4">Lotes despachados</th>
+                      <th class="py-3 px-4 text-right w-28">Precio Unit.</th>
+                      <th class="py-3 px-4 text-right w-32">Importe</th>
+                    </tr>
+                  </thead>
+                  <tbody class="divide-y divide-slate-100">
+                    ${itemsRows}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            <!-- Total Box -->
+            <div class="flex justify-end">
+              <div class="w-80 space-y-2 text-xs border border-slate-200 rounded-2xl p-4 bg-slate-50">
+                <div class="flex justify-between text-slate-500 font-semibold">
+                  <span>Subtotal:</span>
+                  <span>RD$ ${total.toFixed(2)}</span>
+                </div>
+                <div class="flex justify-between text-teal-800 font-black text-sm border-t border-slate-200 pt-2">
+                  <span>TOTAL NETO:</span>
+                  <span>RD$ ${total.toFixed(2)}</span>
+                </div>
+              </div>
+            </div>
+
+            <!-- Observations -->
+            ${sol.observaciones ? `
+              <div class="bg-slate-50 border-l-4 border-teal-600 rounded-r-xl p-4 text-xs">
+                <p class="font-black text-teal-800 uppercase tracking-wider text-[10px]">Observaciones Generales de Entrega</p>
+                <p class="text-slate-600 mt-1 italic font-medium leading-relaxed">${sol.observaciones}</p>
+              </div>
+            ` : ""}
+
+            <!-- Signatures -->
+            <div class="grid grid-cols-2 gap-12 pt-16">
+              <div class="text-center">
+                <div class="w-2/3 border-t border-slate-300 mx-auto mb-2"></div>
+                <p class="text-xs font-black text-slate-800">Entregado por (Almacén)</p>
+                <p class="text-[10px] text-slate-400 font-bold mt-1">Firma y Sello</p>
+              </div>
+              <div class="text-center">
+                <div class="w-2/3 border-t border-slate-300 mx-auto mb-2"></div>
+                <p class="text-xs font-black text-slate-800">Recibido por (${sol.departamento})</p>
+                <p class="text-[10px] text-slate-400 font-bold mt-1">Firma y Sello</p>
+              </div>
+            </div>
+          </div>
+
+          <!-- Auto-print instruction -->
+          <script>
+            window.onload = function() {
+              setTimeout(function() {
+                window.print();
+              }, 500);
+            };
+          </script>
+        </body>
+      </html>
+    `);
+
+    printWindow.document.close();
+    playSound("positive");
+    showToast("Preparando orden para exportación a PDF...");
+  };
+
+  const handleOpenStatusModal = (sol: Solicitud) => {
+    setSelectedSolicitud(sol);
+    setNewState(sol.estado);
+    setStatusObs("");
+
+    const itemsList = sol.items || [];
+    if (itemsList.length === 0) {
+      setDeliveryItems([
+        {
+          id: "fallback-item",
+          productoCodigo: "Gral",
+          productoNombre: sol.descripcion,
+          cantidadSolicitada: 1,
+          cantidadAprobada: 1,
+          cantidadEntregada: 1,
+          motivoDiferencia: ""
+        }
+      ]);
+    } else {
+      setDeliveryItems(
+        itemsList.map(item => ({
+          ...item,
+          cantidadAprobada: item.cantidadAprobada !== undefined ? item.cantidadAprobada : item.cantidadSolicitada,
+          cantidadEntregada: item.cantidadEntregada !== undefined ? item.cantidadEntregada : item.cantidadSolicitada,
+          despachoLotes: item.despachoLotes?.length
+            ? item.despachoLotes
+            : item.loteId && (item.cantidadEntregada ?? item.cantidadSolicitada) > 0
+              ? [{
+                  loteId: item.loteId,
+                  loteNumero: item.loteNumero || "",
+                  cantidad: item.cantidadEntregada ?? item.cantidadSolicitada
+                }]
+              : [],
+          motivoDiferencia: item.motivoDiferencia || ""
+        }))
+      );
+    }
+  };
+
+  const handleUpdateApprovedQty = (itemId: string, qty: number) => {
+    setDeliveryItems(prev =>
+      prev.map(item => (item.id === itemId ? { ...item, cantidadAprobada: qty } : item))
+    );
+  };
+
+  const handleUpdateDeliveryQty = (itemId: string, qty: number) => {
+    setDeliveryItems(prev =>
+      prev.map(item => (item.id === itemId ? { ...item, cantidadEntregada: qty } : item))
+    );
+  };
+
+  const handleUpdateDeliveryReason = (itemId: string, reason: string) => {
+    setDeliveryItems(prev =>
+      prev.map(item => (item.id === itemId ? { ...item, motivoDiferencia: reason } : item))
+    );
+  };
+
+  const updateDeliveryLots = (itemId: string, update: (lots: DespachoLote[]) => DespachoLote[]) => {
+    setDeliveryItems(prev => prev.map(item => {
+      if (item.id !== itemId) return item;
+      const despachoLotes = update(getItemDeliveryLots(item));
+      const cantidadEntregada = despachoLotes.reduce((sum, allocation) => sum + Number(allocation.cantidad || 0), 0);
+      return {
+        ...item,
+        despachoLotes,
+        cantidadEntregada,
+        loteId: despachoLotes[0]?.loteId || "",
+        loteNumero: despachoLotes[0]?.loteNumero || ""
+      };
+    }));
+  };
+
+  const handleAddDeliveryLot = (itemId: string) => {
+    updateDeliveryLots(itemId, lots => [...lots, { loteId: "", loteNumero: "", cantidad: 0 }]);
+  };
+
+  const handleUpdateDeliveryLotAllocation = (
+    itemId: string,
+    allocationIndex: number,
+    allocation: Partial<DespachoLote>
+  ) => {
+    updateDeliveryLots(itemId, lots => lots.map((lot, index) =>
+      index === allocationIndex ? { ...lot, ...allocation } : lot
+    ));
+  };
+
+  const handleRemoveDeliveryLot = (itemId: string, allocationIndex: number) => {
+    updateDeliveryLots(itemId, lots => lots.filter((_, index) => index !== allocationIndex));
+  };
+
+  // Registra automáticamente el Consumo departamental cuando un Pedido/Solicitud se entrega (sin descontar inventario dos veces)
+  const registerConsumoFromDeliveredSolicitud = async (
+    sol: Solicitud,
+    deliveredAllocations: Array<{
+      productoCodigo: string;
+      productoNombre: string;
+      loteId: string;
+      loteNumero: string;
+      cantidad: number;
+    }>,
+    customObs = ""
+  ) => {
+    if (!deliveredAllocations || deliveredAllocations.length === 0) return null;
+
+    // Resolver responsable de la solicitud o fallback al departamento
+    let respObj =
+      responsablesList.find((r) => r.id === sol.responsableId) ||
+      responsablesList.find(
+        (r) =>
+          r.activo !== false &&
+          r.departamentoNombre.trim().toLowerCase() === (sol.departamento || "").trim().toLowerCase()
+      ) ||
+      responsablesList[0];
+
+    const effectiveResponsable: ResponsableDepartamento = respObj || {
+      id: sol.responsableId || "resp-default",
+      nombre: sol.responsableNombre || sol.usuarioCreador || currentUser.nombre,
+      departamentoNombre: sol.departamento,
+      cargo: sol.responsableCargo || "",
+      sedeId: tenantKey,
+      activo: true,
+      createdAt: Date.now()
+    };
+
+    const effectiveTipo: TipoConsumoConfig =
+      tiposConsumoList.find((t) => t.id === sol.tipoConsumoId) || {
+        id: sol.tipoConsumoId || "tipo-interno",
+        codigo: (sol.categoriaConsumo || "Interno").toUpperCase(),
+        nombre: sol.tipoConsumoNombre || "Interno",
+        categoria: sol.categoriaConsumo || "Interno",
+        requiereDestinoExterno: sol.categoriaConsumo === "Externo",
+        activo: true,
+        sedeId: tenantKey,
+        createdAt: Date.now()
+      };
+
+    const itemsConsumo: ConsumoItem[] = deliveredAllocations.map((alloc, idx) => {
+      const prod = products?.find((p) => p.codigo === alloc.productoCodigo);
+      const lot = prod?.lotes?.find((l) => l.id === alloc.loteId);
+      const precioUnitario = Number(lot?.precio || 0);
+      return {
+        id: `citem-sol-${Date.now()}-${idx}`,
+        productoCodigo: alloc.productoCodigo,
+        productoNombre: alloc.productoNombre,
+        loteId: alloc.loteId,
+        numeroLote: alloc.loteNumero || lot?.numeroLote || "S/L",
+        fechaVencimiento: lot?.fechaVencimiento || "",
+        cantidadEntregada: alloc.cantidad,
+        stockDisponibleAlMomento: Number(lot?.cantidad || alloc.cantidad),
+        stockFisicoAlMomento: Number(lot?.cantidadF ?? alloc.cantidad),
+        precioUnitario,
+        subtotal: precioUnitario * alloc.cantidad,
+        catalogId: sol.catalogId || prod?.catalogId || activeCatalogId
+      };
+    });
+
+    const catObj = catalogos?.find((c) => c.id === (sol.catalogId || activeCatalogId));
+
+    try {
+      const resConsumo = await registrarConsumoAtomico({
+        sedeId: tenantKey,
+        sedeNombre: tenantKey,
+        catalogId: sol.catalogId || activeCatalogId,
+        catalogNombre: catObj?.nombre || "Catálogo Institucional",
+        departamentoNombre: sol.departamento,
+        responsable: effectiveResponsable,
+        asignacionEspecialAdmin: true,
+        tipoConsumo: effectiveTipo,
+        destinoExternoInstitucion: sol.destinoExternoInstitucion || "Hospital / Dependencia Externa",
+        destinoExternoPersona: sol.destinoExternoPersona || effectiveResponsable.nombre,
+        fecha: new Date().toLocaleDateString("en-CA"),
+        hora: new Date().toLocaleTimeString("es-DO", { hour12: false }).slice(0, 5),
+        items: itemsConsumo,
+        observaciones: customObs || sol.observaciones || `Generado automáticamente al entregar la orden ${sol.numeroSolicitud}`,
+        usuarioRegistro: `${currentUser.nombre} (${currentUser.usuario})`,
+        rolUsuarioRegistro: currentUser.rol,
+        esAdmin: true,
+        origenOperacion: "SOLICITUD_ORDEN",
+        pedidoReferenciaId: sol.id,
+        numeroPedidoReferencia: sol.numeroSolicitud,
+        productosActuales: products || [],
+        consumosActuales: loadLocalConsumos(tenantKey),
+        descontarInventario: false // Ya descontado por la transacción de entrega de la solicitud
+      });
+      const consumo = resConsumo.consumo;
+      if (!consumo) return null;
+
+      const isLocalFileMode = typeof window !== "undefined" && window.location.protocol === "file:";
+      if (isLocalFileMode) {
+        let storedSol = localStorage.getItem("offline_solicitudes");
+        if (storedSol) {
+          try {
+            const list: Solicitud[] = JSON.parse(storedSol);
+            const next = list.map((s) =>
+              s.id === sol.id
+                ? {
+                    ...s,
+                    consumoRegistradoId: consumo.id,
+                    numeroConsumoRegistrado: consumo.numeroOperacion
+                  }
+                : s
+            );
+            localStorage.setItem("offline_solicitudes", JSON.stringify(next));
+            window.dispatchEvent(new Event("offline_solicitudes_update"));
+          } catch {}
+        }
+      } else {
+        try {
+          await updateDoc(tenantDoc("solicitudes", sol.id), {
+            consumoRegistradoId: consumo.id,
+            numeroConsumoRegistrado: consumo.numeroOperacion
+          });
+        } catch {}
+      }
+
+      return consumo;
+    } catch (err) {
+      console.warn("Advertencia al vincular consumo desde solicitud:", err);
+      return null;
+    }
+  };
+
+  const handleUpdateStatusSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!selectedSolicitud || updating || actionLockRef.current === selectedSolicitud.id) return;
+
+    const isAuthTransition =
+      newStatus === "Aprobada" || newStatus === "Rechazada" || newStatus === "Cancelada";
+
+    if (isAuthTransition && !isAdmin) {
+      playSound("negative");
+      showToast("Acceso denegado: Solo los perfiles con rol ADMIN pueden autorizar, rechazar o cancelar solicitudes.");
+      return;
+    }
+
+    if (
+      selectedSolicitud.estado === "Entregada" ||
+      selectedSolicitud.estado === "Cancelada" ||
+      (isAuthTransition && selectedSolicitud.estado === newStatus)
+    ) {
+      playSound("negative");
+      showToast(`Esta solicitud ya se encuentra en estado "${selectedSolicitud.estado}" y no permite cambios duplicados.`);
+      return;
+    }
+
+    const shouldDeductStock =
+      newStatus === "Entregada" ||
+      newStatus === "Parcialmente entregada" ||
+      (newStatus as string) === "Completada";
+
+    // Validation: verificar existencias tanto en inventario del sistema como en inventario físico cuando se despacha/entrega
+    for (const item of deliveryItems) {
+      if (item.cantidadEntregada < 0) {
+        playSound("negative");
+        showToast("La cantidad entregada no puede ser negativa.");
+        return;
+      }
+      if (shouldDeductStock) {
+        if (item.cantidadEntregada !== item.cantidadSolicitada && !item.motivoDiferencia?.trim()) {
+          playSound("negative");
+          showToast(`Por favor ingrese el motivo de la diferencia para el producto: ${item.productoNombre}`);
+          return;
+        }
+        if (item.productoCodigo !== "Gral") {
+          const matchingProduct = products?.find(p => p.codigo === item.productoCodigo);
+          if (matchingProduct && matchingProduct.lotes.length > 0) {
+            const allocations = getItemDeliveryLots(item);
+            const allocatedQty = allocations.reduce((sum, allocation) => sum + Number(allocation.cantidad || 0), 0);
+            if (allocations.some(allocation => allocation.cantidad < 0)) {
+              playSound("negative");
+              showToast(`La cantidad asignada al lote no puede ser negativa para "${item.productoNombre}".`);
+              return;
+            }
+            if (allocatedQty !== item.cantidadEntregada) {
+              playSound("negative");
+              showToast(`La suma de cantidades por lote no coincide con la cantidad despachada de "${item.productoNombre}".`);
+              return;
+            }
+            if (item.cantidadEntregada > 0 && allocations.length === 0) {
+              playSound("negative");
+              showToast(`Por favor agregue al menos un lote para el producto: ${item.productoNombre}`);
+              return;
+            }
+            const quantitiesByLot = new Map<string, number>();
+            for (const allocation of allocations) {
+              if (allocation.cantidad === 0) continue;
+              if (!allocation.loteId) {
+                playSound("negative");
+                showToast(`Seleccione un lote para cada cantidad despachada de "${item.productoNombre}".`);
+                return;
+              }
+              quantitiesByLot.set(
+                allocation.loteId,
+                (quantitiesByLot.get(allocation.loteId) || 0) + allocation.cantidad
+              );
+            }
+            for (const [lotId, quantity] of quantitiesByLot) {
+              const lot = matchingProduct.lotes.find(l => l.id === lotId);
+              const stockSistema = lot ? Number(lot.cantidad || 0) : 0;
+              const stockFisico = lot ? Number(lot.cantidadF || 0) : 0;
+              const maxAvailableBoth = Math.min(stockSistema, stockFisico);
+              if (!lot || quantity > stockSistema || quantity > stockFisico) {
+                playSound("negative");
+                showToast(
+                  `Stock insuficiente en el lote seleccionado para "${item.productoNombre}". Solicitado: ${quantity} und. | Disponible en Sistema: ${stockSistema} und. | Físico: ${stockFisico} und. (Máx: ${maxAvailableBoth} und.)`
+                );
+                return;
+              }
+            }
+          }
+        }
+      }
+    }
+
+    actionLockRef.current = selectedSolicitud.id;
+    setUpdating(true);
+    playSound("action");
+
+    const effectiveSolicitudCatalogId = selectedSolicitud.catalogId || activeCatalogId;
+    const isLocalFileMode = typeof window !== "undefined" && window.location.protocol === "file:";
+
+    try {
+      if (isLocalFileMode) {
+        const now = new Date();
+        const nowTs = now.getTime();
+        const localDate = now.toLocaleDateString("en-CA");
+        const localTime = now.toLocaleTimeString("es-DO", { hour12: false }).slice(0, 5);
+
+        const nuevoCambio: CambioEstado = {
+          estado: newStatus,
+          usuarioResponsable: `${currentUser.nombre} (${currentUser.usuario})`,
+          fecha: localDate,
+          hora: localTime
+        };
+
+        const updatedHistory = [...selectedSolicitud.historialCambios, nuevoCambio];
+        const authPatch = isAuthTransition
+          ? {
+              usuarioAutorizador: `${currentUser.nombre} (${currentUser.usuario})`,
+              rolAutorizador: currentUser.rol,
+              fechaAutorizacion: localDate,
+              horaAutorizacion: localTime,
+              timestampAutorizacion: nowTs,
+              accionAutorizacion: (newStatus === "Aprobada" ? "Autorizada" : "Rechazada") as "Autorizada" | "Rechazada"
+            }
+          : {};
+
+        let storedSol = localStorage.getItem("offline_solicitudes");
+        let solList: Solicitud[] = [];
+        if (storedSol) {
+          try { solList = JSON.parse(storedSol); } catch (e) {}
+        }
+        solList = solList.map(s => {
+          if (s.id === selectedSolicitud.id) {
+            return {
+              ...s,
+              ...authPatch,
+              estado: newStatus,
+              observaciones: statusObs.trim() || s.observaciones,
+              historialCambios: updatedHistory,
+              items: deliveryItems.filter(item => item.id !== "fallback-item")
+            };
+          }
+          return s;
+        });
+        localStorage.setItem("offline_solicitudes", JSON.stringify(solList));
+
+        if (shouldDeductStock) {
+          let storedProds = localStorage.getItem("offline_productos");
+          let prodList: Producto[] = [];
+          if (storedProds) {
+            try { prodList = JSON.parse(storedProds); } catch (e) {}
+          }
+
+          let storedMovs = localStorage.getItem("offline_movimientos");
+          let movList: Movimiento[] = [];
+          if (storedMovs) {
+            try { movList = JSON.parse(storedMovs); } catch (e) {}
+          }
+
+          for (const item of deliveryItems) {
+            const matchingProd = products?.find(p => p.codigo === item.productoCodigo);
+            for (const allocation of getItemDeliveryLots(item)) {
+              if (item.productoCodigo !== "Gral" && allocation.cantidad > 0 && allocation.loteId) {
+                prodList = prodList.map(prod => {
+                  if (prod.codigo === item.productoCodigo) {
+                    const nextLotes = prod.lotes.map((l: Lote) => {
+                      if (l.id === allocation.loteId) {
+                        const nextQty = Math.max(0, Number(l.cantidad || 0) - allocation.cantidad);
+                        const nextQtyF = Math.max(0, Number(l.cantidadF || 0) - allocation.cantidad);
+                        return { ...l, cantidad: nextQty, cantidadF: nextQtyF };
+                      }
+                      return l;
+                    });
+                    return { ...prod, lotes: nextLotes, verificado: false, updatedAt: Date.now() };
+                  }
+                  return prod;
+                });
+
+                const movId = `mov-${item.productoCodigo}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+                const mov: Movimiento = {
+                  id: movId,
+                  productoCodigo: item.productoCodigo,
+                  productoNombre: item.productoNombre,
+                  lote: allocation.loteNumero || "S/L",
+                  cantidad: allocation.cantidad,
+                  cantidadF: allocation.cantidad,
+                  precio: matchingProd?.lotes.find((l: Lote) => l.id === allocation.loteId)?.precio || 0,
+                  tipoMovimiento: "Salida",
+                  usuario: `${currentUser.nombre} (${currentUser.usuario})`,
+                  fecha: new Date().toISOString(),
+                  timestamp: Date.now(),
+                  catalogId: selectedSolicitud.catalogId || matchingProd?.catalogId || activeCatalogId
+                };
+                movList.unshift(mov);
+              }
+            }
+          }
+
+          localStorage.setItem("offline_productos", JSON.stringify(prodList));
+          localStorage.setItem("offline_movimientos", JSON.stringify(movList));
+        }
+
+        let storedHist = localStorage.getItem("offline_historial");
+        let histList: RegistroHistorial[] = [];
+        if (storedHist) {
+          try { histList = JSON.parse(storedHist); } catch (e) {}
+        }
+        const histId = `hist-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+        const histData: RegistroHistorial = {
+          id: histId,
+          tipo: "Cambio de Estado",
+          solicitudId: selectedSolicitud.id,
+          numeroSolicitud: selectedSolicitud.numeroSolicitud,
+          descripcionEvent: `La orden ${selectedSolicitud.numeroSolicitud} de ${selectedSolicitud.departamento} actualizó su estado a "${newStatus}".`,
+          usuarioResponsable: `${currentUser.nombre} (${currentUser.usuario})`,
+          fecha: localDate,
+          hora: localTime,
+          timestamp: Date.now(),
+          catalogId: effectiveSolicitudCatalogId
+        };
+        histList.unshift(histData);
+        localStorage.setItem("offline_historial", JSON.stringify(histList));
+
+        logSystemEvent(`🚚 **Actualización de Orden**: La orden **${selectedSolicitud.numeroSolicitud}** del departamento **${selectedSolicitud.departamento}** ha sido actualizada por **${currentUser.nombre}**. Nuevo estado: **${newStatus}**.`);
+
+        window.dispatchEvent(new Event("offline_solicitudes_update"));
+        window.dispatchEvent(new Event("offline_historial_update"));
+        if (shouldDeductStock) {
+          window.dispatchEvent(new Event("offline_productos_update"));
+          window.dispatchEvent(new Event("offline_movimientos_update"));
+
+          const offlineDeliveredAllocs = deliveryItems.flatMap((item) =>
+            getItemDeliveryLots(item)
+              .filter((alloc) => item.productoCodigo !== "Gral" && alloc.cantidad > 0 && alloc.loteId)
+              .map((alloc) => ({
+                productoCodigo: item.productoCodigo,
+                productoNombre: item.productoNombre,
+                loteId: alloc.loteId,
+                loteNumero: alloc.loteNumero,
+                cantidad: alloc.cantidad
+              }))
+          );
+          await registerConsumoFromDeliveredSolicitud(
+            selectedSolicitud,
+            offlineDeliveredAllocs,
+            statusObs.trim()
+          );
+        }
+
+        setSelectedSolicitud(null);
+        playSound("positive");
+        showToast(`Estado de la orden ${selectedSolicitud.numeroSolicitud} actualizado con éxito.`);
+        return;
+      }
+
+      const now = new Date();
+      const nowTs = now.getTime();
+      const nowIso = now.toISOString();
+      const localDate = now.toLocaleDateString("en-CA");
+      const localTime = now.toLocaleTimeString("es-DO", { hour12: false }).slice(0, 5);
+
+      const nuevoCambio: CambioEstado = {
+        estado: newStatus,
+        usuarioResponsable: `${currentUser.nombre} (${currentUser.usuario})`,
+        fecha: localDate,
+        hora: localTime
+      };
+
+      const docRef = tenantDoc("solicitudes", selectedSolicitud.id);
+      const validItemsToDeduct = shouldDeductStock
+        ? deliveryItems.flatMap(item =>
+            getItemDeliveryLots(item)
+              .filter(allocation => item.productoCodigo !== "Gral" && allocation.cantidad > 0 && allocation.loteId)
+              .map(allocation => ({
+                ...item,
+                loteId: allocation.loteId,
+                loteNumero: allocation.loteNumero,
+                cantidadEntregada: allocation.cantidad
+              }))
+          )
+        : [];
+      const uniqueProdCodes = Array.from(new Set<string>(validItemsToDeduct.map((it) => it.productoCodigo)));
+
+      // Transacción atómica en el servidor para validar permisos ADMIN, evitar cambios duplicados y descontar stock
+      await runTransaction(db, async (transaction) => {
+        const solSnap = await transaction.get(docRef);
+        if (!solSnap.exists()) {
+          throw new Error("La solicitud ya no existe en el servidor.");
+        }
+        const serverSol = solSnap.data() as Solicitud;
+
+        if (serverSol.estado === "Entregada" || serverSol.estado === "Cancelada") {
+          throw new Error(`La solicitud ya fue procesada (${serverSol.estado}) y no admite modificaciones.`);
+        }
+
+        if (isAuthTransition) {
+          if (currentUser.rol !== "Administrador") {
+            throw new Error("Autorización denegada: Se requiere rol de Administrador.");
+          }
+          if (currentUser.id) {
+            const userSnap = await transaction.get(tenantDoc("usuarios", currentUser.id));
+            if (userSnap.exists() && (userSnap.data() as Usuario).rol !== "Administrador") {
+              throw new Error("Autorización rechazada por el servidor: El usuario no posee rol Administrador.");
+            }
+          }
+          if (serverSol.estado === newStatus) {
+            throw new Error(`Esta solicitud ya fue marcada como "${newStatus}".`);
+          }
+        }
+
+        const prodSnaps = await Promise.all(
+          uniqueProdCodes.map((code) => transaction.get(tenantDoc("productos", code.replace(/\//g, "_"))))
+        );
+
+        const serverProdsMap = new Map<string, Producto>();
+        prodSnaps.forEach((snap, idx) => {
+          const code = uniqueProdCodes[idx];
+          if (!snap.exists()) {
+            throw new Error(`El producto "${code}" no existe en el servidor.`);
+          }
+          serverProdsMap.set(code, snap.data() as Producto);
+        });
+
+        for (const item of validItemsToDeduct) {
+          const serverProd = serverProdsMap.get(item.productoCodigo);
+          if (!serverProd) {
+            throw new Error(`Producto "${item.productoNombre}" no encontrado en el servidor.`);
+          }
+          const targetLot = (serverProd.lotes || []).find((l) => l.id === item.loteId);
+          if (!targetLot) {
+            throw new Error(`Lote seleccionado no encontrado para "${item.productoNombre}".`);
+          }
+          const serverSis = Number(targetLot.cantidad || 0);
+          const serverFis = Number(targetLot.cantidadF || 0);
+          const reqQty = Number(item.cantidadEntregada || 0);
+
+          if (reqQty > serverSis || reqQty > serverFis) {
+            throw new Error(
+              `Stock insuficiente en el servidor para "${item.productoNombre}" (Lote ${targetLot.numeroLote}). Solicitado: ${reqQty} und. | Disponible en Sistema: ${serverSis} und. | Físico: ${serverFis} und.`
+            );
+          }
+
+          targetLot.cantidad = serverSis - reqQty;
+          targetLot.cantidadF = serverFis - reqQty;
+        }
+
+        const updatedHistory = [...(serverSol.historialCambios || []), nuevoCambio];
+        const updatePayload: Record<string, any> = {
+          estado: newStatus,
+          observaciones: statusObs.trim() || serverSol.observaciones,
+          historialCambios: updatedHistory,
+          items: deliveryItems.filter((item) => item.id !== "fallback-item")
+        };
+
+        if (isAuthTransition) {
+          updatePayload.usuarioAutorizador = `${currentUser.nombre} (${currentUser.usuario})`;
+          updatePayload.rolAutorizador = "Administrador";
+          updatePayload.fechaAutorizacion = localDate;
+          updatePayload.horaAutorizacion = localTime;
+          updatePayload.timestampAutorizacion = nowTs;
+          updatePayload.accionAutorizacion = newStatus === "Aprobada" ? "Autorizada" : "Rechazada";
+        }
+
+        transaction.update(docRef, updatePayload);
+
+        for (const [code, updatedProd] of serverProdsMap.entries()) {
+          transaction.set(tenantDoc("productos", code.replace(/\//g, "_")), {
+            ...updatedProd,
+            verificado: false,
+            updatedAt: nowTs
+          });
+        }
+
+        for (const item of validItemsToDeduct) {
+          const serverProd = serverProdsMap.get(item.productoCodigo)!;
+          const lotPrice = serverProd.lotes.find((l) => l.id === item.loteId)?.precio || 0;
+          const movId = `mov-${serverProd.codigo}-${nowTs}-${Math.random().toString(36).slice(2, 6)}`;
+          const mov: Movimiento = {
+            id: movId,
+            productoCodigo: serverProd.codigo,
+            productoNombre: serverProd.nombre,
+            lote: item.loteNumero || "S/L",
+            cantidad: item.cantidadEntregada,
+            cantidadF: item.cantidadEntregada,
+            precio: lotPrice,
+            tipoMovimiento: "Salida",
+            usuario: `${currentUser.nombre} (${currentUser.usuario})`,
+            fecha: nowIso,
+            timestamp: nowTs,
+            catalogId: selectedSolicitud.catalogId || serverProd.catalogId || activeCatalogId
+          };
+          transaction.set(tenantDoc("movimientos", movId), mov);
+        }
+      });
+
+      const histCol = tenantCollection("historial");
+      const histData: Omit<RegistroHistorial, "id"> = {
+        tipo: "Cambio de Estado",
+        solicitudId: selectedSolicitud.id,
+        numeroSolicitud: selectedSolicitud.numeroSolicitud,
+        descripcionEvent: `La orden ${selectedSolicitud.numeroSolicitud} de ${selectedSolicitud.departamento} actualizó su estado a "${newStatus}".`,
+        usuarioResponsable: `${currentUser.nombre} (${currentUser.usuario})`,
+        fecha: localDate,
+        hora: localTime,
+        timestamp: nowTs,
+        catalogId: effectiveSolicitudCatalogId
+      };
+      await addDoc(histCol, histData);
+      
+      logSystemEvent(`🚚 **Actualización de Orden**: La orden **${selectedSolicitud.numeroSolicitud}** del departamento **${selectedSolicitud.departamento}** ha sido actualizada por **${currentUser.nombre}**. Nuevo estado: **${newStatus}**.`);
+
+      let consumoLinkedMsg = "";
+      if (shouldDeductStock && validItemsToDeduct.length > 0) {
+        const regConsumo = await registerConsumoFromDeliveredSolicitud(
+          selectedSolicitud,
+          validItemsToDeduct.map((it) => ({
+            productoCodigo: it.productoCodigo,
+            productoNombre: it.productoNombre,
+            loteId: it.loteId || "",
+            loteNumero: it.loteNumero || "",
+            cantidad: Number(it.cantidadEntregada || 0)
+          })),
+          statusObs.trim()
+        );
+        if (regConsumo) {
+          consumoLinkedMsg = ` • Consumo ${regConsumo.numeroOperacion} registrado`;
+        }
+      }
+
+      setSelectedSolicitud(null);
+      playSound("positive");
+      showToast(`Estado y entrega de la orden ${selectedSolicitud.numeroSolicitud} actualizados con éxito${consumoLinkedMsg}.`);
+    } catch (err: any) {
+      console.error("Error updating order delivery:", err);
+      playSound("negative");
+      showToast(err?.message || "Error al actualizar la entrega.");
+    } finally {
+      actionLockRef.current = null;
+      setUpdating(false);
+    }
+  };
+
+  const handleDirectStatusChange = async (
+    sol: Solicitud,
+    nextStatus: "Pendiente" | "Aprobada" | "Rechazada" | "En Proceso" | "Entregada" | "En proceso" | "Completada" | "En preparación" | "Parcialmente entregada" | "Cancelada",
+    obs = ""
+  ) => {
+    if (actionLockRef.current === sol.id) return;
+
+    const isAuthorizationAction =
+      nextStatus === "Aprobada" || nextStatus === "Rechazada" || nextStatus === "Cancelada";
+
+    // REGLA ESTRICTA: Solo perfiles con rol ADMIN pueden autorizar o rechazar solicitudes
+    if (isAuthorizationAction && !isAdmin) {
+      playSound("negative");
+      showToast("Acción exclusiva para Administradores: No tienes permisos para autorizar o rechazar solicitudes.");
+      return;
+    }
+
+    // Evitar autorizaciones duplicadas o cambios de estado no permitidos
+    if (
+      sol.estado === nextStatus ||
+      sol.estado === "Entregada" ||
+      sol.estado === "Cancelada" ||
+      (isAuthorizationAction && (sol.estado === "Aprobada" || sol.estado === "Rechazada") && sol.estado === nextStatus)
+    ) {
+      playSound("negative");
+      showToast(`Esta solicitud ya se encuentra en estado "${sol.estado}".`);
+      return;
+    }
+
+    actionLockRef.current = sol.id;
+    playSound("action");
+    try {
+      const now = new Date();
+      const nowTs = now.getTime();
+      const nowIso = now.toISOString();
+      const localDate = now.toLocaleDateString("en-CA");
+      const localTime = now.toLocaleTimeString("es-DO", { hour12: false }).slice(0, 5);
+
+      const nuevoCambio: CambioEstado = {
+        estado: nextStatus,
+        usuarioResponsable: `${currentUser.nombre} (${currentUser.usuario})`,
+        fecha: localDate,
+        hora: localTime
+      };
+
+      const docRef = tenantDoc("solicitudes", sol.id);
+
+      if (nextStatus === "Entregada") {
+        const itemsToProcess = (sol.items || []).filter((it) => it.productoCodigo !== "Gral" && it.cantidadSolicitada > 0);
+
+        for (const item of itemsToProcess) {
+          const matchingProduct = products?.find((p) => p.codigo === item.productoCodigo);
+          const totalSys = matchingProduct?.lotes?.reduce((acc, l) => acc + Number(l.cantidad || 0), 0) || 0;
+          const totalPhys = matchingProduct?.lotes?.reduce((acc, l) => acc + Number(l.cantidadF || 0), 0) || 0;
+          const validLote = matchingProduct?.lotes?.find(
+            (l) => Number(l.cantidad || 0) >= item.cantidadSolicitada && Number(l.cantidadF || 0) >= item.cantidadSolicitada
+          );
+          if (!matchingProduct || !validLote) {
+            playSound("negative");
+            showToast(
+              `Stock insuficiente en lote para "${item.productoNombre}". Solicitado: ${item.cantidadSolicitada} und. | Total en Sistema: ${totalSys} und. | Total Físico: ${totalPhys} und.`
+            );
+            return;
+          }
+        }
+
+        const uniqueCodes = Array.from(new Set(itemsToProcess.map((it) => it.productoCodigo)));
+
+        await runTransaction(db, async (transaction) => {
+          const solSnap = await transaction.get(docRef);
+          if (!solSnap.exists()) {
+            throw new Error("La solicitud no existe en el servidor.");
+          }
+          const serverSol = solSnap.data() as Solicitud;
+          if (serverSol.estado === "Entregada" || serverSol.estado === "Cancelada") {
+            throw new Error(`La solicitud ya fue procesada (${serverSol.estado}).`);
+          }
+
+          const prodSnaps = await Promise.all(
+            uniqueCodes.map((code) => transaction.get(tenantDoc("productos", code.replace(/\//g, "_"))))
+          );
+
+          const serverProdsMap = new Map<string, Producto>();
+          prodSnaps.forEach((snap, idx) => {
+            const code = uniqueCodes[idx];
+            if (!snap.exists()) {
+              throw new Error(`El producto "${code}" no existe en el servidor.`);
+            }
+            serverProdsMap.set(code, snap.data() as Producto);
+          });
+
+          const movementsToCreate: Movimiento[] = [];
+
+          for (const item of itemsToProcess) {
+            const serverProd = serverProdsMap.get(item.productoCodigo);
+            if (!serverProd) {
+              throw new Error(`Producto "${item.productoNombre}" no encontrado.`);
+            }
+            const qty = Number(item.cantidadSolicitada || 0);
+            const targetLote = (serverProd.lotes || []).find(
+              (l) =>
+                (item.loteId ? l.id === item.loteId : true) &&
+                Number(l.cantidad || 0) >= qty &&
+                Number(l.cantidadF || 0) >= qty
+            );
+
+            if (!targetLote) {
+              const totalSys = (serverProd.lotes || []).reduce((acc, l) => acc + Number(l.cantidad || 0), 0);
+              const totalPhys = (serverProd.lotes || []).reduce((acc, l) => acc + Number(l.cantidadF || 0), 0);
+              throw new Error(
+                `Stock insuficiente en el servidor para "${item.productoNombre}". Solicitado: ${qty} und. | Disponible en Sistema: ${totalSys} und. | Físico: ${totalPhys} und.`
+              );
+            }
+
+            targetLote.cantidad = Number(targetLote.cantidad || 0) - qty;
+            targetLote.cantidadF = Number(targetLote.cantidadF || 0) - qty;
+
+            const movId = `mov-${serverProd.codigo}-${nowTs}-${Math.random().toString(36).slice(2, 6)}`;
+            movementsToCreate.push({
+              id: movId,
+              productoCodigo: serverProd.codigo,
+              productoNombre: serverProd.nombre,
+              lote: targetLote.numeroLote || "S/L",
+              cantidad: qty,
+              cantidadF: qty,
+              precio: targetLote.precio || 0,
+              tipoMovimiento: "Salida",
+              usuario: `${currentUser.nombre} (${currentUser.usuario})`,
+              fecha: nowIso,
+              timestamp: nowTs,
+              catalogId: sol.catalogId || serverProd.catalogId || activeCatalogId
+            });
+          }
+
+          const updatedHistory = [...(serverSol.historialCambios || []), nuevoCambio];
+          transaction.update(docRef, {
+            estado: nextStatus,
+            observaciones: obs.trim() || serverSol.observaciones,
+            historialCambios: updatedHistory
+          });
+
+          for (const [code, updatedProd] of serverProdsMap.entries()) {
+            transaction.set(tenantDoc("productos", code.replace(/\//g, "_")), {
+              ...updatedProd,
+              verificado: false,
+              updatedAt: nowTs
+            });
+          }
+
+          for (const mov of movementsToCreate) {
+            transaction.set(tenantDoc("movimientos", mov.id), mov);
+          }
+        });
+      } else {
+        // Transacción atómica en el servidor para validar autorización ADMIN y evitar duplicados
+        await runTransaction(db, async (transaction) => {
+          const solSnap = await transaction.get(docRef);
+          if (!solSnap.exists()) {
+            throw new Error("La solicitud no existe en el servidor.");
+          }
+          const serverSol = solSnap.data() as Solicitud;
+
+          if (serverSol.estado === "Entregada" || serverSol.estado === "Cancelada") {
+            throw new Error(`La solicitud ya fue cerrada (${serverSol.estado}) y no admite cambios.`);
+          }
+          if (serverSol.estado === nextStatus) {
+            throw new Error(`La solicitud ya se encuentra en estado "${nextStatus}".`);
+          }
+
+          if (isAuthorizationAction) {
+            if (currentUser.rol !== "Administrador") {
+              throw new Error("Acción no autorizada: Se requiere perfil con rol Administrador.");
+            }
+            if (currentUser.id) {
+              const userSnap = await transaction.get(tenantDoc("usuarios", currentUser.id));
+              if (userSnap.exists() && (userSnap.data() as Usuario).rol !== "Administrador") {
+                throw new Error("Permiso denegado en el servidor: Solo un usuario ADMIN puede autorizar o rechazar.");
+              }
+            }
+          }
+
+          const updatedHistory = [...(serverSol.historialCambios || []), nuevoCambio];
+          const updateData: Record<string, any> = {
+            estado: nextStatus,
+            observaciones: obs.trim() || serverSol.observaciones,
+            historialCambios: updatedHistory
+          };
+
+          if (isAuthorizationAction) {
+            updateData.usuarioAutorizador = `${currentUser.nombre} (${currentUser.usuario})`;
+            updateData.rolAutorizador = "Administrador";
+            updateData.fechaAutorizacion = localDate;
+            updateData.horaAutorizacion = localTime;
+            updateData.timestampAutorizacion = nowTs;
+            updateData.accionAutorizacion = nextStatus === "Aprobada" ? "Autorizada" : "Rechazada";
+          }
+
+          transaction.update(docRef, updateData);
+        });
+      }
+
+      const histCol = tenantCollection("historial");
+      const accionTexto =
+        nextStatus === "Aprobada"
+          ? `fue AUTORIZADA por el administrador ${currentUser.nombre}`
+          : nextStatus === "Rechazada"
+          ? `fue RECHAZADA por el administrador ${currentUser.nombre}`
+          : `cambió su estado a "${nextStatus}"`;
+
+      const histData: Omit<RegistroHistorial, "id"> = {
+        tipo: "Cambio de Estado",
+        solicitudId: sol.id,
+        numeroSolicitud: sol.numeroSolicitud,
+        descripcionEvent: `La solicitud ${sol.numeroSolicitud} de ${sol.departamento} ${accionTexto}.`,
+        usuarioResponsable: `${currentUser.nombre} (${currentUser.usuario})`,
+        fecha: localDate,
+        hora: localTime,
+        timestamp: nowTs,
+        catalogId: sol.catalogId || activeCatalogId
+      };
+      await addDoc(histCol, histData);
+      
+      logSystemEvent(`📢 **Actualización de Solicitud**: La solicitud **${sol.numeroSolicitud}** de **${sol.departamento}** ${accionTexto}.`);
+
+      let directConsumoMsg = "";
+      if (nextStatus === "Entregada") {
+        const directAllocs = (sol.items || [])
+          .filter((it) => it.productoCodigo !== "Gral" && it.cantidadSolicitada > 0)
+          .map((it) => {
+            const matchingProduct = products?.find((p) => p.codigo === it.productoCodigo);
+            const targetLote =
+              matchingProduct?.lotes?.find((l) => (it.loteId ? l.id === it.loteId : true)) ||
+              matchingProduct?.lotes?.[0];
+            return {
+              productoCodigo: it.productoCodigo,
+              productoNombre: it.productoNombre,
+              loteId: targetLote?.id || it.loteId || "",
+              loteNumero: targetLote?.numeroLote || it.loteNumero || "S/L",
+              cantidad: Number(it.cantidadSolicitada || 0)
+            };
+          })
+          .filter((a) => Boolean(a.loteId));
+
+        if (directAllocs.length > 0) {
+          const regConsumo = await registerConsumoFromDeliveredSolicitud(sol, directAllocs, obs.trim());
+          if (regConsumo) {
+            directConsumoMsg = ` (Consumo ${regConsumo.numeroOperacion})`;
+          }
+        }
+      }
+
+      playSound("positive");
+      showToast(
+        nextStatus === "Aprobada"
+          ? `Solicitud ${sol.numeroSolicitud} AUTORIZADA correctamente por ${currentUser.nombre}.`
+          : nextStatus === "Rechazada"
+          ? `Solicitud ${sol.numeroSolicitud} RECHAZADA por ${currentUser.nombre}.`
+          : `Solicitud ${sol.numeroSolicitud} cambiada a ${nextStatus} correctamente${directConsumoMsg}.`
+      );
+    } catch (err: any) {
+      console.error("Error updating status:", err);
+      playSound("negative");
+      showToast(err?.message || "Error al actualizar el estado de la solicitud.");
+    } finally {
+      actionLockRef.current = null;
+    }
+  };
+
+  const handleDeleteRequest = async (sol: Solicitud) => {
+    const isAnyer =
+      currentUser.usuario.toLowerCase() === "anyer" ||
+      currentUser.nombre.toLowerCase() === "anyer" ||
+      (getActiveFarmaciaId() !== DEFAULT_FARMACIA_ID && currentUser.rol === "Administrador");
+    if (!isAnyer) {
+      alert("No tiene permisos para eliminar órdenes. Esta función es exclusiva del Administrador Principal.");
+      return;
+    }
+
+    const confirmed = window.confirm(`¿Está seguro de que desea eliminar permanentemente la orden ${sol.numeroSolicitud} del departamento ${sol.departamento}? Esta acción es irreversible.`);
+    if (!confirmed) return;
+
+    playSound("action");
+
+    const isLocalFileMode = typeof window !== "undefined" && window.location.protocol === "file:";
+
+    try {
+      if (isLocalFileMode) {
+        // 1. Delete from offline solicitudes
+        let storedSol = localStorage.getItem("offline_solicitudes");
+        let solList: Solicitud[] = [];
+        if (storedSol) {
+          try { solList = JSON.parse(storedSol); } catch (e) {}
+        }
+        solList = solList.filter(s => s.id !== sol.id);
+        localStorage.setItem("offline_solicitudes", JSON.stringify(solList));
+
+        // 2. Register in global history
+        const now = new Date();
+        const localDate = now.toLocaleDateString("en-CA");
+        const localTime = now.toLocaleTimeString("es-DO", { hour12: false }).slice(0, 5);
+
+        let storedHist = localStorage.getItem("offline_historial");
+        let histList: RegistroHistorial[] = [];
+        if (storedHist) {
+          try { histList = JSON.parse(storedHist); } catch (e) {}
+        }
+        const histId = `hist-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+        const histData: RegistroHistorial = {
+          id: histId,
+          tipo: "Eliminación",
+          solicitudId: sol.id,
+          numeroSolicitud: sol.numeroSolicitud,
+          descripcionEvent: `El usuario Anyer eliminó de forma permanente la orden ${sol.numeroSolicitud} de ${sol.departamento}.`,
+          usuarioResponsable: `${currentUser.nombre} (${currentUser.usuario})`,
+          fecha: localDate,
+          hora: localTime,
+          timestamp: Date.now()
+        };
+        histList.unshift(histData);
+        localStorage.setItem("offline_historial", JSON.stringify(histList));
+
+        // Notify chat
+        logSystemEvent(`🚨 **Orden Eliminada**: La orden **${sol.numeroSolicitud}** del departamento **${sol.departamento}** fue eliminada de forma permanente por el usuario Anyer.`);
+
+        window.dispatchEvent(new Event("offline_solicitudes_update"));
+        window.dispatchEvent(new Event("offline_historial_update"));
+
+        if (selectedSolicitud?.id === sol.id) {
+          setSelectedSolicitud(null);
+        }
+
+        playSound("positive");
+        showToast(`La orden ${sol.numeroSolicitud} fue eliminada permanentemente.`);
+        return;
+      }
+
+      // 1. Delete document
+      await deleteDoc(tenantDoc("solicitudes", sol.id));
+
+      // 2. Register in global history
+      const now = new Date();
+      const localDate = now.toLocaleDateString("en-CA");
+      const localTime = now.toLocaleTimeString("es-DO", { hour12: false }).slice(0, 5);
+
+      const histCol = tenantCollection("historial");
+      const histData: Omit<RegistroHistorial, "id"> = {
+        tipo: "Eliminación",
+        solicitudId: sol.id,
+        numeroSolicitud: sol.numeroSolicitud,
+        descripcionEvent: `El usuario Anyer eliminó de forma permanente la orden ${sol.numeroSolicitud} de ${sol.departamento}.`,
+        usuarioResponsable: `${currentUser.nombre} (${currentUser.usuario})`,
+        fecha: localDate,
+        hora: localTime,
+        timestamp: Date.now()
+      };
+      await addDoc(histCol, histData);
+      
+      // Notify chat
+      logSystemEvent(`🚨 **Orden Eliminada**: La orden **${sol.numeroSolicitud}** del departamento **${sol.departamento}** fue eliminada de forma permanente por el usuario Anyer.`);
+
+      // 3. Clear selected if it was the deleted one
+      if (selectedSolicitud?.id === sol.id) {
+        setSelectedSolicitud(null);
+      }
+
+      playSound("positive");
+      showToast(`La orden ${sol.numeroSolicitud} fue eliminada permanentemente.`);
+    } catch (err) {
+      console.error("Error deleting order:", err);
+      alert("Error al intentar eliminar la orden.");
+    }
+  };
+
+  const filteredList = useMemo(() => {
+    const allowedCatIds = new Set(availableCatalogosMemo.map((c) => c.id));
+    const canSeeAll =
+      currentUser.rol === "Administrador" ||
+      currentUser.departamento === "Almacén y Suministro" ||
+      currentUser.departamento === "Farmacia";
+
+    return solicitudes.filter((item) => {
+      // 0. Catalog Filter: allow filtering by a specific catalog or across all authorized catalogs for the user
+      const solCatalogId = item.catalogId || "default-cat";
+      if (!canSeeAll && !allowedCatIds.has(solCatalogId) && !isCatalogAllowedForUser(currentUser, solCatalogId, catalogos)) {
+        return false;
+      }
+      if (catalogFilterState !== "todos" && !matchesCatalog(solCatalogId, catalogFilterState, catalogos)) {
+        return false;
+      }
+
+      // 1. Period Filter
+      if (periodFilter !== "todos" && item.periodo !== periodFilter) return false;
+
+      // 2. Department Filter
+      if (deptFilter !== "todos" && item.departamento !== deptFilter) return false;
+
+      // 3. Status Filter
+      if (statusFilter !== "todos" && item.estado !== statusFilter) return false;
+
+      // 4. Date Filter (Fecha)
+      if (dateFilter && item.fecha !== dateFilter) return false;
+
+      // 5. Order Number Filter (Número de orden)
+      if (orderNumberFilter && !item.numeroSolicitud.toLowerCase().includes(orderNumberFilter.toLowerCase())) return false;
+
+      // 6. Creator Filter (Usuario solicitante)
+      if (creatorFilter && !item.usuarioCreador.toLowerCase().includes(creatorFilter.toLowerCase())) return false;
+
+      // 7. Role & Department permissions: each user can see their department's requests or requests created by them
+      if (!canSeeAll) {
+        const isOwnCreator =
+          item.usuarioCreador.toLowerCase().includes(currentUser.usuario.toLowerCase()) ||
+          item.usuarioCreador.toLowerCase().includes(currentUser.nombre.toLowerCase());
+        const isOwnDept = item.departamento === currentUser.departamento;
+        const isAllowedDeptCatalog =
+          (currentUser.departamento === "Laboratorio" && matchesCatalog(solCatalogId, "laboratorio", catalogos)) ||
+          (currentUser.departamento === "Odontología" && matchesCatalog(solCatalogId, "odontologia", catalogos));
+
+        if (!isOwnCreator && !isOwnDept && !isAllowedDeptCatalog) {
+          return false;
+        }
+      }
+
+      // 8. Search by number or creator name
+      if (searchTerm) {
+        const search = searchTerm.toLowerCase();
+        return (
+          item.numeroSolicitud.toLowerCase().includes(search) ||
+          item.usuarioCreador.toLowerCase().includes(search) ||
+          item.descripcion.toLowerCase().includes(search)
+        );
+      }
+
+      return true;
+    });
+  }, [
+    solicitudes,
+    availableCatalogosMemo,
+    currentUser,
+    catalogos,
+    catalogFilterState,
+    periodFilter,
+    deptFilter,
+    statusFilter,
+    dateFilter,
+    orderNumberFilter,
+    creatorFilter,
+    searchTerm
+  ]);
+
+  const getPriorityBadgeClass = (priority: string) => {
+    switch (priority) {
+      case "Alta":
+        return "bg-rose-50 text-rose-700 border border-rose-200";
+      case "Media":
+        return "bg-amber-50 text-amber-700 border border-amber-200";
+      case "Baja":
+        return "bg-slate-100 text-slate-700 border border-slate-200";
+      default:
+        return "bg-slate-100 text-slate-600";
+    }
+  };
+
+  const getStatusBadgeClass = (status: string) => {
+    switch (status) {
+      case "Pendiente":
+        return "bg-amber-100 text-amber-800 border border-amber-200";
+      case "Aprobada":
+        return "bg-teal-100 text-teal-800 border border-teal-200";
+      case "En Proceso":
+      case "En proceso":
+      case "En preparación":
+        return "bg-blue-100 text-blue-800 border border-blue-200";
+      case "Parcialmente entregada":
+        return "bg-indigo-100 text-indigo-800 border border-indigo-200";
+      case "Entregada":
+      case "Completada":
+        return "bg-emerald-100 text-emerald-800 border border-emerald-200";
+      case "Rechazada":
+      case "Cancelada":
+        return "bg-rose-100 text-rose-800 border border-rose-200";
+      default:
+        return "bg-slate-100 text-slate-800 border border-slate-200";
+    }
+  };
+
+  return (
+    <div className="space-y-4 sm:space-y-6 w-full min-w-0 max-w-full">
+      {/* Selector de periodo y controles principales */}
+      <div className="bg-white rounded-2xl sm:rounded-3xl p-4 sm:p-6 border border-slate-200 shadow-sm w-full min-w-0">
+        <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3.5 sm:gap-4">
+          <div className="min-w-0">
+            <h3 className="text-base sm:text-lg font-bold text-slate-900 flex items-center gap-2">
+              <ClipboardList className="w-5 h-5 text-teal-600 shrink-0" />
+              <span className="truncate">
+                {currentUser.rol === "Administrador" ? "Gestión de Órdenes de Servicio" : "Mis Solicitudes de Departamento"}
+              </span>
+            </h3>
+            <p className="text-slate-500 text-xs mt-1 leading-relaxed">
+              {currentUser.rol === "Administrador"
+                ? "Consulta, monitorea y autoriza todas las solicitudes departamentales de insumos"
+                : "Crea y supervisa las solicitudes de medicamentos y materiales para tu área"}
+            </p>
+          </div>
+          <div className="grid grid-cols-2 sm:flex sm:flex-wrap gap-2">
+            <button
+              onClick={() => {
+                setActiveSubTab("reabastecimiento");
+                playSound("click");
+              }}
+              className={`px-3 sm:px-4 py-2 text-[11px] sm:text-xs font-bold rounded-xl transition flex items-center justify-center gap-1.5 shadow-2xs ${
+                activeSubTab === "reabastecimiento"
+                  ? "bg-gradient-to-r from-teal-700 to-emerald-700 text-white shadow-md shadow-teal-900/20 font-extrabold"
+                  : "bg-teal-50 hover:bg-teal-100 text-teal-800 border border-teal-200"
+              }`}
+            >
+              <Sparkles className="w-3.5 h-3.5 text-amber-300 shrink-0" />
+              <span className="truncate">Reabastecimiento</span>
+            </button>
+            <button
+              onClick={() => {
+                setActiveSubTab("list");
+                playSound("click");
+              }}
+              className={`px-3 sm:px-4 py-2 text-[11px] sm:text-xs font-bold rounded-xl transition text-center truncate ${
+                activeSubTab === "list" ? "bg-teal-800 text-white shadow-sm" : "bg-slate-50 hover:bg-slate-100 text-slate-600 border border-slate-200"
+              }`}
+            >
+              {currentUser.rol === "Administrador" ? "Órdenes" : "Ver Solicitudes"}
+            </button>
+            <button
+              onClick={() => {
+                setActiveSubTab("create");
+                playSound("click");
+              }}
+              className={`px-3 sm:px-4 py-2 text-[11px] sm:text-xs font-bold rounded-xl transition flex items-center justify-center gap-1.5 ${
+                activeSubTab === "create" ? "bg-teal-800 text-white shadow-sm" : "bg-slate-50 hover:bg-slate-100 text-slate-600 border border-slate-200"
+              }`}
+            >
+              <Plus className="w-3.5 h-3.5 shrink-0" />
+              <span className="truncate">Solicitud Manual</span>
+            </button>
+            <button
+              onClick={() => {
+                setActiveSubTab("history");
+                playSound("click");
+              }}
+              className={`px-3 sm:px-4 py-2 text-[11px] sm:text-xs font-bold rounded-xl transition flex items-center justify-center gap-1.5 ${
+                activeSubTab === "history" ? "bg-teal-800 text-white shadow-sm" : "bg-slate-50 hover:bg-slate-100 text-slate-600 border border-slate-200"
+              }`}
+            >
+              <FileText className="w-3.5 h-3.5 shrink-0" />
+              <span className="truncate">Historial</span>
+              <span className={`px-1.5 py-0.2 rounded-full text-[10px] font-black shrink-0 ${activeSubTab === "history" ? "bg-white/20 text-white" : "bg-teal-100 text-teal-800"}`}>
+                {solicitudes.length}
+              </span>
+            </button>
+          </div>
+        </div>
+
+        {activeSubTab === "list" && (
+          <div className="mt-6 border-t border-slate-100 pt-5 space-y-4">
+            <div className="flex items-center gap-2 text-xs font-black text-slate-500 uppercase tracking-wider">
+              <Filter className="w-4 h-4 text-teal-600" />
+              <span>Filtros de Búsqueda Avanzada</span>
+            </div>
+            
+            <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-3">
+              {/* 1. N.º de Orden */}
+              <div>
+                <label className="block text-[10px] font-black uppercase text-slate-400 mb-1">N.º de Orden</label>
+                <div className="relative">
+                  <Search className="w-3.5 h-3.5 absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+                  <input
+                    type="text"
+                    placeholder="Ej: ORD-001..."
+                    value={orderNumberFilter}
+                    onChange={(e) => setOrderNumberFilter(e.target.value)}
+                    className="w-full bg-slate-50 border border-slate-200 rounded-xl pl-8.5 pr-3 py-2 text-xs font-bold text-slate-700 outline-none focus:ring-1 focus:ring-teal-400 placeholder:text-slate-400"
+                  />
+                </div>
+              </div>
+
+              {/* 2. Catálogo */}
+              <div>
+                <label className="block text-[10px] font-black uppercase text-slate-400 mb-1">Catálogo</label>
+                <select
+                  value={catalogFilterState}
+                  onChange={(e) => setCatalogFilterState(e.target.value)}
+                  className="w-full bg-slate-50 border border-slate-200 rounded-xl px-2.5 py-2 text-xs font-semibold text-slate-700 outline-none focus:ring-1 focus:ring-teal-400 animate-fade-in"
+                >
+                  <option value="todos">Todos los catálogos</option>
+                  {getAvailableCatalogos().map((cat) => (
+                    <option key={cat.id} value={cat.id}>{cat.nombre}</option>
+                  ))}
+                </select>
+              </div>
+
+              {/* 3. Departamento */}
+              <div>
+                <label className="block text-[10px] font-black uppercase text-slate-400 mb-1">Departamento</label>
+                <select
+                  value={deptFilter}
+                  onChange={(e) => setDeptFilter(e.target.value)}
+                  disabled={!isWarehouseOrAdmin}
+                  className="w-full bg-slate-50 border border-slate-200 rounded-xl px-2.5 py-2 text-xs font-semibold text-slate-700 outline-none focus:ring-1 focus:ring-teal-400 disabled:opacity-60"
+                >
+                  {isWarehouseOrAdmin ? (
+                    <>
+                      <option value="todos">Todos los depts.</option>
+                      {dynamicDepts.map((d) => (
+                        <option key={d} value={d}>{d}</option>
+                      ))}
+                    </>
+                  ) : (
+                    <option value={currentUser.departamento}>{currentUser.departamento}</option>
+                  )}
+                </select>
+              </div>
+
+              {/* 4. Estado */}
+              <div>
+                <label className="block text-[10px] font-black uppercase text-slate-400 mb-1">Estado de Orden</label>
+                <select
+                  value={statusFilter}
+                  onChange={(e) => setStatusFilter(e.target.value)}
+                  className="w-full bg-slate-50 border border-slate-200 rounded-xl px-2.5 py-2 text-xs font-semibold text-slate-700 outline-none focus:ring-1 focus:ring-teal-400"
+                >
+                  <option value="todos">Todos los estados</option>
+                  <option value="Pendiente">Pendiente</option>
+                  <option value="Aprobada">Aprobada</option>
+                  <option value="En Proceso">En Proceso</option>
+                  <option value="En preparación">En preparación</option>
+                  <option value="Parcialmente entregada">Parcialmente entregada</option>
+                  <option value="Entregada">Entregada</option>
+                  <option value="Rechazada">Rechazada</option>
+                  <option value="Cancelada">Cancelada</option>
+                </select>
+              </div>
+
+              {/* 5. Fecha de Orden */}
+              <div>
+                <label className="block text-[10px] font-black uppercase text-slate-400 mb-1">Fecha de Orden</label>
+                <input
+                  type="date"
+                  value={dateFilter}
+                  onChange={(e) => setDateFilter(e.target.value)}
+                  className="w-full bg-slate-50 border border-slate-200 rounded-xl px-2.5 py-1.5 text-xs font-semibold text-slate-700 outline-none focus:ring-1 focus:ring-teal-400"
+                />
+              </div>
+
+              {/* 6. Usuario Solicitante */}
+              <div>
+                <label className="block text-[10px] font-black uppercase text-slate-400 mb-1">Usuario Solicitante</label>
+                <div className="relative">
+                  <User className="w-3.5 h-3.5 absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+                  <input
+                    type="text"
+                    placeholder="Buscar creador..."
+                    value={creatorFilter}
+                    onChange={(e) => setCreatorFilter(e.target.value)}
+                    className="w-full bg-slate-50 border border-slate-200 rounded-xl pl-8.5 pr-3 py-2 text-xs font-bold text-slate-700 outline-none focus:ring-1 focus:ring-teal-400 placeholder:text-slate-400"
+                  />
+                </div>
+              </div>
+
+              {/* 7. Búsqueda General (Texto libre) */}
+              <div className="sm:col-span-2">
+                <label className="block text-[10px] font-black uppercase text-slate-400 mb-1">Búsqueda General</label>
+                <div className="relative">
+                  <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+                  <input
+                    type="text"
+                    placeholder="Buscar en descripción, justificación, responsable..."
+                    value={searchTerm}
+                    onChange={(e) => setSearchTerm(e.target.value)}
+                    className="w-full bg-slate-50 border border-slate-200 rounded-xl pl-9 pr-3 py-2 text-xs font-bold text-slate-700 outline-none focus:ring-1 focus:ring-teal-400 placeholder:text-slate-400"
+                  />
+                </div>
+              </div>
+            </div>
+
+            {/* Botón de limpiar filtros si hay alguno activo */}
+            {(orderNumberFilter || dateFilter || creatorFilter || deptFilter !== "todos" || statusFilter !== "todos" || searchTerm || catalogFilterState !== "todos") && (
+              <div className="flex justify-end pt-1">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setOrderNumberFilter("");
+                    setDateFilter("");
+                    setCreatorFilter("");
+                    setDeptFilter("todos");
+                    setStatusFilter("todos");
+                    setSearchTerm("");
+                    setCatalogFilterState("todos");
+                    playSound("click");
+                  }}
+                  className="inline-flex items-center gap-1 text-[10px] font-black text-rose-600 hover:text-rose-700 uppercase tracking-wider cursor-pointer border border-rose-200/50 hover:bg-rose-50 px-2.5 py-1 rounded-lg transition"
+                >
+                  <X className="w-3.5 h-3.5" />
+                  Limpiar Filtros
+                </button>
+              </div>
+            )}
+
+            {/* Período de registros */}
+            <div className="sm:col-span-4 mt-2 border-t border-slate-100 pt-3 flex items-center justify-between flex-wrap gap-2 text-xs text-slate-500 font-bold uppercase tracking-wider">
+              <span>Período de registros:</span>
+              <div className="flex gap-2">
+                <button
+                  onClick={() => setPeriodFilter("todos")}
+                  className={`rounded-full px-3 py-1.5 font-bold border ${
+                    periodFilter === "todos" ? "bg-teal-50 border-teal-200 text-teal-800" : "bg-white border-slate-200"
+                  }`}
+                >
+                  Ver Todo el Historial
+                </button>
+                {availablePeriods.map((per) => (
+                  <button
+                    key={per}
+                    onClick={() => setPeriodFilter(per)}
+                    className={`rounded-full px-3 py-1.5 font-bold border ${
+                      periodFilter === per ? "bg-teal-50 border-teal-200 text-teal-800" : "bg-white border-slate-200"
+                    }`}
+                  >
+                    {per}
+                  </button>
+                ))}
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* Contenido de pestañas */}
+      {loading ? (
+        <div className="bg-white rounded-3xl p-12 text-center border border-slate-200 shadow-sm flex flex-col items-center justify-center">
+          <LoaderCircle className="w-10 h-10 animate-spin text-teal-600 mb-3" />
+          <p className="text-sm font-semibold text-slate-500">Cargando módulos de solicitudes...</p>
+        </div>
+      ) : activeSubTab === "reabastecimiento" ? (
+        <ReabastecimientoInteligente
+          products={products}
+          solicitudes={solicitudes}
+          catalogos={catalogos}
+          activeCatalogId={solicitudCatalogId || activeCatalogId}
+          userDepartment={currentUser.departamento || department}
+          onApplyItems={(items, summaryNote) => {
+            setSolicitudItems(items);
+            if (summaryNote) {
+              setObservations(summaryNote);
+              setDescription(summaryNote);
+            }
+            setActiveSubTab("create");
+            playSound("positive");
+            showToast(`Se cargaron ${items.length} insumos en el formulario de solicitud.`);
+          }}
+          onDirectSubmitSolicitud={async (items, summaryNote) => {
+            await submitSolicitudPayload(items, summaryNote, summaryNote, true);
+          }}
+          playSound={playSound}
+          showToast={showToast}
+        />
+      ) : activeSubTab === "list" ? (
+        <div className="space-y-4">
+          {filteredList.length === 0 ? (
+            <div className="bg-white rounded-3xl p-12 text-center border border-slate-200 shadow-sm text-slate-400">
+              <ClipboardList className="w-12 h-12 text-slate-300 mx-auto mb-3 animate-pulse" />
+              <p className="font-bold text-slate-600">No se encontraron solicitudes u órdenes</p>
+              <p className="text-xs text-slate-400 mt-1">Intente cambiar los filtros o el periodo mensual.</p>
+            </div>
+          ) : (
+            <>
+              {filteredList.slice(0, visibleListCount).map((sol) => {
+                const authMeta = getAuthorizationMetadata(sol);
+                return (
+                  <div key={sol.id} className="bg-white rounded-2xl sm:rounded-3xl border border-slate-200 p-4 sm:p-6 shadow-sm hover:shadow-md transition space-y-4 w-full min-w-0">
+                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 sm:gap-3 border-b border-slate-100 pb-3">
+                      <div className="flex items-center gap-2 sm:gap-3 flex-wrap">
+                        <span className="text-xs sm:text-sm font-black text-teal-800 bg-teal-50 border border-teal-200 px-3 py-1.5 rounded-2xl">
+                          {sol.numeroSolicitud}
+                        </span>
+                        <span className={`text-[10px] font-black uppercase tracking-wider px-2.5 py-1 rounded-full ${getPriorityBadgeClass(sol.prioridad)}`}>
+                          Prioridad {sol.prioridad}
+                        </span>
+                        <span className={`text-[10px] font-black uppercase tracking-wider px-2.5 py-1 rounded-full ${getStatusBadgeClass(sol.estado)}`}>
+                          {sol.estado}
+                        </span>
+                      </div>
+                      <div className="text-slate-400 text-xs font-semibold flex items-center gap-1.5">
+                        <Calendar className="w-3.5 h-3.5 text-slate-300" />
+                        <span>
+                          {new Date(sol.fecha + "T00:00:00").toLocaleDateString("es-DO")} • {sol.hora}
+                        </span>
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+                      <div className="md:col-span-2 space-y-3">
+                        <div className="flex flex-wrap items-center gap-3">
+                          <div>
+                            <p className="text-[10px] font-black uppercase text-slate-400 tracking-wider">Departamento que solicita</p>
+                            <p className="text-slate-800 font-bold mt-0.5">{sol.departamento}</p>
+                          </div>
+                          {sol.responsableNombre && (
+                            <div className="border-l border-slate-200 pl-3">
+                              <p className="text-[10px] font-black uppercase text-slate-400 tracking-wider">Responsable del Departamento</p>
+                              <p className="text-teal-800 font-extrabold text-xs mt-0.5 flex items-center gap-1">
+                                <User className="w-3.5 h-3.5 text-teal-600" />
+                                {sol.responsableNombre}
+                              </p>
+                            </div>
+                          )}
+                          {(sol.tipoConsumoNombre || sol.categoriaConsumo) && (
+                            <div className="border-l border-slate-200 pl-3">
+                              <p className="text-[10px] font-black uppercase text-slate-400 tracking-wider">Tipo de Consumo</p>
+                              <span
+                                className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-lg text-[10px] font-black mt-0.5 ${
+                                  sol.categoriaConsumo === "Externo"
+                                    ? "bg-amber-50 text-amber-800 border border-amber-200"
+                                    : "bg-teal-50 text-teal-800 border border-teal-200"
+                                }`}
+                              >
+                                {sol.tipoConsumoNombre || sol.categoriaConsumo}
+                                {sol.destinoExternoInstitucion ? ` • ${sol.destinoExternoInstitucion}` : ""}
+                              </span>
+                            </div>
+                          )}
+                          {sol.numeroConsumoRegistrado && (
+                            <div className="border-l border-slate-200 pl-3">
+                              <p className="text-[10px] font-black uppercase text-slate-400 tracking-wider">Consumo Registrado</p>
+                              <span className="inline-block px-2 py-0.5 rounded-lg bg-emerald-50 text-emerald-800 border border-emerald-200 text-[10px] font-black mt-0.5">
+                                {sol.numeroConsumoRegistrado}
+                              </span>
+                            </div>
+                          )}
+                        </div>
+                        <div>
+                          <p className="text-[10px] font-black uppercase text-slate-400 tracking-wider">Descripción / Productos Solicitados</p>
+                          <p className="text-slate-600 text-sm whitespace-pre-wrap mt-0.5">{sol.descripcion}</p>
+                          {sol.items && sol.items.length > 0 && (
+                            <div className="flex flex-wrap gap-1.5 mt-2">
+                              {sol.items.map((it, idx) => (
+                                <span
+                                  key={it.id || `${it.productoCodigo}-${idx}`}
+                                  className="inline-flex items-center gap-1 px-2.5 py-1 rounded-xl text-[11px] font-bold bg-slate-100 text-slate-800 border border-slate-200"
+                                >
+                                  <span className="font-mono text-teal-700 font-black">{it.productoCodigo}</span>
+                                  <span>{it.productoNombre}</span>
+                                  <span className="bg-teal-700 text-white px-1.5 py-0.2 rounded-md text-[10px] font-black">
+                                    x{it.cantidadSolicitada}
+                                  </span>
+                                </span>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                        {sol.observaciones && (
+                          <div className="bg-slate-50 border border-slate-200/50 rounded-2xl p-3.5">
+                            <p className="text-[10px] font-black uppercase text-slate-500 tracking-wider">Observaciones / Respuestas</p>
+                            <p className="text-xs text-slate-600 mt-1 italic">{sol.observaciones}</p>
+                          </div>
+                        )}
+                      </div>
+
+                      <div className="bg-slate-50 border border-slate-200 rounded-2xl p-4 flex flex-col justify-between gap-4">
+                        <div className="space-y-2.5">
+                          <div className="flex items-center gap-2">
+                            <div className="w-1.5 h-7 rounded-full bg-teal-600"></div>
+                            <div>
+                              <p className="text-[9px] font-black uppercase text-slate-400 leading-none">Creado por</p>
+                              <p className="text-xs font-bold text-slate-800 mt-1">{sol.usuarioCreador}</p>
+                            </div>
+                          </div>
+                          {authMeta && (
+                            <div className="border-t border-slate-200/50 pt-2">
+                              <p className="text-[9px] font-black uppercase text-slate-400">
+                                {authMeta.accion === "Rechazada" ? "Rechazado por (ADMIN)" : "Autorizado por (ADMIN)"}
+                              </p>
+                              <p className="text-xs font-bold text-teal-900 mt-0.5">{authMeta.autorizador}</p>
+                              <p className="text-[10px] text-slate-500 font-semibold">
+                                {authMeta.fecha ? new Date(authMeta.fecha + "T00:00:00").toLocaleDateString("es-DO") : ""} {authMeta.hora ? `• ${authMeta.hora}` : ""}
+                              </p>
+                            </div>
+                          )}
+                          <div className="border-t border-slate-200/50 pt-2">
+                            <p className="text-[9px] font-black uppercase text-slate-400">Período Mensual</p>
+                            <p className="text-xs font-bold text-slate-700 mt-0.5">{sol.periodo}</p>
+                          </div>
+                        </div>
+
+                        <div className="space-y-2">
+                          <button
+                            onClick={() => {
+                              handleOpenStatusModal(sol);
+                              playSound("click");
+                            }}
+                            className="w-full py-2 px-3 text-xs font-bold rounded-xl transition bg-slate-100 text-slate-600 hover:bg-slate-200 cursor-pointer text-center"
+                          >
+                            {isWarehouseOrAdmin
+                              ? "Ver Detalle / Despacho"
+                              : "Consultar Detalle de Solicitud"}
+                          </button>
+
+                          {/* Exportación rápida */}
+                          <div className="grid grid-cols-2 gap-1.5 pt-1">
+                            <button
+                              type="button"
+                              onClick={() => exportToWord(sol)}
+                              className="bg-white hover:bg-slate-50 text-slate-600 border border-slate-200 font-extrabold text-[10px] py-1.5 px-1.5 rounded-lg transition active:scale-95 cursor-pointer text-center flex items-center justify-center gap-1"
+                            >
+                              <FileText className="w-3.5 h-3.5 text-blue-600" />
+                              Word (.doc)
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => exportToPDF(sol)}
+                              className="bg-white hover:bg-slate-50 text-slate-600 border border-slate-200 font-extrabold text-[10px] py-1.5 px-1.5 rounded-lg transition active:scale-95 cursor-pointer text-center flex items-center justify-center gap-1"
+                            >
+                              <FileText className="w-3.5 h-3.5 text-rose-600" />
+                              PDF (.pdf)
+                            </button>
+                          </div>
+
+                          {/* Botón Eliminar Orden (exclusivo Anyer o Admin de sede cliente) */}
+                          {(currentUser.usuario.toLowerCase() === "anyer" ||
+                            currentUser.nombre.toLowerCase() === "anyer" ||
+                            (getActiveFarmaciaId() !== DEFAULT_FARMACIA_ID && isAdmin)) && (
+                            <button
+                              type="button"
+                              onClick={() => handleDeleteRequest(sol)}
+                              className="w-full mt-2 py-2 px-3 text-xs font-black text-rose-700 bg-rose-50 hover:bg-rose-100 border border-rose-200 rounded-xl transition active:scale-95 cursor-pointer text-center flex items-center justify-center gap-1.5 shadow-xs"
+                            >
+                              <Trash2 className="w-4 h-4 text-rose-600" />
+                              Eliminar Orden
+                            </button>
+                          )}
+
+                          {/* AUTORIZACIÓN EXCLUSIVA PARA ADMINISTRADORES */}
+                          {isAdmin && sol.estado === "Pendiente" && (
+                            <div className="grid grid-cols-2 gap-1.5 pt-1.5 border-t border-slate-200/40">
+                              <button
+                                onClick={() => handleDirectStatusChange(sol, "Aprobada")}
+                                className="bg-teal-700 hover:bg-teal-800 text-white font-black text-[10px] py-1.5 px-2 rounded-lg transition active:scale-95 cursor-pointer text-center flex items-center justify-center gap-1"
+                              >
+                                <CheckCircle2 className="w-3.5 h-3.5" />
+                                Autorizar
+                              </button>
+                              <button
+                                onClick={() => handleDirectStatusChange(sol, "Rechazada")}
+                                className="bg-rose-600 hover:bg-rose-700 text-white font-black text-[10px] py-1.5 px-2 rounded-lg transition active:scale-95 cursor-pointer text-center flex items-center justify-center gap-1"
+                              >
+                                <XCircle className="w-3.5 h-3.5" />
+                                Rechazar
+                              </button>
+                            </div>
+                          )}
+
+                          {!isAdmin && sol.estado === "Pendiente" && (
+                            <div className="pt-1.5 border-t border-slate-200/40 text-center">
+                              <span className="inline-flex items-center gap-1 text-[10px] font-bold text-amber-800 bg-amber-50 border border-amber-200 px-2.5 py-1 rounded-lg">
+                                <ShieldCheck className="w-3.5 h-3.5 text-amber-600" />
+                                Pendiente de Autorización ADMIN
+                              </span>
+                            </div>
+                          )}
+
+                          {/* Despacho tras autorización (Almacén / Farmacia / Admin) */}
+                          {isWarehouseOrAdmin && (sol.estado === "Aprobada" || sol.estado === "En Proceso") && (
+                            <div className="grid grid-cols-2 gap-1.5 pt-1.5 border-t border-slate-200/40">
+                              <button
+                                onClick={() => handleDirectStatusChange(sol, "Entregada")}
+                                className="col-span-2 bg-emerald-600 hover:bg-emerald-700 text-white font-black text-[10px] py-2 px-2 rounded-lg transition active:scale-95 cursor-pointer text-center flex items-center justify-center gap-1"
+                              >
+                                <RefreshCw className="w-3.5 h-3.5 animate-spin-slow" />
+                                Entregar y Descontar
+                              </button>
+                              {isAdmin && (
+                                <button
+                                  onClick={() => handleDirectStatusChange(sol, "Rechazada")}
+                                  className="col-span-2 bg-rose-600 hover:bg-rose-700 text-white font-black text-[10px] py-1.5 px-2 rounded-lg transition active:scale-95 cursor-pointer text-center"
+                                >
+                                  Rechazar (ADMIN)
+                                </button>
+                              )}
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+
+              {filteredList.length > visibleListCount && (
+                <div className="flex justify-center pt-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      playSound("click");
+                      setVisibleListCount((prev) => prev + 25);
+                    }}
+                    className="inline-flex items-center gap-2 px-5 py-2.5 rounded-2xl bg-white hover:bg-slate-50 text-teal-800 border border-slate-200 font-extrabold text-xs shadow-xs transition cursor-pointer"
+                  >
+                    <ChevronDown className="w-4 h-4" />
+                    <span>Cargar más solicitudes ({filteredList.length - visibleListCount} restantes)</span>
+                  </button>
+                </div>
+              )}
+            </>
+          )}
+        </div>
+      ) : activeSubTab === "create" ? (
+        <form onSubmit={handleCreateRequest} className="bg-white rounded-2xl sm:rounded-3xl p-4 sm:p-6 border border-slate-200 shadow-sm space-y-5 sm:space-y-6 anim-card-in w-full min-w-0">
+          <div className="border-b border-slate-100 pb-4">
+            <h3 className="text-base sm:text-xl font-extrabold text-slate-900 flex items-center gap-2">
+              <PlusCircle className="w-5 h-5 sm:w-6 sm:h-6 text-teal-600 shrink-0" />
+              <span>Registrar Nueva Solicitud Departamental</span>
+            </h3>
+            <p className="text-slate-500 text-xs mt-1">
+              Seleccione productos del catálogo digital o ingrese los insumos requeridos de forma manual.
+            </p>
+          </div>
+
+          <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 sm:gap-8">
+            {/* COLUMNA IZQUIERDA: DATOS DE LA SOLICITUD Y DRAFT */}
+            <div className="lg:col-span-7 space-y-5 min-w-0">
+              <h4 className="text-sm font-black uppercase text-slate-700 tracking-wider flex items-center gap-2">
+                <span className="w-1.5 h-4 rounded-full bg-teal-600"></span>
+                1. Información General de la Solicitud
+              </h4>
+
+              {/* Selector de Catálogo para Pedidos/Solicitudes */}
+              <div className="bg-slate-50 border border-slate-200 rounded-2xl p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                <div className="space-y-0.5">
+                  <label className="block text-xs font-black uppercase text-slate-500 tracking-wider">
+                    Catálogo de Trabajo *
+                  </label>
+                  <p className="text-[10px] text-slate-400">Seleccione el catálogo para solicitar insumos</p>
+                </div>
+                <select
+                  value={solicitudCatalogId}
+                  onChange={(e) => handleSetSolicitudCatalogId(e.target.value)}
+                  className="w-full sm:max-w-xs rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-xs font-bold text-slate-700 outline-none focus:ring-2 focus:ring-teal-400 cursor-pointer animate-pulse"
+                >
+                  <option value="">-- Seleccione un catálogo --</option>
+                  {getAvailableCatalogos().map((cat) => (
+                    <option key={cat.id} value={cat.id}>
+                      {cat.nombre}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-xs font-black uppercase text-slate-500 tracking-wider mb-1.5">
+                    Departamento Solicitante
+                  </label>
+                  {(currentUser.rol === "Administrador" || currentUser.departamento === "Farmacia" || currentUser.departamento === "Almacén y Suministro") ? (
+                    <select
+                      value={department}
+                      onChange={(e) => setDepartment(e.target.value)}
+                      className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2.5 text-sm outline-none focus:ring-2 focus:ring-teal-400 font-extrabold text-teal-800"
+                    >
+                      {dynamicDepts.map((d) => (
+                        <option key={d} value={d}>{d}</option>
+                      ))}
+                    </select>
+                  ) : (
+                    <div className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-2.5 text-sm font-extrabold text-teal-800 h-[44px] flex items-center shadow-inner">
+                      {currentUser.departamento || "Servicio General"}
+                    </div>
+                  )}
+                </div>
+                <div>
+                  <label className="block text-xs font-black uppercase text-slate-500 tracking-wider mb-1.5">
+                    Prioridad de Entrega *
+                  </label>
+                  <select
+                    value={priority}
+                    onChange={(e) => setPriority(e.target.value as any)}
+                    className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2.5 text-sm outline-none focus:ring-2 focus:ring-teal-400 font-semibold text-slate-700"
+                  >
+                    <option value="Baja">Baja - Ordinario</option>
+                    <option value="Media">Media - Normal</option>
+                    <option value="Alta">Alta - Urgente</option>
+                  </select>
+                </div>
+              </div>
+
+              {/* RESPONSABLE DEL DEPARTAMENTO + BOTÓN NUEVO Y TIPO DE CONSUMO */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 bg-teal-50/40 border border-teal-200/80 rounded-2xl p-4">
+                <div>
+                  <label className="block text-xs font-black uppercase text-slate-600 tracking-wider mb-1.5">
+                    Responsable del Departamento *
+                  </label>
+                  <select
+                    value={responsableId}
+                    onChange={(e) => setResponsableId(e.target.value)}
+                    className="w-full bg-white border border-slate-200 rounded-xl px-3 py-2.5 text-xs font-extrabold text-slate-800 outline-none focus:ring-2 focus:ring-teal-400"
+                  >
+                    {activeResponsablesForDept.length === 0 ? (
+                      <option value="">-- Sin responsable en {department} --</option>
+                    ) : (
+                      activeResponsablesForDept.map((r) => (
+                        <option key={r.id} value={r.id}>
+                          {r.nombre} ({r.departamentoNombre}){r.cargo ? ` • ${r.cargo}` : ""}
+                        </option>
+                      ))
+                    )}
+                  </select>
+                  <div className="mt-2 flex flex-wrap items-center justify-between gap-2">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setNewRespDept(department);
+                        setShowNewRespModal(true);
+                        playSound("click");
+                      }}
+                      className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-teal-700 hover:bg-teal-800 text-white text-[11px] font-black shadow-2xs transition cursor-pointer"
+                    >
+                      <UserPlus className="w-3.5 h-3.5" />
+                      <span>Nuevo</span>
+                    </button>
+                    {isAdmin && (
+                      <label className="inline-flex items-center gap-1.5 text-[10px] font-bold text-slate-600 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={asignacionEspecialAdmin}
+                          onChange={(e) => setAsignacionEspecialAdmin(e.target.checked)}
+                          className="rounded border-slate-300 text-teal-700 focus:ring-teal-500"
+                        />
+                        <span>Asignación especial (Admin)</span>
+                      </label>
+                    )}
+                  </div>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-black uppercase text-slate-600 tracking-wider mb-1.5">
+                    Tipo de Consumo *
+                  </label>
+                  <select
+                    value={tipoConsumoId}
+                    onChange={(e) => setTipoConsumoId(e.target.value)}
+                    className="w-full bg-white border border-slate-200 rounded-xl px-3 py-2.5 text-xs font-extrabold text-slate-800 outline-none focus:ring-2 focus:ring-teal-400"
+                  >
+                    {activeTiposConsumo.map((t) => (
+                      <option key={t.id} value={t.id}>
+                        {t.nombre} ({t.categoria})
+                      </option>
+                    ))}
+                  </select>
+                  <p className="text-[10px] text-slate-500 mt-1.5 font-medium">
+                    Al entregarse esta orden se registrará automáticamente su consumo departamental.
+                  </p>
+                </div>
+
+                {selectedTipoConsumoObj?.categoria === "Externo" && (
+                  <div className="sm:col-span-2 grid grid-cols-1 sm:grid-cols-2 gap-3 pt-2 border-t border-amber-200/80">
+                    <div>
+                      <label className="block text-[10px] font-black uppercase text-amber-800 tracking-wider mb-1">
+                        Institución / Destino Externo *
+                      </label>
+                      <input
+                        type="text"
+                        value={destinoExternoInstitucion}
+                        onChange={(e) => setDestinoExternoInstitucion(e.target.value)}
+                        placeholder="Hospital o dependencia receptora..."
+                        className="w-full bg-white border border-amber-300 rounded-xl px-3 py-2 text-xs font-bold text-slate-800 outline-none focus:ring-2 focus:ring-amber-400"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[10px] font-black uppercase text-amber-800 tracking-wider mb-1">
+                        Persona que Recibe (Externo)
+                      </label>
+                      <input
+                        type="text"
+                        value={destinoExternoPersona}
+                        onChange={(e) => setDestinoExternoPersona(e.target.value)}
+                        placeholder="Nombre y cédula/cargo..."
+                        className="w-full bg-white border border-amber-300 rounded-xl px-3 py-2 text-xs font-bold text-slate-800 outline-none focus:ring-2 focus:ring-amber-400"
+                      />
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {/* DETALLES DE ITEMS AGREGADOS */}
+              <div className="space-y-2">
+                <label className="block text-xs font-black uppercase text-slate-500 tracking-wider">
+                  Insumos Añadidos a la Solicitud ({solicitudItems.length})
+                </label>
+                {solicitudItems.length === 0 ? (
+                  <div className="border border-dashed border-slate-200 rounded-2xl p-6 text-center text-slate-400 text-xs">
+                    <Layers className="w-8 h-8 text-slate-300 mx-auto mb-2 animate-pulse" />
+                    No has añadido ningún producto. Selecciona del catálogo de la derecha.
+                  </div>
+                ) : (
+                  <div className="border border-slate-200 rounded-2xl overflow-hidden bg-white shadow-sm max-h-60 overflow-y-auto">
+                    <table className="w-full text-left text-xs">
+                      <thead className="bg-slate-50 text-slate-500 uppercase font-black text-[9px] sticky top-0 border-b border-slate-100">
+                        <tr>
+                          <th className="px-4 py-2.5">Código / Insumo</th>
+                          <th className="px-4 py-2.5 text-center">Cant. Solicitada</th>
+                          <th className="px-4 py-2.5 text-right">Acción</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-100">
+                        {solicitudItems.map((item, idx) => (
+                          <tr key={idx} className="hover:bg-slate-50/50">
+                            <td className="px-4 py-2.5 font-medium text-slate-800">
+                              <span className="block text-teal-700 font-extrabold text-[9px] uppercase leading-none mb-0.5">{item.productoCodigo}</span>
+                              {item.productoNombre}
+                            </td>
+                            <td className="px-4 py-2.5 text-center">
+                              <input
+                                type="number"
+                                min="1"
+                                value={item.cantidadSolicitada}
+                                onChange={(e) => {
+                                  const val = parseInt(e.target.value);
+                                  if (!isNaN(val) && val > 0) {
+                                    const prod = products?.find((p) => p.codigo === item.productoCodigo);
+                                    const totalSys = prod?.lotes?.reduce((acc, l) => acc + Number(l.cantidad || 0), 0) || 0;
+                                    const totalPhys = prod?.lotes?.reduce((acc, l) => acc + Number(l.cantidadF || 0), 0) || 0;
+                                    const maxAvailableBoth = Math.min(totalSys, totalPhys);
+                                    if (val > totalSys || val > totalPhys) {
+                                      playSound("negative");
+                                      showToast(
+                                        `Stock insuficiente para "${item.productoNombre}". Disponible en Sistema: ${totalSys} und. | Físico: ${totalPhys} und. (Máx: ${maxAvailableBoth} und.)`
+                                      );
+                                      return;
+                                    }
+                                    setSolicitudItems(prev => prev.map((it, i) => i === idx ? { ...it, cantidadSolicitada: val, cantidadEntregada: val } : it));
+                                  }
+                                }}
+                                className="w-16 bg-slate-50 border border-slate-200 rounded-md text-center py-1 text-xs font-black text-slate-700"
+                              />
+                            </td>
+                            <td className="px-4 py-2.5 text-right">
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setSolicitudItems(prev => prev.filter((_, i) => i !== idx));
+                                  playSound("click");
+                                }}
+                                className="text-rose-500 hover:text-rose-700 font-bold text-[11px] hover:underline cursor-pointer"
+                              >
+                                Quitar
+                              </button>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+
+              <div>
+                <label className="block text-xs font-black uppercase text-slate-500 tracking-wider mb-1.5">
+                  Descripción textual / Justificación de la Solicitud
+                </label>
+                <textarea
+                  required={solicitudItems.length === 0}
+                  rows={4}
+                  value={description}
+                  onChange={(e) => setDescription(e.target.value)}
+                  placeholder="Detalla los motivos, concentraciones específicas, o cualquier insumo que no encuentres en el catálogo..."
+                  className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-sm outline-none focus:ring-2 focus:ring-teal-400 text-slate-800 placeholder:text-slate-400 font-sans"
+                ></textarea>
+              </div>
+
+              <div>
+                <label className="block text-xs font-black uppercase text-slate-500 tracking-wider mb-1.5">
+                  Observaciones Internas (Opcional)
+                </label>
+                <input
+                  type="text"
+                  value={observations}
+                  onChange={(e) => setObservations(e.target.value)}
+                  placeholder="Escribe alguna acotación del pedido..."
+                  className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-sm outline-none focus:ring-2 focus:ring-teal-400 text-slate-800"
+                />
+              </div>
+
+              <div className="pt-4 flex gap-3 border-t border-slate-100">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setActiveSubTab("list");
+                    playSound("close");
+                  }}
+                  className="flex-1 rounded-xl border border-slate-200 text-slate-600 py-3 text-xs font-bold hover:bg-slate-50 transition cursor-pointer text-center"
+                >
+                  Cancelar
+                </button>
+                <button
+                  type="submit"
+                  disabled={creating}
+                  className="flex-1 rounded-xl bg-teal-800 hover:bg-teal-700 text-white py-3 text-xs font-bold shadow-sm transition flex items-center justify-center gap-2 cursor-pointer text-center"
+                >
+                  {creating ? "Enviando..." : "Enviar Solicitud"}
+                </button>
+              </div>
+            </div>
+
+            {/* COLUMNA DERECHA: CATÁLOGO DIGITAL CON STOCK FÍSICO Y SISTEMA */}
+            <div className="lg:col-span-5 bg-slate-50/50 rounded-2xl p-3.5 sm:p-5 border border-slate-200/60 flex flex-col h-[500px] sm:h-[650px] min-w-0">
+              <div className="mb-4 space-y-3 shrink-0">
+                <h4 className="text-sm font-black uppercase text-slate-700 tracking-wider flex items-center gap-2">
+                  <Layers className="w-5 h-5 text-teal-600" />
+                  2. Catálogo Digital de Medicamentos
+                </h4>
+                <div className="flex flex-col sm:flex-row gap-2">
+                  <div className="relative flex-1">
+                    <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+                    <input
+                      type="text"
+                      placeholder="Buscar por nombre, código..."
+                      value={itemSearch}
+                      onChange={(e) => setItemSearch(e.target.value)}
+                      className="w-full bg-white border border-slate-200 rounded-xl pl-9 pr-4 py-2.5 text-xs outline-none focus:ring-2 focus:ring-teal-400"
+                    />
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setOnlyUnverified(prev => !prev);
+                      playSound("click");
+                    }}
+                    className={`text-[11px] font-bold px-3 py-2 rounded-xl border transition flex items-center justify-center gap-1.5 cursor-pointer shrink-0 ${
+                      onlyUnverified
+                        ? "bg-amber-100 text-amber-800 border-amber-300 shadow-xs"
+                        : "bg-white text-slate-600 border-slate-200 hover:bg-slate-50"
+                    }`}
+                  >
+                    <span className={`w-2 h-2 rounded-full ${onlyUnverified ? "bg-amber-600 animate-pulse" : "bg-slate-300"}`}></span>
+                    Sin verificar
+                  </button>
+                </div>
+              </div>
+
+              {/* Grid Scrollable de Productos */}
+              <div className="flex-1 overflow-y-auto pr-1 space-y-2.5">
+                {!solicitudCatalogId ? (
+                  <div className="text-center py-12 px-4 bg-amber-50/40 border border-dashed border-amber-200 rounded-2xl">
+                    <span className="text-2xl block mb-2">⚠️</span>
+                    <span className="font-extrabold text-amber-800 uppercase tracking-wider text-[10px]">No se muestran productos</span>
+                    <p className="text-slate-500 mt-1 font-medium text-xs leading-relaxed">Debe seleccionar un catálogo de trabajo a la izquierda primero.</p>
+                  </div>
+                ) : (() => {
+                  const itemsToShow = products?.filter(p => {
+                    if (!matchesCatalog(p.catalogId, solicitudCatalogId, catalogos)) return false;
+                    if (onlyUnverified && p.verificado) return false;
+                    if (!itemSearch.trim()) return true;
+                    const term = itemSearch.toLowerCase();
+                    return p.nombre.toLowerCase().includes(term) || p.codigo.toLowerCase().includes(term);
+                  }) || [];
+
+                  if (itemsToShow.length === 0) {
+                    return (
+                      <div className="text-center py-12 text-slate-400 text-xs font-semibold">
+                        No se encontraron productos en este catálogo.
+                      </div>
+                    );
+                  }
+
+                  return itemsToShow.map(p => {
+                    const totalSys = p.lotes?.reduce((acc, l) => acc + l.cantidad, 0) || 0;
+                    const totalPhys = p.lotes?.reduce((acc, l) => acc + (l.cantidadF ?? 0), 0) || 0;
+                    const inDraft = solicitudItems.some(it => it.productoCodigo === p.codigo);
+
+                    return (
+                      <div key={p.codigo} className="bg-white border border-slate-200 rounded-xl p-3.5 flex items-center justify-between gap-3 shadow-xs hover:border-teal-400 transition animate-fade-in">
+                        <div className="min-w-0 flex-1">
+                          <div className="flex items-center gap-1.5 flex-wrap">
+                            <span className="text-[9px] font-black text-teal-800 bg-teal-50 px-1.5 py-0.5 rounded border border-teal-200/50 uppercase leading-none">
+                              {p.codigo}
+                            </span>
+                            <span className="text-[9px] text-slate-400 font-extrabold uppercase">
+                              FARMACIA
+                            </span>
+                          </div>
+                          <p className="text-xs font-bold text-slate-800 mt-1.5 truncate" title={p.nombre}>{p.nombre}</p>
+                          {p.descripcion && (
+                            <p className="text-[10px] text-slate-500 mt-1 italic line-clamp-2 border-t border-slate-100 pt-1" title={p.descripcion}>
+                              {p.descripcion}
+                            </p>
+                          )}
+                          
+                          {/* Información de Stock Físico y de Sistema */}
+                          <div className="flex gap-3 mt-2 text-[10px] text-slate-500 font-semibold uppercase tracking-wider">
+                            <div>
+                              Stock Sis: <span className="font-extrabold text-teal-700">{totalSys}</span>
+                            </div>
+                            <div className="border-l border-slate-200 pl-3">
+                              Stock Fís: <span className="font-extrabold text-blue-700">{totalPhys}</span>
+                            </div>
+                          </div>
+                        </div>
+
+                        <div className="shrink-0 flex items-center gap-1.5">
+                          <input
+                            type="number"
+                            min="1"
+                            max={Math.max(1, Math.min(totalSys, totalPhys))}
+                            defaultValue="1"
+                            id={`qty-catalog-${p.codigo}`}
+                            className="w-12 bg-slate-50 border border-slate-200 rounded-lg text-center text-xs py-1.5 font-bold outline-none"
+                          />
+                          <button
+                            type="button"
+                            disabled={inDraft}
+                            onClick={() => {
+                              const qtyInput = document.getElementById(`qty-catalog-${p.codigo}`) as HTMLInputElement;
+                              const qty = parseInt(qtyInput?.value || "1");
+                              if (isNaN(qty) || qty <= 0) {
+                                playSound("negative");
+                                showToast("Ingrese una cantidad válida mayor a cero.");
+                                return;
+                              }
+                              const maxAvailableBoth = Math.min(totalSys, totalPhys);
+                              if (totalSys <= 0 || totalPhys <= 0 || qty > totalSys || qty > totalPhys) {
+                                playSound("negative");
+                                showToast(
+                                  `No se puede agregar "${p.nombre}": cantidad solicitada (${qty} und.) supera la existencia disponible. Disponible en Sistema: ${totalSys} und. | Físico: ${totalPhys} und. (Máx: ${maxAvailableBoth} und.)`
+                                );
+                                return;
+                              }
+                              setSolicitudItems(prev => {
+                                if (prev.some(it => it.productoCodigo === p.codigo)) {
+                                  return prev.map(it =>
+                                    it.productoCodigo === p.codigo
+                                      ? { ...it, cantidadSolicitada: qty, cantidadEntregada: qty }
+                                      : it
+                                  );
+                                }
+                                return [
+                                  ...prev,
+                                  {
+                                    productoCodigo: p.codigo,
+                                    productoNombre: p.nombre,
+                                    cantidadSolicitada: qty,
+                                    cantidadEntregada: qty
+                                  }
+                                ];
+                              });
+                              playSound("click");
+                            }}
+                            className={`px-3 py-1.5 text-xs font-bold rounded-lg transition active:scale-95 cursor-pointer ${
+                              inDraft
+                                ? "bg-slate-100 text-slate-400 border border-slate-200"
+                                : totalSys <= 0 || totalPhys <= 0
+                                ? "bg-rose-600 hover:bg-rose-700 text-white shadow-xs"
+                                : "bg-teal-800 hover:bg-teal-700 text-white shadow-xs"
+                            }`}
+                          >
+                            {inDraft ? "Añadido" : totalSys <= 0 || totalPhys <= 0 ? "Sin Stock" : "+ Añadir"}
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  });
+                })()}
+              </div>
+            </div>
+          </div>
+        </form>
+      ) : (
+        activeSubTab === "history" && (() => {
+          const allowedCatIds = new Set(availableCatalogosMemo.map((c) => c.id));
+          const canSeeAll = isAdmin || currentUser.departamento === "Almacén y Suministro" || currentUser.departamento === "Farmacia";
+
+          // 1. Filtrar todas las solicitudes almacenadas para el Historial de Solicitudes
+          const filteredHistorialSolicitudes = solicitudes.filter((sol) => {
+            const solCatalogId = sol.catalogId || "default-cat";
+            if (!canSeeAll && !allowedCatIds.has(solCatalogId) && !isCatalogAllowedForUser(currentUser, solCatalogId, catalogos)) {
+              return false;
+            }
+            if (!canSeeAll) {
+              const isOwnCreator =
+                sol.usuarioCreador.toLowerCase().includes(currentUser.usuario.toLowerCase()) ||
+                sol.usuarioCreador.toLowerCase().includes(currentUser.nombre.toLowerCase());
+              const isOwnDept = sol.departamento === currentUser.departamento;
+              const isAllowedDeptCatalog =
+                (currentUser.departamento === "Laboratorio" && matchesCatalog(solCatalogId, "laboratorio", catalogos)) ||
+                (currentUser.departamento === "Odontología" && matchesCatalog(solCatalogId, "odontologia", catalogos));
+              if (!isOwnCreator && !isOwnDept && !isAllowedDeptCatalog) return false;
+            }
+
+            if (histDeptFilter !== "todos" && sol.departamento !== histDeptFilter) {
+              return false;
+            }
+            if (histDateFilter && sol.fecha !== histDateFilter) {
+              return false;
+            }
+            if (histStatusFilter !== "todos" && sol.estado !== histStatusFilter) {
+              return false;
+            }
+            if (histUserFilter.trim()) {
+              const u = histUserFilter.trim().toLowerCase();
+              const authMeta = getAuthorizationMetadata(sol);
+              const matchCreator = (sol.usuarioCreador || "").toLowerCase().includes(u);
+              const matchAuth = (authMeta?.autorizador || "").toLowerCase().includes(u);
+              const matchNum = (sol.numeroSolicitud || "").toLowerCase().includes(u);
+              if (!matchCreator && !matchAuth && !matchNum) return false;
+            }
+            return true;
+          });
+
+          // 2. Filtrar eventos de la bitácora secundaria
+          const filteredHistorial = historialList.filter((hist) => {
+            const histCatalogId = hist.catalogId || "default-cat";
+            if (!canSeeAll && !allowedCatIds.has(histCatalogId) && !isCatalogAllowedForUser(currentUser, histCatalogId, catalogos)) {
+              return false;
+            }
+
+            if (!canSeeAll) {
+              const sol = solicitudes.find(s => s.id === hist.solicitudId || s.numeroSolicitud === hist.numeroSolicitud);
+              if (sol) {
+                const isOwnCreator =
+                  sol.usuarioCreador.toLowerCase().includes(currentUser.usuario.toLowerCase()) ||
+                  sol.usuarioCreador.toLowerCase().includes(currentUser.nombre.toLowerCase());
+                const isOwnDept = sol.departamento === currentUser.departamento;
+                if (!isOwnCreator && !isOwnDept) return false;
+              } else {
+                const otherDepts = ["Laboratorio", "Odontología"].filter(d => d !== currentUser.departamento);
+                if (otherDepts.some(d => hist.descripcionEvent.toLowerCase().includes(d.toLowerCase()))) return false;
+              }
+            }
+
+            if (histDeptFilter !== "todos") {
+              const sol = solicitudes.find(s => s.id === hist.solicitudId || s.numeroSolicitud === hist.numeroSolicitud);
+              if (sol) {
+                if (sol.departamento !== histDeptFilter) return false;
+              } else {
+                if (!hist.descripcionEvent.toLowerCase().includes(histDeptFilter.toLowerCase())) return false;
+              }
+            }
+            if (histDateFilter && hist.fecha !== histDateFilter) {
+              return false;
+            }
+            if (histStatusFilter !== "todos") {
+              const sol = solicitudes.find(s => s.id === hist.solicitudId || s.numeroSolicitud === hist.numeroSolicitud);
+              if (sol) {
+                if (sol.estado !== histStatusFilter) return false;
+              } else {
+                if (!hist.descripcionEvent.toLowerCase().includes(histStatusFilter.toLowerCase())) return false;
+              }
+            }
+            if (histUserFilter) {
+              const u = histUserFilter.toLowerCase();
+              if (!hist.usuarioResponsable.toLowerCase().includes(u)) return false;
+            }
+            return true;
+          });
+
+          const paginatedHistorySolicitudes = filteredHistorialSolicitudes.slice(0, visibleHistoryCount);
+
+          return (
+            <div className="bg-white rounded-2xl sm:rounded-3xl border border-slate-200 shadow-sm overflow-hidden anim-card-in w-full min-w-0 max-w-full">
+              <div className="px-4 sm:px-6 py-4 bg-slate-50 border-b border-slate-200 flex flex-col gap-4">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                  <div className="min-w-0">
+                    <h4 className="font-extrabold text-slate-900 text-sm sm:text-base flex items-center gap-2">
+                      <ClipboardList className="w-5 h-5 text-teal-600 shrink-0" />
+                      <span>Historial General de Solicitudes y Autorizaciones</span>
+                    </h4>
+                    <p className="text-xs text-slate-500 mt-0.5">
+                      {isAdmin
+                        ? "Perfil ADMIN activo: Puedes autorizar o rechazar solicitudes pendientes y auditar todo el historial."
+                        : "Consulta el estado de tus solicitudes, los productos pedidos y quién autorizó o rechazó cada registro."}
+                    </p>
+                  </div>
+
+                  <div className="flex items-center gap-1.5 bg-white p-1 rounded-xl border border-slate-200 w-full sm:w-auto">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setHistoryViewMode("solicitudes");
+                        playSound("click");
+                      }}
+                      className={`flex-1 sm:flex-initial px-3 py-1.5 rounded-lg text-xs font-extrabold transition cursor-pointer ${
+                        historyViewMode === "solicitudes"
+                          ? "bg-teal-800 text-white shadow-2xs"
+                          : "text-slate-600 hover:bg-slate-100"
+                      }`}
+                    >
+                      Solicitudes ({filteredHistorialSolicitudes.length})
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setHistoryViewMode("eventos");
+                        playSound("click");
+                      }}
+                      className={`flex-1 sm:flex-initial px-3 py-1.5 rounded-lg text-xs font-extrabold transition cursor-pointer ${
+                        historyViewMode === "eventos"
+                          ? "bg-teal-800 text-white shadow-2xs"
+                          : "text-slate-600 hover:bg-slate-100"
+                      }`}
+                    >
+                      Bitácora ({filteredHistorial.length})
+                    </button>
+                  </div>
+                </div>
+
+                {/* Panel de Filtros para el Historial (Fecha, Usuario, Estado y Departamento) */}
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 bg-white p-3.5 sm:p-4 rounded-2xl border border-slate-200/80">
+                  <div>
+                    <label className="block text-[10px] font-black uppercase text-slate-400 mb-1">Fecha de Creación</label>
+                    <input
+                      type="date"
+                      value={histDateFilter}
+                      onChange={(e) => {
+                        setHistDateFilter(e.target.value);
+                        setVisibleHistoryCount(30);
+                      }}
+                      className="w-full bg-slate-50 border border-slate-200 rounded-xl px-2.5 py-1.5 text-xs font-semibold text-slate-700 outline-none focus:ring-1 focus:ring-teal-400"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-[10px] font-black uppercase text-slate-400 mb-1">Usuario o N.º Solicitud</label>
+                    <div className="relative">
+                      <Search className="w-3.5 h-3.5 absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400" />
+                      <input
+                        type="text"
+                        placeholder="Solicitante, autorizador o SOL-..."
+                        value={histUserFilter}
+                        onChange={(e) => {
+                          setHistUserFilter(e.target.value);
+                          setVisibleHistoryCount(30);
+                        }}
+                        className="w-full bg-slate-50 border border-slate-200 rounded-xl pl-8 pr-2 py-2 text-xs font-semibold text-slate-700 outline-none focus:ring-1 focus:ring-teal-400"
+                      />
+                    </div>
+                  </div>
+
+                  <div>
+                    <label className="block text-[10px] font-black uppercase text-slate-400 mb-1">Estado de Solicitud</label>
+                    <select
+                      value={histStatusFilter}
+                      onChange={(e) => {
+                        setHistStatusFilter(e.target.value);
+                        setVisibleHistoryCount(30);
+                      }}
+                      className="w-full bg-slate-50 border border-slate-200 rounded-xl px-2.5 py-2 text-xs font-semibold text-slate-700 outline-none focus:ring-1 focus:ring-teal-400"
+                    >
+                      <option value="todos">Todos los estados</option>
+                      <option value="Pendiente">Pendiente</option>
+                      <option value="Aprobada">Aprobada (Autorizada)</option>
+                      <option value="Rechazada">Rechazada</option>
+                      <option value="En Proceso">En Proceso</option>
+                      <option value="En preparación">En preparación</option>
+                      <option value="Parcialmente entregada">Parcialmente entregada</option>
+                      <option value="Entregada">Entregada</option>
+                      <option value="Cancelada">Cancelada</option>
+                    </select>
+                  </div>
+
+                  <div>
+                    <label className="block text-[10px] font-black uppercase text-slate-400 mb-1">Departamento</label>
+                    <select
+                      value={histDeptFilter}
+                      onChange={(e) => {
+                        setHistDeptFilter(e.target.value);
+                        setVisibleHistoryCount(30);
+                      }}
+                      className="w-full bg-slate-50 border border-slate-200 rounded-xl px-2.5 py-2 text-xs font-semibold text-slate-700 outline-none focus:ring-1 focus:ring-teal-400"
+                    >
+                      <option value="todos">Todos los depts.</option>
+                      {dynamicDepts.map((d) => (
+                        <option key={d} value={d}>{d}</option>
+                      ))}
+                    </select>
+                  </div>
+                </div>
+
+                {(histDateFilter || histUserFilter || histStatusFilter !== "todos" || histDeptFilter !== "todos") && (
+                  <div className="flex justify-end">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setHistDateFilter("");
+                        setHistUserFilter("");
+                        setHistStatusFilter("todos");
+                        setHistDeptFilter("todos");
+                        setVisibleHistoryCount(30);
+                        playSound("click");
+                      }}
+                      className="inline-flex items-center gap-1 text-[10px] font-black text-rose-600 hover:text-rose-700 uppercase tracking-wider cursor-pointer border border-rose-200/50 hover:bg-rose-50 px-2.5 py-1 rounded-lg transition"
+                    >
+                      <X className="w-3.5 h-3.5" />
+                      Limpiar Filtros del Historial
+                    </button>
+                  </div>
+                )}
+              </div>
+
+              {historyViewMode === "solicitudes" ? (
+                <div className="divide-y divide-slate-200">
+                  {filteredHistorialSolicitudes.length === 0 ? (
+                    <div className="text-center py-12 text-slate-400">
+                      <AlertCircle className="w-8 h-8 mx-auto mb-2 text-slate-300" />
+                      <p className="text-xs font-semibold">No se encontraron solicitudes registradas con los filtros seleccionados.</p>
+                    </div>
+                  ) : (
+                    <>
+                      <div className="w-full max-w-full overflow-x-auto overscroll-x-contain touch-pan-x [-webkit-overflow-scrolling:touch]">
+                        <table className="w-full text-left border-collapse min-w-[920px] text-xs">
+                          <thead>
+                            <tr className="bg-slate-100/90 border-b border-slate-200 text-[10px] font-black uppercase tracking-wider text-slate-600">
+                              <th className="py-3.5 px-4 whitespace-nowrap">N.º Solicitud</th>
+                              <th className="py-3.5 px-4 whitespace-nowrap">Fecha de Creación</th>
+                              <th className="py-3.5 px-4 whitespace-nowrap">Usuario Solicitante</th>
+                              <th className="py-3.5 px-4 min-w-[260px]">Productos y Cantidades Solicitadas</th>
+                              <th className="py-3.5 px-4 text-center whitespace-nowrap">Estado</th>
+                              <th className="py-3.5 px-4 whitespace-nowrap">Autorizado / Rechazado por</th>
+                              <th className="py-3.5 px-4 whitespace-nowrap">Fecha Autorización / Rechazo</th>
+                              <th className="py-3.5 px-4 text-right whitespace-nowrap">Acciones</th>
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-slate-100">
+                            {paginatedHistorySolicitudes.map((sol) => {
+                              const authMeta = getAuthorizationMetadata(sol);
+                              const itemsList = sol.items || [];
+
+                              return (
+                                <tr key={sol.id} className="hover:bg-slate-50/80 transition-colors align-top">
+                                  {/* 1. Número o identificador de solicitud */}
+                                  <td className="py-3.5 px-4 whitespace-nowrap">
+                                    <span className="inline-block font-black text-teal-800 bg-teal-50 border border-teal-200 px-2.5 py-1 rounded-xl text-xs">
+                                      {sol.numeroSolicitud}
+                                    </span>
+                                    <span className="block text-[10px] font-bold text-slate-400 mt-1">
+                                      {sol.departamento}
+                                    </span>
+                                  </td>
+
+                                  {/* 2. Fecha de creación */}
+                                  <td className="py-3.5 px-4 whitespace-nowrap">
+                                    <p className="font-bold text-slate-800">
+                                      {new Date(sol.fecha + "T00:00:00").toLocaleDateString("es-DO")}
+                                    </p>
+                                    <p className="text-[10px] text-slate-500 font-semibold mt-0.5">
+                                      {sol.hora} hrs
+                                    </p>
+                                  </td>
+
+                                  {/* 3. Usuario solicitante */}
+                                  <td className="py-3.5 px-4">
+                                    <p className="font-bold text-slate-800">{sol.usuarioCreador}</p>
+                                    <span className={`inline-block mt-1 text-[9px] font-black uppercase px-2 py-0.5 rounded-full ${getPriorityBadgeClass(sol.prioridad)}`}>
+                                      Prioridad {sol.prioridad}
+                                    </span>
+                                  </td>
+
+                                  {/* 4. Productos y cantidades solicitadas */}
+                                  <td className="py-3.5 px-4">
+                                    {itemsList.length > 0 ? (
+                                      <div className="space-y-1 max-h-28 overflow-y-auto pr-1">
+                                        {itemsList.map((it, idx) => (
+                                          <div
+                                            key={it.id || `${it.productoCodigo}-${idx}`}
+                                            className="flex items-center justify-between gap-2 bg-slate-50 border border-slate-200/80 rounded-lg px-2.5 py-1"
+                                          >
+                                            <span className="truncate font-semibold text-slate-800" title={it.productoNombre}>
+                                              <strong className="font-mono text-[10px] text-teal-700 mr-1">{it.productoCodigo}</strong>
+                                              {it.productoNombre}
+                                            </span>
+                                            <span className="shrink-0 font-black text-[11px] text-teal-900 bg-teal-100/80 px-2 py-0.5 rounded-md">
+                                              Cant: {it.cantidadSolicitada}
+                                            </span>
+                                          </div>
+                                        ))}
+                                      </div>
+                                    ) : (
+                                      <p className="text-xs text-slate-600 line-clamp-2" title={sol.descripcion}>
+                                        {sol.descripcion}
+                                      </p>
+                                    )}
+                                  </td>
+
+                                  {/* 5. Estado de la solicitud */}
+                                  <td className="py-3.5 px-4 text-center whitespace-nowrap">
+                                    <span className={`inline-block text-[10px] font-black uppercase tracking-wider px-2.5 py-1 rounded-full ${getStatusBadgeClass(sol.estado)}`}>
+                                      {sol.estado}
+                                    </span>
+                                  </td>
+
+                                  {/* 6. Usuario que autorizó o rechazó */}
+                                  <td className="py-3.5 px-4 whitespace-nowrap">
+                                    {authMeta ? (
+                                      <div>
+                                        <p className="font-bold text-slate-800">{authMeta.autorizador}</p>
+                                        <span
+                                          className={`inline-block mt-0.5 text-[9px] font-black uppercase px-1.5 py-0.2 rounded ${
+                                            authMeta.accion === "Rechazada" || authMeta.accion === "Cancelada"
+                                              ? "bg-rose-50 text-rose-700 border border-rose-200"
+                                              : "bg-teal-50 text-teal-800 border border-teal-200"
+                                          }`}
+                                        >
+                                          {authMeta.accion} (ADMIN)
+                                        </span>
+                                      </div>
+                                    ) : (
+                                      <span className="text-[11px] text-slate-400 italic">
+                                        Pendiente de revisión
+                                      </span>
+                                    )}
+                                  </td>
+
+                                  {/* 7. Fecha de autorización o rechazo */}
+                                  <td className="py-3.5 px-4 whitespace-nowrap">
+                                    {authMeta && authMeta.fecha ? (
+                                      <div>
+                                        <p className="font-bold text-slate-800">
+                                          {new Date(authMeta.fecha + "T00:00:00").toLocaleDateString("es-DO")}
+                                        </p>
+                                        <p className="text-[10px] text-slate-500 font-semibold mt-0.5">
+                                          {authMeta.hora} hrs
+                                        </p>
+                                      </div>
+                                    ) : (
+                                      <span className="text-[11px] text-slate-400">—</span>
+                                    )}
+                                  </td>
+
+                                  {/* 8. Acciones (Ver Detalle + Autorizar/Rechazar exclusivo para ADMIN) */}
+                                  <td className="py-3.5 px-4 text-right whitespace-nowrap">
+                                    <div className="flex flex-col items-end gap-1.5">
+                                      <button
+                                        type="button"
+                                        onClick={() => {
+                                          handleOpenStatusModal(sol);
+                                          playSound("click");
+                                        }}
+                                        className="inline-flex items-center gap-1 px-3 py-1.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 font-extrabold text-[11px] transition cursor-pointer"
+                                      >
+                                        <Eye className="w-3.5 h-3.5 text-teal-700" />
+                                        <span>Ver Detalle</span>
+                                      </button>
+
+                                      {isAdmin && sol.estado === "Pendiente" && (
+                                        <div className="flex items-center gap-1">
+                                          <button
+                                            type="button"
+                                            onClick={() => handleDirectStatusChange(sol, "Aprobada")}
+                                            className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-teal-700 hover:bg-teal-800 text-white font-black text-[10px] transition cursor-pointer shadow-2xs"
+                                            title="Autorizar solicitud (Exclusivo ADMIN)"
+                                          >
+                                            <CheckCircle2 className="w-3 h-3" />
+                                            <span>Autorizar</span>
+                                          </button>
+                                          <button
+                                            type="button"
+                                            onClick={() => handleDirectStatusChange(sol, "Rechazada")}
+                                            className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-rose-600 hover:bg-rose-700 text-white font-black text-[10px] transition cursor-pointer shadow-2xs"
+                                            title="Rechazar solicitud (Exclusivo ADMIN)"
+                                          >
+                                            <XCircle className="w-3 h-3" />
+                                            <span>Rechazar</span>
+                                          </button>
+                                        </div>
+                                      )}
+                                    </div>
+                                  </td>
+                                </tr>
+                              );
+                            })}
+                          </tbody>
+                        </table>
+                      </div>
+
+                      {filteredHistorialSolicitudes.length > visibleHistoryCount && (
+                        <div className="p-4 bg-slate-50 flex items-center justify-between">
+                          <span className="text-xs font-semibold text-slate-600">
+                            Mostrando <strong>{paginatedHistorySolicitudes.length}</strong> de{" "}
+                            <strong>{filteredHistorialSolicitudes.length}</strong> solicitudes
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              playSound("click");
+                              setVisibleHistoryCount((prev) => prev + 30);
+                            }}
+                            className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl bg-white hover:bg-slate-100 text-teal-800 border border-slate-300 text-xs font-extrabold shadow-2xs transition cursor-pointer"
+                          >
+                            <ChevronDown className="w-4 h-4" />
+                            <span>Cargar más registros ({filteredHistorialSolicitudes.length - visibleHistoryCount} restantes)</span>
+                          </button>
+                        </div>
+                      )}
+                    </>
+                  )}
+                </div>
+              ) : (
+                <div className="p-6">
+                  {filteredHistorial.length === 0 ? (
+                    <div className="text-center py-12 text-slate-400">
+                      <AlertCircle className="w-8 h-8 mx-auto mb-2 text-slate-300 animate-bounce" />
+                      <p className="text-xs font-semibold">No se encontraron eventos con los filtros seleccionados.</p>
+                    </div>
+                  ) : (
+                    <div className="flow-root">
+                      <ul className="-mb-8">
+                        {filteredHistorial.map((hist, histIdx) => (
+                          <li key={hist.id}>
+                            <div className="relative pb-8">
+                              {histIdx !== filteredHistorial.length - 1 ? (
+                                <span className="absolute top-4 left-4 -ml-px h-full w-0.5 bg-slate-200" aria-hidden="true" />
+                              ) : null}
+                              <div className="relative flex space-x-3">
+                                <div>
+                                  <span className={`h-8 w-8 rounded-full flex items-center justify-center ring-8 ring-white ${
+                                    hist.tipo === "Creación" ? "bg-emerald-50 text-emerald-700 border border-emerald-200" : "bg-blue-50 text-blue-700 border border-blue-200"
+                                  }`}>
+                                    {hist.tipo === "Creación" ? <Plus className="w-4 h-4" /> : <RefreshCw className="w-4 h-4" />}
+                                  </span>
+                                </div>
+                                <div className="flex-1 min-w-0 pt-1.5 flex justify-between space-x-4">
+                                  <div>
+                                    <p className="text-sm font-semibold text-slate-800">
+                                      {hist.descripcionEvent}{" "}
+                                      <span className="font-black text-teal-800 bg-teal-50 px-2 py-0.5 rounded-md border border-teal-100 text-xs">
+                                        {hist.numeroSolicitud}
+                                      </span>
+                                    </p>
+                                    <p className="text-xs text-slate-500 mt-1 flex items-center gap-1.5">
+                                      <User className="w-3.5 h-3.5 text-slate-400" /> Responsable: <span className="font-semibold text-slate-700">{hist.usuarioResponsable}</span>
+                                    </p>
+                                  </div>
+                                  <div className="text-right text-xs whitespace-nowrap text-slate-400 font-semibold flex flex-col sm:flex-row items-end sm:items-center gap-1">
+                                    <Calendar className="w-3.5 h-3.5 text-slate-300" />
+                                    <span>{new Date(hist.fecha + "T00:00:00").toLocaleDateString("es-DO")} • {hist.hora}</span>
+                                  </div>
+                                </div>
+                              </div>
+                            </div>
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          );
+        })()
+      )}
+
+      {/* Modal para Ver Historial de Cambios / Modificar Estado */}
+      {selectedSolicitud && (
+        <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center p-0 sm:p-4">
+          <div className="absolute inset-0 bg-black/40 backdrop-blur-xs animate-fade-in" onClick={() => setSelectedSolicitud(null)}></div>
+          <div className="relative bg-white rounded-t-3xl sm:rounded-3xl border border-slate-200 shadow-xl max-w-4xl w-full overflow-hidden anim-slide-up sm:anim-pop-in flex flex-col max-h-[92dvh]">
+            {/* Header */}
+            <div className="flex items-center justify-between px-4 sm:px-6 py-3.5 sm:py-4 border-b border-slate-200 bg-slate-50 shrink-0">
+              <h3 className="font-black text-slate-900 flex items-center gap-2 font-sans text-sm sm:text-base truncate">
+                <Layers className="w-5 h-5 text-teal-600 shrink-0" />
+                <span className="truncate">Detalle de Solicitud {selectedSolicitud.numeroSolicitud}</span>
+              </h3>
+              <button
+                onClick={() => setSelectedSolicitud(null)}
+                className="rounded-xl border border-slate-200 p-1.5 text-slate-500 hover:bg-slate-100 transition cursor-pointer shrink-0"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            {/* Export & Admin Authorization Actions Bar */}
+            <div className="px-4 sm:px-6 py-3 bg-teal-50/50 border-b border-slate-200 flex flex-wrap gap-2 justify-between items-center shrink-0">
+              <div className="flex flex-wrap items-center gap-2 w-full sm:w-auto">
+                {isAdmin && selectedSolicitud.estado === "Pendiente" && (
+                  <>
+                    <button
+                      type="button"
+                      onClick={async () => {
+                        await handleDirectStatusChange(selectedSolicitud, "Aprobada");
+                        setSelectedSolicitud(null);
+                      }}
+                      className="flex-1 sm:flex-initial justify-center flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-teal-700 hover:bg-teal-800 text-white font-extrabold text-xs shadow-xs transition active:scale-95 cursor-pointer"
+                    >
+                      <CheckCircle2 className="w-4 h-4 shrink-0" />
+                      <span>Autorizar (ADMIN)</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={async () => {
+                        await handleDirectStatusChange(selectedSolicitud, "Rechazada");
+                        setSelectedSolicitud(null);
+                      }}
+                      className="flex-1 sm:flex-initial justify-center flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-rose-600 hover:bg-rose-700 text-white font-extrabold text-xs shadow-xs transition active:scale-95 cursor-pointer"
+                    >
+                      <XCircle className="w-4 h-4 shrink-0" />
+                      <span>Rechazar (ADMIN)</span>
+                    </button>
+                  </>
+                )}
+              </div>
+
+              <div className="flex flex-wrap gap-1.5 sm:gap-2 justify-end w-full sm:w-auto">
+                {/* Botón Eliminar Orden (exclusivo Anyer) */}
+                {(currentUser.usuario.toLowerCase() === "anyer" || currentUser.nombre.toLowerCase() === "anyer") && (
+                  <button
+                    type="button"
+                    onClick={() => handleDeleteRequest(selectedSolicitud)}
+                    className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-rose-600 hover:bg-rose-700 text-white font-extrabold text-xs shadow-xs transition active:scale-95 cursor-pointer border border-rose-750/10"
+                  >
+                    <Trash2 className="w-4 h-4 shrink-0" />
+                    <span>Eliminar</span>
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={() => exportToWord(selectedSolicitud)}
+                  className="flex-1 sm:flex-initial justify-center flex items-center gap-1.5 px-3 py-2 rounded-xl bg-teal-700 hover:bg-teal-800 text-white font-extrabold text-xs shadow-xs transition active:scale-95 cursor-pointer border border-teal-800/10"
+                >
+                  <FileText className="w-4 h-4 shrink-0" />
+                  <span>Word (.docx)</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => exportToPDF(selectedSolicitud)}
+                  className="flex-1 sm:flex-initial justify-center flex items-center gap-1.5 px-3 py-2 rounded-xl bg-slate-800 hover:bg-slate-900 text-white font-extrabold text-xs shadow-xs transition active:scale-95 cursor-pointer border border-slate-950/10"
+                >
+                  <FileText className="w-4 h-4 shrink-0" />
+                  <span>PDF (.pdf)</span>
+                </button>
+              </div>
+            </div>
+
+            {/* Content (Scrollable) */}
+            <div className="p-4 sm:p-6 space-y-5 sm:space-y-6 overflow-y-auto flex-1 text-slate-700 font-sans">
+              {/* Info General en Grid Responsivo */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 bg-slate-50 p-4 rounded-2xl border border-slate-200/80 text-xs sm:text-sm">
+                <div>
+                  <p className="text-[10px] font-black uppercase text-slate-400">Número de Solicitud</p>
+                  <p className="font-extrabold text-teal-900">{selectedSolicitud.numeroSolicitud}</p>
+                </div>
+                <div>
+                  <p className="text-[10px] font-black uppercase text-slate-400">Estado Actual</p>
+                  <span className={`inline-block text-[10px] font-black uppercase tracking-wider px-2.5 py-1 rounded-full mt-1 ${getStatusBadgeClass(selectedSolicitud.estado)}`}>
+                    {selectedSolicitud.estado}
+                  </span>
+                </div>
+                <div>
+                  <p className="text-[10px] font-black uppercase text-slate-400">Fecha y Hora de Creación</p>
+                  <p className="font-bold text-slate-800">
+                    {new Date(selectedSolicitud.fecha + "T00:00:00").toLocaleDateString("es-DO")} a las {selectedSolicitud.hora}
+                  </p>
+                </div>
+                <div>
+                  <p className="text-[10px] font-black uppercase text-slate-400">Departamento Solicitante</p>
+                  <p className="font-bold text-slate-800">{selectedSolicitud.departamento}</p>
+                </div>
+                <div>
+                  <p className="text-[10px] font-black uppercase text-slate-400">Usuario Solicitante</p>
+                  <p className="font-bold text-slate-800">{selectedSolicitud.usuarioCreador}</p>
+                </div>
+                <div>
+                  <p className="text-[10px] font-black uppercase text-slate-400">Período de Registro</p>
+                  <p className="font-bold text-slate-800">{selectedSolicitud.periodo}</p>
+                </div>
+                {(() => {
+                  const authMeta = getAuthorizationMetadata(selectedSolicitud);
+                  if (!authMeta) return null;
+                  return (
+                    <>
+                      <div>
+                        <p className="text-[10px] font-black uppercase text-slate-400">
+                          {authMeta.accion === "Rechazada" ? "Usuario que Rechazó (ADMIN)" : "Usuario que Autorizó (ADMIN)"}
+                        </p>
+                        <p className="font-extrabold text-teal-900">{authMeta.autorizador}</p>
+                      </div>
+                      <div>
+                        <p className="text-[10px] font-black uppercase text-slate-400">
+                          Fecha de Autorización / Rechazo
+                        </p>
+                        <p className="font-bold text-slate-800">
+                          {authMeta.fecha ? new Date(authMeta.fecha + "T00:00:00").toLocaleDateString("es-DO") : "—"} {authMeta.hora ? `a las ${authMeta.hora}` : ""}
+                        </p>
+                      </div>
+                    </>
+                  );
+                })()}
+                <div>
+                  <p className="text-[10px] font-black uppercase text-slate-400">Catálogo de Suministros</p>
+                  <p className="font-extrabold text-teal-800">
+                    {catalogos?.find((c) => c.id === selectedSolicitud.catalogId)?.nombre || "General / Suministros"}
+                  </p>
+                </div>
+                <div>
+                  <p className="text-[10px] font-black uppercase text-slate-400">Prioridad</p>
+                  <span className={`inline-block text-[10px] font-black uppercase tracking-wider px-2.5 py-1 rounded-full mt-1 ${getPriorityBadgeClass(selectedSolicitud.prioridad)}`}>
+                    {selectedSolicitud.prioridad}
+                  </span>
+                </div>
+                <div className="sm:col-span-2 border-t border-slate-200/60 pt-2 mt-2">
+                  <p className="text-[10px] font-black uppercase text-slate-400">Descripción / Justificación</p>
+                  <p className="text-slate-600 text-sm mt-1 whitespace-pre-wrap font-medium">{selectedSolicitud.descripcion}</p>
+                </div>
+                {selectedSolicitud.observaciones && (
+                  <div className="sm:col-span-2 border-t border-slate-200/60 pt-2">
+                    <p className="text-[10px] font-black uppercase text-slate-500">Observaciones Generales de Entrega</p>
+                    <p className="text-xs text-slate-600 mt-1 italic font-medium">{selectedSolicitud.observaciones}</p>
+                  </div>
+                )}
+              </div>
+
+              {/* Confirmación de Entrega */}
+              <div className="space-y-3">
+                <h4 className="text-xs font-black uppercase text-teal-800 tracking-wider flex items-center gap-1.5 border-b border-teal-100 pb-1">
+                  <Layers className="w-4 h-4" />
+                  Confirmación de Entrega & Despacho
+                </h4>
+
+                <div className="border border-slate-200 rounded-2xl overflow-hidden bg-white shadow-xs">
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-left text-xs min-w-[700px]">
+                      <thead className="bg-slate-50 text-slate-500 uppercase font-black text-[9px] border-b border-slate-200">
+                        <tr>
+                          <th className="px-4 py-3">Insumo / Medicamento</th>
+                          <th className="px-3 py-3 text-center">Cant. Solicitada</th>
+                          <th className="px-3 py-3 text-center w-28">Cant. Aprobada</th>
+                          <th className="px-3 py-3 text-center w-28">Cant. Despachada</th>
+                          <th className="px-3 py-3 text-center">Cant. Pendiente</th>
+                          {isWarehouseOrAdmin && <th className="px-3 py-3 min-w-72">Lotes de despacho</th>}
+                          <th className="px-4 py-3">Observación / Motivo Diferencia</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-100">
+                        {deliveryItems.map((item) => {
+                          const matchingProduct = products?.find(p => p.codigo === item.productoCodigo);
+                          const availableLots = matchingProduct?.lotes || [];
+                          const isEditable = isWarehouseOrAdmin && selectedSolicitud.estado !== "Entregada" && selectedSolicitud.estado !== "Cancelada";
+                          const hasLotTracking = item.productoCodigo !== "Gral" && availableLots.length > 0;
+                          const deliveryLots = getItemDeliveryLots(item);
+
+                          const approvedVal = item.cantidadAprobada !== undefined ? item.cantidadAprobada : item.cantidadSolicitada;
+                          const deliveredVal = hasLotTracking && deliveryLots.length
+                            ? deliveryLots.reduce((sum, allocation) => sum + Number(allocation.cantidad || 0), 0)
+                            : item.cantidadEntregada !== undefined ? item.cantidadEntregada : item.cantidadSolicitada;
+                          const pendingVal = Math.max(0, approvedVal - deliveredVal);
+
+                          return (
+                            <tr key={item.id} className="hover:bg-slate-50/50">
+                              <td className="px-4 py-3 font-semibold text-slate-800">
+                                {item.productoCodigo !== "Gral" && (
+                                  <span className="block text-teal-700 font-bold text-[9px] uppercase leading-none mb-0.5">{item.productoCodigo}</span>
+                                )}
+                                {item.productoNombre}
+                              </td>
+                              <td className="px-3 py-3 text-center font-extrabold text-slate-700 text-sm">
+                                {item.cantidadSolicitada}
+                              </td>
+                              <td className="px-3 py-3 text-center">
+                                {isEditable ? (
+                                  <input
+                                    type="number"
+                                    min="0"
+                                    value={approvedVal}
+                                    onChange={(e) => handleUpdateApprovedQty(item.id, Number(e.target.value))}
+                                    className="w-20 text-center rounded-lg border border-slate-200 px-2 py-1.5 font-bold text-slate-800 bg-slate-50 focus:ring-1 focus:ring-teal-400"
+                                  />
+                                ) : (
+                                  <span className="font-extrabold text-slate-700 text-sm">{approvedVal}</span>
+                                )}
+                              </td>
+                              <td className="px-3 py-3 text-center">
+                                {isEditable && !hasLotTracking ? (
+                                  <input
+                                    type="number"
+                                    min="0"
+                                    value={deliveredVal}
+                                    onChange={(e) => handleUpdateDeliveryQty(item.id, Number(e.target.value))}
+                                    className="w-20 text-center rounded-lg border border-slate-200 px-2 py-1.5 font-bold text-slate-800 bg-slate-50 focus:ring-1 focus:ring-teal-400"
+                                  />
+                                ) : (
+                                  <span className="font-extrabold text-slate-700 text-sm">
+                                    {deliveredVal}
+                                    {hasLotTracking && <span className="block text-[9px] font-semibold text-slate-400">en {deliveryLots.filter(lot => lot.cantidad > 0).length} lote(s)</span>}
+                                  </span>
+                                )}
+                              </td>
+                              <td className="px-3 py-3 text-center">
+                                <span className={`font-black text-sm px-2 py-1 rounded-md ${pendingVal > 0 ? "bg-amber-50 text-amber-800 border border-amber-250/30" : "bg-emerald-50 text-emerald-800"}`}>
+                                  {pendingVal}
+                                </span>
+                              </td>
+                              {isWarehouseOrAdmin && (
+                                <td className="px-3 py-3">
+                                  {hasLotTracking ? (
+                                    <div className="min-w-64 space-y-2">
+                                      {deliveryLots.map((allocation, allocationIndex) => (
+                                        <div key={`${item.id}-lot-${allocationIndex}`} className="flex items-center gap-1.5">
+                                          {isEditable ? (
+                                            <>
+                                              <select
+                                                value={allocation.loteId}
+                                                onChange={(e) => {
+                                                  const selectedLot = availableLots.find(l => l.id === e.target.value);
+                                                  handleUpdateDeliveryLotAllocation(item.id, allocationIndex, {
+                                                    loteId: e.target.value,
+                                                    loteNumero: selectedLot?.numeroLote || ""
+                                                  });
+                                                }}
+                                                className="min-w-0 flex-1 rounded-lg border border-slate-200 bg-white px-2 py-1.5 text-[10px] font-semibold text-slate-700 outline-none"
+                                              >
+                                                <option value="">-- Seleccione lote --</option>
+                                                {availableLots.map(l => {
+                                                  const daysTo = getDaysToExpiration(l.fechaVencimiento);
+                                                  let prefix = "🟢";
+                                                  let suffix = "";
+                                                  if (Number(l.cantidad || 0) <= 0) {
+                                                    prefix = "⚪ [SIN EXISTENCIAS]";
+                                                  } else if (daysTo < 0) {
+                                                    if (isLotExpiredWithStock(l)) {
+                                                      prefix = "🔴 [VENCIDO]";
+                                                      suffix = ` (HACE ${Math.abs(daysTo)} DÍAS)`;
+                                                    }
+                                                  } else if (daysTo <= 30) {
+                                                    prefix = "⚠️ [POR VENCER]";
+                                                    suffix = ` (EN ${daysTo} DÍAS)`;
+                                                  } else if (daysTo <= 90) {
+                                                    prefix = "🟡 [PRÓXIMO]";
+                                                    suffix = ` (EN ${daysTo} DÍAS)`;
+                                                  }
+                                                  return (
+                                                    <option key={l.id} value={l.id}>
+                                                      {prefix} {l.numeroLote} (Sis: {l.cantidad} / Fís: {l.cantidadF || 0}){suffix}
+                                                    </option>
+                                                  );
+                                                })}
+                                              </select>
+                                              <input
+                                                type="number"
+                                                min="0"
+                                                step="1"
+                                                value={allocation.cantidad}
+                                                onChange={(e) => handleUpdateDeliveryLotAllocation(item.id, allocationIndex, { cantidad: Number(e.target.value) })}
+                                                aria-label={`Cantidad del lote ${allocation.loteNumero || allocationIndex + 1}`}
+                                                className="w-16 rounded-lg border border-slate-200 px-1.5 py-1.5 text-center text-[10px] font-bold text-slate-700"
+                                              />
+                                              <button
+                                                type="button"
+                                                onClick={() => handleRemoveDeliveryLot(item.id, allocationIndex)}
+                                                aria-label="Quitar lote"
+                                                className="rounded-md p-1 text-slate-400 hover:bg-red-50 hover:text-red-600"
+                                              >
+                                                <Trash2 className="h-3.5 w-3.5" />
+                                              </button>
+                                            </>
+                                          ) : (
+                                            <span className="text-[10px] font-semibold text-slate-700">
+                                              Lote {allocation.loteNumero || allocation.loteId}: {allocation.cantidad}
+                                            </span>
+                                          )}
+                                        </div>
+                                      ))}
+                                      {isEditable && (
+                                        <button
+                                          type="button"
+                                          onClick={() => handleAddDeliveryLot(item.id)}
+                                          className="inline-flex items-center gap-1 rounded-md px-1.5 py-1 text-[10px] font-bold text-teal-700 hover:bg-teal-50"
+                                        >
+                                          <Plus className="h-3 w-3" /> Agregar lote
+                                        </button>
+                                      )}
+                                      {!isEditable && deliveryLots.length === 0 && (
+                                        <span className="text-[10px] text-slate-400">Sin lotes registrados</span>
+                                      )}
+                                    </div>
+                                  ) : (
+                                    <span className="text-[10px] text-slate-400 font-medium">No requiere lote</span>
+                                  )}
+                                </td>
+                              )}
+                              <td className="px-4 py-3">
+                                {isEditable ? (
+                                  <input
+                                    type="text"
+                                    value={item.motivoDiferencia || ""}
+                                    onChange={(e) => handleUpdateDeliveryReason(item.id, e.target.value)}
+                                    placeholder={deliveredVal !== item.cantidadSolicitada ? "Ej: Existencia insuficiente *" : "Sin diferencia..."}
+                                    className={`w-full rounded-lg border px-2 py-1.5 text-xs outline-none focus:ring-1 focus:ring-teal-400 ${
+                                      deliveredVal !== item.cantidadSolicitada && !item.motivoDiferencia?.trim()
+                                        ? "border-amber-300 bg-amber-50/20"
+                                        : "border-slate-200 bg-slate-50"
+                                    }`}
+                                  />
+                                ) : (
+                                  <span className="text-xs text-slate-600 font-medium italic">
+                                    {item.motivoDiferencia || (deliveredVal !== item.cantidadSolicitada ? "N/A" : "Sin diferencia")}
+                                  </span>
+                                )}
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              </div>
+
+              {/* Sección Inferior de Detalle y Seguimiento */}
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-6 pt-2 border-t border-slate-100">
+                {/* Columna Izquierda: Línea de Tiempo de Cambios / Historial (Siempre visible) */}
+                <div className="space-y-3 bg-slate-50 p-4 rounded-2xl border border-slate-200/80">
+                  <h4 className="text-xs font-black uppercase text-slate-500 tracking-wider flex items-center gap-1.5 mb-3">
+                    <Clock className="w-4 h-4 text-slate-400" />
+                    Línea de Tiempo de Cambios / Historial
+                  </h4>
+                  <div className="flow-root max-h-[220px] overflow-y-auto pr-1">
+                    <ul className="-mb-8">
+                      {selectedSolicitud.historialCambios.map((cambio, cIdx) => (
+                        <li key={cIdx}>
+                          <div className="relative pb-8">
+                            {cIdx !== selectedSolicitud.historialCambios.length - 1 ? (
+                              <span className="absolute top-4 left-4 -ml-px h-full w-0.5 bg-slate-200" aria-hidden="true" />
+                            ) : null}
+                            <div className="relative flex space-x-3">
+                              <div>
+                                <span className={`h-8 w-8 rounded-full flex items-center justify-center ring-8 ring-white text-xs font-bold text-white shadow-sm ${
+                                  getStatusBadgeClass(cambio.estado)
+                                }`}>
+                                  {cambio.estado.charAt(0)}
+                                </span>
+                              </div>
+                              <div className="flex-1 min-w-0 pt-1.5 flex justify-between space-x-4">
+                                <div>
+                                  <p className="text-xs font-semibold text-slate-800">
+                                    El estado cambió a <span className="font-black text-teal-800">{cambio.estado}</span>
+                                  </p>
+                                  <p className="text-[10px] text-slate-500 mt-0.5 flex items-center gap-1">
+                                    <User className="w-3.5 h-3.5 text-slate-400" /> Modificado por: <span className="font-semibold text-slate-700">{cambio.usuarioResponsable}</span>
+                                  </p>
+                                </div>
+                                <div className="text-right text-[10px] whitespace-nowrap text-slate-400 font-bold flex items-center gap-1">
+                                  <Calendar className="w-3.5 h-3.5 text-slate-300" />
+                                  <span>
+                                    {new Date(cambio.fecha + "T00:00:00").toLocaleDateString("es-DO")} • {cambio.hora}
+                                  </span>
+                                </div>
+                              </div>
+                            </div>
+                          </div>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                </div>
+
+                {/* Columna Derecha: Formulario de Modificación de Estado u Hoja de Resumen de Estado */}
+                {isWarehouseOrAdmin && selectedSolicitud.estado !== "Entregada" && selectedSolicitud.estado !== "Cancelada" ? (
+                  <form onSubmit={handleUpdateStatusSubmit} className="bg-teal-50/20 border border-teal-100 rounded-2xl p-4 space-y-4 flex flex-col justify-between">
+                    <div>
+                      <h4 className="text-xs font-black uppercase text-teal-800 tracking-wider mb-3">Modificar Estado de la Orden</h4>
+                      
+                      <div className="space-y-3">
+                        <div>
+                          <label className="block text-[10px] font-black uppercase text-slate-500 tracking-wider mb-1">Nuevo Estado de Orden</label>
+                          <select
+                            value={newStatus}
+                            onChange={(e) => setNewState(e.target.value as any)}
+                            className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-700 outline-none focus:ring-1 focus:ring-teal-400"
+                          >
+                            <option value="Pendiente">Pendiente</option>
+                            {isAdmin && <option value="Aprobada">Aprobada (Autorizar - ADMIN)</option>}
+                            {isAdmin && <option value="Rechazada">Rechazada (Rechazar - ADMIN)</option>}
+                            <option value="En preparación">En preparación</option>
+                            <option value="Parcialmente entregada">Parcialmente entregada</option>
+                            <option value="Entregada">Entregada</option>
+                            {isAdmin && <option value="Cancelada">Cancelada (ADMIN)</option>}
+                          </select>
+                        </div>
+
+                        <div>
+                          <label className="block text-[10px] font-black uppercase text-slate-500 tracking-wider mb-1">Anotaciones Generales / Observaciones</label>
+                          <input
+                            type="text"
+                            value={statusObs}
+                            onChange={(e) => setStatusObs(e.target.value)}
+                            placeholder="Comentario sobre el despacho o entrega..."
+                            className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs outline-none focus:ring-1 focus:ring-teal-400 text-slate-800"
+                          />
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="flex gap-2.5 pt-3 mt-auto">
+                      <button
+                        type="button"
+                        onClick={() => setSelectedSolicitud(null)}
+                        className="flex-1 rounded-xl border border-slate-200 bg-white text-slate-600 py-2 text-xs font-bold hover:bg-slate-100 transition cursor-pointer active:scale-95"
+                      >
+                        Cancelar
+                      </button>
+                      <button
+                        type="submit"
+                        disabled={updating}
+                        className="flex-1 rounded-xl bg-teal-600 hover:bg-teal-700 text-white py-2 text-xs font-bold shadow-sm transition active:scale-95 cursor-pointer flex items-center justify-center gap-1.5"
+                      >
+                        {updating && <LoaderCircle className="w-3.5 h-3.5 animate-spin" />}
+                        {updating ? "Guardando..." : "Confirmar y Despachar"}
+                      </button>
+                    </div>
+                  </form>
+                ) : (
+                  <div className="bg-slate-50 border border-slate-200 rounded-2xl p-4 flex flex-col justify-between">
+                    <div>
+                      <h4 className="text-xs font-black uppercase text-slate-600 tracking-wider mb-2">Información del Despacho</h4>
+                      <p className="text-xs text-slate-500 leading-relaxed">
+                        Esta orden se encuentra en estado <span className="font-extrabold text-teal-800">{selectedSolicitud.estado}</span>.
+                        {selectedSolicitud.observaciones ? (
+                          <>
+                            {" "}Las anotaciones registradas son: <span className="italic">"{selectedSolicitud.observaciones}"</span>.
+                          </>
+                        ) : (
+                          " No se han registrado anotaciones generales adicionales."
+                        )}
+                      </p>
+                      <div className="mt-4 p-3 bg-white border border-slate-200 rounded-xl flex items-center gap-2">
+                        <AlertCircle className="w-4 h-4 text-teal-600 shrink-0" />
+                        <span className="text-[10px] text-slate-500 font-bold uppercase tracking-wider">
+                          {selectedSolicitud.estado === "Entregada" ? "✓ Entrega Completada con éxito" : "ℹ Solo lectura para esta etapa"}
+                        </span>
+                      </div>
+                    </div>
+                    <div className="flex justify-end pt-3 mt-auto">
+                      <button
+                        type="button"
+                        onClick={() => setSelectedSolicitud(null)}
+                        className="w-full sm:w-auto rounded-xl bg-slate-800 hover:bg-slate-900 text-white px-6 py-2 text-xs font-bold shadow-xs transition cursor-pointer active:scale-95"
+                      >
+                        Cerrar Detalle
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Modal rápido "+ Nuevo" responsable dentro del flujo de Solicitudes / Pedidos */}
+      {showNewRespModal && (
+        <div className="fixed inset-0 z-[70] flex items-center justify-center p-4">
+          <div
+            className="absolute inset-0 bg-slate-900/60 backdrop-blur-xs"
+            onClick={() => setShowNewRespModal(false)}
+          />
+          <div className="relative bg-white rounded-3xl border border-slate-200 shadow-2xl max-w-md w-full overflow-hidden">
+            <div className="px-5 py-4 bg-slate-50 border-b border-slate-200 flex items-center justify-between">
+              <h4 className="text-sm font-black text-slate-900 flex items-center gap-2">
+                <UserPlus className="w-4 h-4 text-teal-700" />
+                <span>Nuevo Responsable de Departamento</span>
+              </h4>
+              <button
+                type="button"
+                onClick={() => setShowNewRespModal(false)}
+                className="p-1.5 rounded-xl border border-slate-200 text-slate-500 hover:bg-slate-100 cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <form onSubmit={handleQuickCreateResponsableInSolicitud} className="p-5 space-y-4">
+              <div>
+                <label className="block text-[11px] font-black uppercase text-slate-500 mb-1">
+                  Nombre Completo del Responsable *
+                </label>
+                <input
+                  type="text"
+                  required
+                  value={newRespNombre}
+                  onChange={(e) => setNewRespNombre(e.target.value)}
+                  placeholder="Ej: Lic. Iris Aybar"
+                  className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3.5 py-2.5 text-xs font-bold text-slate-800 outline-none focus:ring-2 focus:ring-teal-500"
+                />
+              </div>
+              <div>
+                <label className="block text-[11px] font-black uppercase text-slate-500 mb-1">
+                  Departamento Asociado *
+                </label>
+                <select
+                  value={newRespDept}
+                  onChange={(e) => setNewRespDept(e.target.value)}
+                  className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3.5 py-2.5 text-xs font-bold text-slate-800 outline-none focus:ring-2 focus:ring-teal-500"
+                >
+                  {dynamicDepts.map((d) => (
+                    <option key={d} value={d}>
+                      {d}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <label className="block text-[11px] font-black uppercase text-slate-500 mb-1">
+                  Cargo / Función (Opcional)
+                </label>
+                <input
+                  type="text"
+                  value={newRespCargo}
+                  onChange={(e) => setNewRespCargo(e.target.value)}
+                  placeholder="Ej: Encargada de Área"
+                  className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3.5 py-2.5 text-xs font-bold text-slate-800 outline-none focus:ring-2 focus:ring-teal-500"
+                />
+              </div>
+              <div className="flex gap-2.5 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setShowNewRespModal(false)}
+                  className="flex-1 py-2.5 rounded-xl border border-slate-200 text-xs font-bold text-slate-600 hover:bg-slate-50 cursor-pointer"
+                >
+                  Cancelar
+                </button>
+                <button
+                  type="submit"
+                  className="flex-1 py-2.5 rounded-xl bg-teal-700 hover:bg-teal-800 text-white text-xs font-black shadow-sm cursor-pointer"
+                >
+                  Guardar y Seleccionar
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+export { DEPARTAMENTOS };

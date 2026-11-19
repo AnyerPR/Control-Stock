@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=5.0, viewport-fit=cover" />
+    <title>Control de Stock Hospitalario</title>
+    <meta name="description" content="Sistema de control de inventario de medicamentos y gestión de solicitudes y órdenes hospitalarias." />
+    <meta property="og:title" content="Control de Stock Hospitalario" />
+    <meta property="og:description" content="Sistema de control de inventario de medicamentos y gestión de solicitudes y órdenes hospitalarias." />
+    <meta property="og:image" content="/assets/aistudio/farmacia_6a281112.png" />
+    <meta name="theme-color" content="#115e59" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="Farmacia" />
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <link rel="manifest" href="/manifest.json" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png" />
+    <link rel="icon" type="image/png" sizes="512x512" href="/assets/aistudio/farmacia_6a281112.png" />
+    <link rel="icon" type="image/png" sizes="192x192" href="/pwa-192x192.png" />
+    <link rel="shortcut icon" type="image/png" href="/favicon.png" />
+    <script>
+      window.addEventListener('beforeinstallprompt', function(e) {
+        e.preventDefault();
+        window.__deferredPWAInstallPrompt = e;
+        window.dispatchEvent(new CustomEvent('pwa-prompt-ready'));
+      });
+      if ('serviceWorker' in navigator) {
+        window.addEventListener('load', function() {
+          navigator.serviceWorker.register('/sw.js').then(function(reg) {
+            console.log('[PWA] ServiceWorker registrado exitosamente con scope:', reg.scope);
+          }).catch(function(err) {
+            console.warn('[PWA] Fallo registro de ServiceWorker:', err);
+          });
+        });
+      }
+      // Polyfill storage APIs to prevent SecurityError under file:// protocol
+      (function() {
+        function createMockStorage() {
+          var store = {};
+          return {
+            getItem: function(key) { return key in store ? store[key] : null; },
+            setItem: function(key, value) { store[key] = String(value); },
+            removeItem: function(key) { delete store[key]; },
+            clear: function() { store = {}; },
+            key: function(index) { return Object.keys(store)[index] || null; },
+            get length() { return Object.keys(store).length; }
+          };
+        }
+
+        try {
+          var test = window.localStorage;
+          if (!test) throw new Error();
+          test.setItem('__test__', '1');
+          test.removeItem('__test__');
+        } catch (e) {
+          console.warn("localStorage is blocked or not supported. Using polyfill.");
+          Object.defineProperty(window, 'localStorage', {
+            value: createMockStorage(),
+            configurable: true,
+            writable: true
+          });
+        }
+
+        try {
+          var testSession = window.sessionStorage;
+          if (!testSession) throw new Error();
+          testSession.setItem('__test__', '1');
+          testSession.removeItem('__test__');
+        } catch (e) {
+          console.warn("sessionStorage is blocked or not supported. Using polyfill.");
+          Object.defineProperty(window, 'sessionStorage', {
+            value: createMockStorage(),
+            configurable: true,
+            writable: true
+          });
+        }
+
+        try {
+          var idb = window.indexedDB;
+        } catch (e) {
+          console.warn("indexedDB is blocked or not supported. Polyfilling with dummy.");
+          Object.defineProperty(window, 'indexedDB', {
+            value: null,
+            configurable: true,
+            writable: true
+          });
+        }
+
+        if (!window.isSecureContext) {
+          try {
+            Object.defineProperty(window, 'isSecureContext', {
+              value: true,
+              configurable: true,
+              writable: true
+            });
+          } catch (e) {}
+        }
+      })();
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
