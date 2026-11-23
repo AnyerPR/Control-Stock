@@ -143,14 +143,29 @@ export default function App() {
     return null;
   });
   const [activeFarmaciaId, setActiveFarmaciaIdState] = useState<string>(() => getActiveFarmaciaId());
-  const [farmaciaMeta, setFarmaciaMeta] = useState<{ nombre: string; subtitulo: string }>(() => {
+  const [farmaciaMeta, setFarmaciaMeta] = useState<{ nombre: string; subtitulo: string; logoUrl?: string }>(() => {
+    let savedInstLogo = "";
+    try {
+      const savedInst = localStorage.getItem("active_institucion_info");
+      if (savedInst) {
+        const parsedInst = JSON.parse(savedInst);
+        if (parsedInst?.logoUrl) savedInstLogo = parsedInst.logoUrl;
+      }
+    } catch {}
     const saved = localStorage.getItem("active_farmacia_meta");
     if (saved) {
-      try { return JSON.parse(saved); } catch {}
+      try {
+        const parsed = JSON.parse(saved);
+        return {
+          ...parsed,
+          logoUrl: parsed.logoUrl || savedInstLogo || ""
+        };
+      } catch {}
     }
     return {
       nombre: "Control de Stock",
-      subtitulo: "Suministros Hospitalarios • Dr. José Manuel Rodríguez"
+      subtitulo: "Suministros Hospitalarios • Dr. José Manuel Rodríguez",
+      logoUrl: savedInstLogo || ""
     };
   });
   const [authReady, setAuthReady] = useState(false);
@@ -807,18 +822,44 @@ export default function App() {
 
     const unsubInstitucion = onSnapshot(
       tenantDoc("configuracion", "institucion", activeFarmaciaId),
-      (docSnap) => {
+      async (docSnap) => {
         if (docSnap.exists()) {
           const data = docSnap.data();
           localStorage.setItem("active_institucion_info", JSON.stringify(data));
-          if (data.nombre) {
-            const nextMeta = {
-              nombre: "Control de Stock",
-              subtitulo: data.nombre
-            };
-            setFarmaciaMeta(nextMeta);
-            localStorage.setItem("active_farmacia_meta", JSON.stringify(nextMeta));
+          let resolvedLogo = data.logoUrl || "";
+          if (!resolvedLogo && activeFarmaciaId !== DEFAULT_FARMACIA_ID) {
+            try {
+              const fSnap = await getDoc(doc(db, "farmacias", activeFarmaciaId));
+              if (fSnap.exists() && fSnap.data().logoUrl) {
+                resolvedLogo = fSnap.data().logoUrl;
+              }
+            } catch {}
           }
+          const nextMeta = {
+            nombre: "Control de Stock",
+            subtitulo:
+              data.nombre ||
+              (activeFarmaciaId === DEFAULT_FARMACIA_ID
+                ? "Suministros Hospitalarios • Dr. José Manuel Rodríguez"
+                : `Sede: ${activeFarmaciaId}`),
+            logoUrl: resolvedLogo
+          };
+          setFarmaciaMeta(nextMeta);
+          localStorage.setItem("active_farmacia_meta", JSON.stringify(nextMeta));
+        } else if (activeFarmaciaId !== DEFAULT_FARMACIA_ID) {
+          try {
+            const fSnap = await getDoc(doc(db, "farmacias", activeFarmaciaId));
+            if (fSnap.exists()) {
+              const fData = fSnap.data();
+              const nextMeta = {
+                nombre: "Control de Stock",
+                subtitulo: fData.nombre || fData.subtitulo || `Sede: ${activeFarmaciaId}`,
+                logoUrl: fData.logoUrl || ""
+              };
+              setFarmaciaMeta(nextMeta);
+              localStorage.setItem("active_farmacia_meta", JSON.stringify(nextMeta));
+            }
+          } catch {}
         }
       },
       (err) => console.error("Error listening to institucion:", err)
@@ -3139,6 +3180,7 @@ export default function App() {
             onToggleMute={handleToggleMute}
             farmaciaNombre={farmaciaMeta.nombre || "Control de Stock"}
             farmaciaSubtitulo={farmaciaMeta.subtitulo || "Suministros Hospitalarios"}
+            farmaciaLogo={farmaciaMeta.logoUrl}
             activeCatalogName={catalogos.find((c) => c.id === activeCatalogId)?.nombre || "Catálogo Principal"}
           />
 
@@ -3164,9 +3206,15 @@ export default function App() {
                     >
                       <div className="w-9 h-9 sm:w-10 sm:h-10 rounded-xl bg-white p-1.5 shadow-sm flex items-center justify-center shrink-0 border border-white/20">
                         <img
-                          src={APP_ICON_PATH}
-                          alt="Icono de la Aplicación"
+                          src={farmaciaMeta.logoUrl || APP_ICON_PATH}
+                          alt="Logo de la Sede"
                           className="w-full h-full object-contain"
+                          onError={(e) => {
+                            const target = e.currentTarget;
+                            if (target.src !== APP_ICON_PATH) {
+                              target.src = APP_ICON_PATH;
+                            }
+                          }}
                         />
                       </div>
                       <div className="min-w-0">
@@ -3229,7 +3277,8 @@ export default function App() {
                         setActiveFarmaciaIdState(cleanTenant);
                         const defaultMeta = {
                           nombre: "Control de Stock",
-                          subtitulo: "Suministros Hospitalarios • Dr. José Manuel Rodríguez"
+                          subtitulo: "Suministros Hospitalarios • Dr. José Manuel Rodríguez",
+                          logoUrl: ""
                         };
                         setFarmaciaMeta(defaultMeta);
                         localStorage.setItem("active_farmacia_meta", JSON.stringify(defaultMeta));
@@ -3488,21 +3537,21 @@ export default function App() {
                 conceptos={conceptos}
                 onUpdateConceptos={(list) => setConceptos(list)}
                 onUpdateInstitucion={(info) => {
-                  if (info.nombre) {
-                    const nextMeta = {
-                      nombre: "Control de Stock",
-                      subtitulo: info.nombre
-                    };
-                    setFarmaciaMeta(nextMeta);
-                    localStorage.setItem("active_farmacia_meta", JSON.stringify(nextMeta));
-                  }
+                  const nextMeta = {
+                    nombre: "Control de Stock",
+                    subtitulo: info.nombre || farmaciaMeta.subtitulo,
+                    logoUrl: info.logoUrl || ""
+                  };
+                  setFarmaciaMeta(nextMeta);
+                  localStorage.setItem("active_farmacia_meta", JSON.stringify(nextMeta));
                 }}
-                onSwitchFarmacia={(targetId, targetName) => {
+                onSwitchFarmacia={(targetId, targetName, targetLogoUrl) => {
                   const cleanTenant = setActiveFarmaciaId(targetId);
                   setActiveFarmaciaIdState(cleanTenant);
                   const nextMeta = {
                     nombre: "Control de Stock",
-                    subtitulo: targetName || `Sede: ${cleanTenant}`
+                    subtitulo: targetName || `Sede: ${cleanTenant}`,
+                    logoUrl: targetLogoUrl || ""
                   };
                   setFarmaciaMeta(nextMeta);
                   localStorage.setItem("active_farmacia_meta", JSON.stringify(nextMeta));

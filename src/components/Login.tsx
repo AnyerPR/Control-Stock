@@ -36,7 +36,7 @@ interface LoginProps {
   onLoginSuccess: (
     user: Usuario,
     farmaciaId: string,
-    farmaciaMeta?: { nombre: string; subtitulo?: string }
+    farmaciaMeta?: { nombre: string; subtitulo?: string; logoUrl?: string }
   ) => void;
 }
 
@@ -174,6 +174,7 @@ export default function Login({ users, isInitializingUsers, onLoginSuccess }: Lo
   const [farmaciaSubtitle, setFarmaciaSubtitle] = useState<string>(
     "Suministros Hospitalarios • Dr. José Manuel Rodríguez"
   );
+  const [farmaciaLogo, setFarmaciaLogo] = useState<string>("");
 
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
@@ -211,38 +212,67 @@ export default function Login({ users, isInitializingUsers, onLoginSuccess }: Lo
     };
   }, []);
 
-  // Actualizar nombre de la farmacia seleccionada en la cabecera del Login
+  // Actualizar nombre y logo de la farmacia seleccionada en la cabecera del Login
   useEffect(() => {
     const cleanTenant = normalizeFarmaciaId(farmaciaId);
+    let cancelled = false;
+
     if (cleanTenant === DEFAULT_FARMACIA_ID) {
       setFarmaciaTitle("Control de Stock");
       setFarmaciaSubtitle("Suministros Hospitalarios • Dr. José Manuel Rodríguez");
-      return;
+      setFarmaciaLogo("");
+      const isLocalFileMode = typeof window !== "undefined" && window.location.protocol === "file:";
+      if (!isLocalFileMode) {
+        getDoc(tenantDoc("configuracion", "institucion", DEFAULT_FARMACIA_ID))
+          .then((instSnap) => {
+            if (!cancelled && instSnap.exists()) {
+              const instData = instSnap.data();
+              if (instData?.nombre) setFarmaciaSubtitle(instData.nombre);
+              setFarmaciaLogo(instData?.logoUrl || "");
+            }
+          })
+          .catch(() => {});
+      }
+      return () => {
+        cancelled = true;
+      };
     }
 
     const foundLocal = availableFarmacias.find((f) => f.id === cleanTenant);
     if (foundLocal) {
       setFarmaciaTitle(foundLocal.nombre || "Control de Stock");
       setFarmaciaSubtitle(foundLocal.subtitulo || foundLocal.direccion || `Sede: ${cleanTenant}`);
-      return;
+      setFarmaciaLogo(foundLocal.logoUrl || "");
     }
 
-    let cancelled = false;
     const fetchTenantMeta = async () => {
       try {
-        const snap = await getDoc(doc(db, "farmacias", cleanTenant));
-        if (!cancelled && snap.exists()) {
+        const [snap, instSnap] = await Promise.all([
+          getDoc(doc(db, "farmacias", cleanTenant)).catch(() => null),
+          getDoc(tenantDoc("configuracion", "institucion", cleanTenant)).catch(() => null)
+        ]);
+        if (cancelled) return;
+        const instLogo = instSnap && instSnap.exists() ? (instSnap.data()?.logoUrl as string | undefined) : undefined;
+        if (snap && snap.exists()) {
           const data = snap.data() as FarmaciaTenant;
           setFarmaciaTitle(data.nombre || "Control de Stock");
           setFarmaciaSubtitle(data.subtitulo || `Sede: ${cleanTenant}`);
-        } else if (!cancelled) {
+          setFarmaciaLogo(instLogo || data.logoUrl || foundLocal?.logoUrl || "");
+        } else if (instSnap && instSnap.exists()) {
+          const instData = instSnap.data();
+          setFarmaciaTitle(instData?.nombre || foundLocal?.nombre || "Control de Stock");
+          setFarmaciaSubtitle(instData?.direccion || `Sede: ${cleanTenant}`);
+          setFarmaciaLogo(instLogo || foundLocal?.logoUrl || "");
+        } else if (!foundLocal) {
           setFarmaciaTitle("Control de Stock");
           setFarmaciaSubtitle(`Farmacia / Sede: ${cleanTenant}`);
+          setFarmaciaLogo("");
         }
       } catch {
-        if (!cancelled) {
+        if (!cancelled && !foundLocal) {
           setFarmaciaTitle("Control de Stock");
           setFarmaciaSubtitle(`Farmacia / Sede: ${cleanTenant}`);
+          setFarmaciaLogo("");
         }
       }
     };
@@ -356,7 +386,8 @@ export default function Login({ users, isInitializingUsers, onLoginSuccess }: Lo
         setActiveFarmaciaId(cleanTenant);
         onLoginSuccess(foundUser, cleanTenant, {
           nombre: farmaciaTitle,
-          subtitulo: farmaciaSubtitle
+          subtitulo: farmaciaSubtitle,
+          logoUrl: farmaciaLogo || ""
         });
         return;
       }
@@ -490,12 +521,13 @@ export default function Login({ users, isInitializingUsers, onLoginSuccess }: Lo
       }
 
       // 4. Validar estado de la farmacia y obtener su membrete
-      let tenantMeta = {
+      let tenantMeta: { nombre: string; subtitulo: string; logoUrl?: string } = {
         nombre: "Control de Stock",
         subtitulo:
           cleanTenant === DEFAULT_FARMACIA_ID
             ? "Suministros Hospitalarios • Dr. José Manuel Rodríguez"
-            : `Sede: ${cleanTenant}`
+            : `Sede: ${cleanTenant}`,
+        logoUrl: farmaciaLogo || ""
       };
 
       if (cleanTenant !== DEFAULT_FARMACIA_ID) {
@@ -511,7 +543,8 @@ export default function Login({ users, isInitializingUsers, onLoginSuccess }: Lo
             }
             tenantMeta = {
               nombre: "Control de Stock",
-              subtitulo: fData.nombre || fData.subtitulo || `Sede: ${cleanTenant}`
+              subtitulo: fData.nombre || fData.subtitulo || `Sede: ${cleanTenant}`,
+              logoUrl: fData.logoUrl || farmaciaLogo || ""
             };
           }
         } catch (err: any) {
@@ -609,9 +642,15 @@ export default function Login({ users, isInitializingUsers, onLoginSuccess }: Lo
       <div className="sm:mx-auto sm:w-full sm:max-w-md text-center px-4">
         <div className="mx-auto h-18 w-18 bg-white rounded-2xl flex items-center justify-center shadow-lg shadow-teal-950/15 mb-3.5 border border-slate-200/90 p-2">
           <img
-            src={APP_ICON_PATH}
-            alt="Icono de la Aplicación"
+            src={farmaciaLogo || APP_ICON_PATH}
+            alt="Logo de la Sede"
             className="w-full h-full object-contain"
+            onError={(e) => {
+              const target = e.currentTarget;
+              if (target.src !== APP_ICON_PATH) {
+                target.src = APP_ICON_PATH;
+              }
+            }}
           />
         </div>
         <h2 className="text-2xl sm:text-3xl font-extrabold text-slate-900 tracking-tight">{farmaciaTitle}</h2>

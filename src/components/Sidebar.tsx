@@ -51,6 +51,7 @@ interface SidebarProps {
   onToggleMute: () => void;
   farmaciaNombre?: string;
   farmaciaSubtitulo?: string;
+  farmaciaLogo?: string;
   activeCatalogName?: string;
 }
 
@@ -74,6 +75,7 @@ function Sidebar({
   onToggleMute,
   farmaciaNombre = "Control de Stock",
   farmaciaSubtitulo = "Suministros Hospitalarios",
+  farmaciaLogo,
   activeCatalogName
 }: SidebarProps) {
   // Construir elementos de navegación según permisos activos
@@ -244,11 +246,23 @@ function Sidebar({
             onClick={() => handleTabClick("dashboard")}
             className="flex items-center gap-3 cursor-pointer min-w-0 group"
           >
-            <div className="w-9 h-9 rounded-2xl bg-gradient-to-br from-teal-500 to-emerald-600 p-1.5 shadow-md shadow-teal-900/30 flex items-center justify-center shrink-0 border border-teal-300/30">
+            <div
+              className={`w-9 h-9 rounded-2xl p-1.5 shadow-md shadow-teal-900/30 flex items-center justify-center shrink-0 border ${
+                farmaciaLogo
+                  ? "bg-white border-white/30"
+                  : "bg-gradient-to-br from-teal-500 to-emerald-600 border-teal-300/30"
+              }`}
+            >
               <img
-                src={APP_ICON_PATH}
-                alt="Logo"
+                src={farmaciaLogo || APP_ICON_PATH}
+                alt="Logo de la Sede"
                 className="w-full h-full object-contain"
+                onError={(e) => {
+                  const target = e.currentTarget;
+                  if (target.src !== APP_ICON_PATH) {
+                    target.src = APP_ICON_PATH;
+                  }
+                }}
               />
             </div>
             <div className="min-w-0">

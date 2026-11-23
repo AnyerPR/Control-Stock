@@ -80,7 +80,7 @@ interface ConfiguracionPanelProps {
   conceptos?: ConceptoFactura[];
   onUpdateConceptos?: (list: ConceptoFactura[]) => void;
   onUpdateInstitucion?: (info: InstitucionInfo) => void;
-  onSwitchFarmacia?: (farmaciaId: string, nombre?: string) => void;
+  onSwitchFarmacia?: (farmaciaId: string, nombre?: string, logoUrl?: string) => void;
 }
 
 const PRESETS = [
@@ -1456,7 +1456,7 @@ export default function ConfiguracionPanel({
               {selectedClientMode !== "principal" && selectedClientMode !== "__nuevo__" && onSwitchFarmacia && (
                 <button
                   type="button"
-                  onClick={() => onSwitchFarmacia(selectedClientMode, instNombre || selectedClientMode)}
+                  onClick={() => onSwitchFarmacia(selectedClientMode, instNombre || selectedClientMode, instLogoUrl)}
                   className="flex-1 sm:flex-initial justify-center px-3.5 py-2.5 rounded-xl text-xs font-extrabold uppercase tracking-wider flex items-center gap-1.5 bg-emerald-700 hover:bg-emerald-800 text-white shadow-xs transition cursor-pointer"
                 >
                   <Building2 className="w-3.5 h-3.5" />
@@ -1814,7 +1814,7 @@ export default function ConfiguracionPanel({
                           {onSwitchFarmacia && (
                             <button
                               type="button"
-                              onClick={() => onSwitchFarmacia(f.id, f.nombre)}
+                              onClick={() => onSwitchFarmacia(f.id, f.nombre, f.logoUrl)}
                               className="inline-flex items-center gap-1 px-3 py-1.5 text-xs font-bold rounded-lg bg-emerald-700 text-white hover:bg-emerald-800 transition cursor-pointer shadow-2xs"
                             >
                               <Building2 className="w-3.5 h-3.5" />
