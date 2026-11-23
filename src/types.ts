@@ -88,6 +88,33 @@ export interface Usuario {
   authUid?: string;
 }
 
+export interface CargaMasivaRecord {
+  id: string;
+  fecha: string;
+  timestamp: number;
+  usuario: string;
+  activeCatalogId: string;
+  totalItems: number;
+  importedItems: number;
+  nombreArchivo?: string;
+  tipoArchivo?: "Excel" | "PDF";
+  lotesCreados: Array<{ productoCodigo: string; loteId: string; numeroLote?: string; cantidad: number }>;
+  lotesModificados?: Array<{
+    productoCodigo: string;
+    loteId: string;
+    numeroLote?: string;
+    cantidadAgregada: number;
+    cantidadPrevia?: number;
+  }>;
+  descripcionesPrevias?: Array<{ productoCodigo: string; descripcionPrevia: string }>;
+  productosCreados: string[];
+  movimientosCreados: string[];
+  snapshotProductos?: Producto[];
+  revertida?: boolean;
+  fechaReversion?: string;
+  usuarioReversion?: string;
+}
+
 export interface CampoVariableCliente {
   etiqueta: string;
   valor: string;
