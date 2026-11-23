@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Control de Stock — Redirigiendo...</title>
+    <script>
+      (function () {
+        // Redirección automática en GitHub Pages hacia la raíz del repositorio activo
+        var pathSegments = window.location.pathname.split('/').filter(Boolean);
+        var targetBase = '/';
+        if (window.location.hostname.indexOf('github.io') !== -1 && pathSegments.length > 0) {
+          targetBase = '/' + pathSegments[0] + '/';
+        }
+        window.location.replace(targetBase + window.location.search + window.location.hash);
+      })();
+    </script>
+  </head>
+  <body style="margin:0;background:#f1f5f9;font-family:system-ui,sans-serif;display:flex;align-items:center;justify-content:center;min-height:100vh;color:#0f172a;">
+    <div style="text-align:center;padding:24px;">
+      <p style="font-size:14px;font-weight:700;">Abriendo Control de Stock Hospitalario...</p>
+    </div>
+  </body>
+</html>

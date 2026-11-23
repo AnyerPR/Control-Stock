@@ -19,6 +19,8 @@ import {
   calcularResumenPorDepartamento,
   ensureDefaultTiposConsumoPresent,
   ensureLicIrisAybarPresent,
+  getPersonalPorDepartamento,
+  getResponsablesTitularesPorDepartamento,
   loadLocalConsumos,
   loadLocalResponsables,
   loadLocalTiposConsumo,
@@ -230,11 +232,32 @@ export default function ConsumosPanel({
   const [nuevoRespCargo, setNuevoRespCargo] = useState<string>("");
   const [nuevoRespDept, setNuevoRespDept] = useState<string>(selectedDepartamento);
   const [nuevoRespTelefono, setNuevoRespTelefono] = useState<string>("");
+  const [nuevoRespEsSubalterno, setNuevoRespEsSubalterno] = useState<boolean>(false);
+  const [nuevoRespSuperiorId, setNuevoRespSuperiorId] = useState<string>("");
   const [savingNuevoResp, setSavingNuevoResp] = useState<boolean>(false);
 
   useEffect(() => {
     setNuevoRespDept(selectedDepartamento);
   }, [selectedDepartamento]);
+
+  // Responsables titulares del departamento seleccionado en el formulario "Nuevo"
+  const titularesParaNuevoSubalterno = useMemo(
+    () => getResponsablesTitularesPorDepartamento(responsables, nuevoRespDept || selectedDepartamento),
+    [responsables, nuevoRespDept, selectedDepartamento]
+  );
+
+  useEffect(() => {
+    if (nuevoRespEsSubalterno) {
+      if (
+        !nuevoRespSuperiorId ||
+        !titularesParaNuevoSubalterno.some((t) => t.id === nuevoRespSuperiorId)
+      ) {
+        setNuevoRespSuperiorId(titularesParaNuevoSubalterno[0]?.id || "");
+      }
+    } else {
+      setNuevoRespSuperiorId("");
+    }
+  }, [nuevoRespEsSubalterno, titularesParaNuevoSubalterno, nuevoRespSuperiorId]);
 
   // Selección de productos e insumos
   const [productSearch, setProductSearch] = useState<string>("");
@@ -249,31 +272,21 @@ export default function ConsumosPanel({
   const submitLockRef = useRef<boolean>(false);
   const [lastConfirmedConsumo, setLastConfirmedConsumo] = useState<RegistroConsumo | null>(null);
 
-  // Responsables activos ordenados (primero los del departamento seleccionado)
-  const activeResponsables = useMemo(() => {
-    const active = responsables.filter((r) => r.activo !== false);
-    const deptNorm = normalizeTextToken(selectedDepartamento);
-    return [...active].sort((a, b) => {
-      const aMatch = normalizeTextToken(a.departamentoNombre) === deptNorm ? 1 : 0;
-      const bMatch = normalizeTextToken(b.departamentoNombre) === deptNorm ? 1 : 0;
-      if (aMatch !== bMatch) return bMatch - aMatch;
-      return a.nombre.localeCompare(b.nombre, "es");
-    });
-  }, [responsables, selectedDepartamento]);
+  // Personal activo del departamento seleccionado: únicamente el responsable asignado a ese departamento y sus subalternos
+  const activeResponsables = useMemo(
+    () => getPersonalPorDepartamento(responsables, selectedDepartamento),
+    [responsables, selectedDepartamento]
+  );
 
-  // Auto-seleccionar responsable del departamento cuando cambia el departamento
+  // Auto-seleccionar al responsable (o primer subalterno) del departamento cuando cambia el departamento
   useEffect(() => {
     const currentResp = activeResponsables.find((r) => r.id === selectedResponsableId);
-    const deptNorm = normalizeTextToken(selectedDepartamento);
-    if (!currentResp || normalizeTextToken(currentResp.departamentoNombre) !== deptNorm) {
-      const matchingResp = activeResponsables.find(
-        (r) => normalizeTextToken(r.departamentoNombre) === deptNorm
-      );
-      if (matchingResp) {
-        setSelectedResponsableId(matchingResp.id);
-        setAsignacionEspecialAdmin(false);
-      } else if (activeResponsables.length > 0 && !currentResp) {
+    if (!currentResp) {
+      if (activeResponsables.length > 0) {
         setSelectedResponsableId(activeResponsables[0].id);
+        setAsignacionEspecialAdmin(false);
+      } else {
+        setSelectedResponsableId("");
       }
     }
   }, [selectedDepartamento, activeResponsables, selectedResponsableId]);
@@ -490,22 +503,30 @@ export default function ConsumosPanel({
     playSound("click");
   };
 
-  // Crear nuevo responsable rápidamente desde el botón "Nuevo" debajo del selector
+  // Crear nuevo responsable o subalterno rápidamente desde el botón "Nuevo" debajo del selector
   const handleCreateNuevoResponsable = async (e: React.FormEvent) => {
     e.preventDefault();
     if (savingNuevoResp) return;
 
     setSavingNuevoResp(true);
     try {
+      const targetDeptName = nuevoRespDept || selectedDepartamento;
       const deptObj = departamentosDisponibles.find(
-        (d) => normalizeTextToken(d.nombre) === normalizeTextToken(nuevoRespDept)
+        (d) => normalizeTextToken(d.nombre) === normalizeTextToken(targetDeptName)
       );
+      const superiorObj = titularesParaNuevoSubalterno.find(
+        (t) => t.id === nuevoRespSuperiorId
+      ) || titularesParaNuevoSubalterno[0];
+
       const res = await registrarNuevoResponsableRapido({
         nombre: nuevoRespNombre,
-        departamentoNombre: nuevoRespDept || selectedDepartamento,
+        departamentoNombre: targetDeptName,
         departamentoId: deptObj?.id,
         cargo: nuevoRespCargo,
         telefono: nuevoRespTelefono,
+        esSubalterno: nuevoRespEsSubalterno,
+        responsableSuperiorId: nuevoRespEsSubalterno ? superiorObj?.id : undefined,
+        responsableSuperiorNombre: nuevoRespEsSubalterno ? superiorObj?.nombre : undefined,
         sedeId: activeSedeId,
         creadoPor: `${currentUser.nombre} (${currentUser.usuario})`,
         existingResponsables: responsables
@@ -513,26 +534,27 @@ export default function ConsumosPanel({
 
       if (!res.exito || !res.responsable) {
         playSound("negative");
-        showToast(res.error || "No se pudo registrar el responsable.");
+        showToast(res.error || "No se pudo registrar el personal.");
         return;
       }
 
       setResponsables(res.listaActualizada);
-      // Si se creó para otro departamento distinto al seleccionado, actualizamos el departamento o seleccionamos el nuevo responsable
       if (
-        nuevoRespDept &&
-        normalizeTextToken(nuevoRespDept) !== normalizeTextToken(selectedDepartamento)
+        targetDeptName &&
+        normalizeTextToken(targetDeptName) !== normalizeTextToken(selectedDepartamento)
       ) {
-        setSelectedDepartamento(nuevoRespDept);
+        setSelectedDepartamento(targetDeptName);
       }
       setSelectedResponsableId(res.responsable.id);
       setNuevoRespNombre("");
       setNuevoRespCargo("");
       setNuevoRespTelefono("");
+      setNuevoRespEsSubalterno(false);
+      setNuevoRespSuperiorId("");
       setShowNuevoResponsableModal(false);
       playSound("positive");
       showToast(
-        `Responsable "${res.responsable.nombre}" registrado y asociado a ${res.responsable.departamentoNombre}.`
+        `${res.responsable.esSubalterno ? "Subalterno" : "Responsable"} "${res.responsable.nombre}" registrado y asociado a ${res.responsable.departamentoNombre}.`
       );
     } finally {
       setSavingNuevoResp(false);
@@ -1167,7 +1189,7 @@ export default function ConsumosPanel({
               {/* Responsable del Departamento + Botón "Nuevo" debajo */}
               <div className="space-y-2">
                 <label className="block text-[10px] font-black uppercase text-slate-500 tracking-wider">
-                  Responsable del Departamento *
+                  Responsable / Subalterno Receptor *
                 </label>
                 <select
                   value={selectedResponsableId}
@@ -1175,19 +1197,27 @@ export default function ConsumosPanel({
                     setSelectedResponsableId(e.target.value);
                     playSound("click");
                   }}
-                  className="w-full bg-slate-50 rounded-xl border border-slate-200 px-3.5 py-2.5 text-xs font-extrabold text-slate-800 outline-none focus:bg-white focus:ring-2 focus:ring-teal-400 cursor-pointer"
+                  className="w-full min-h-[42px] bg-slate-50 rounded-xl border border-slate-200 px-3.5 py-2.5 text-xs font-extrabold text-slate-800 outline-none focus:bg-white focus:ring-2 focus:ring-teal-400 cursor-pointer"
                 >
-                  {activeResponsables.map((resp) => {
-                    const isSameDept =
-                      normalizeTextToken(resp.departamentoNombre) ===
-                      normalizeTextToken(selectedDepartamento);
-                    return (
-                      <option key={resp.id} value={resp.id}>
-                        {resp.nombre} — {resp.departamentoNombre}
-                        {isSameDept ? " (Asignado)" : " (Otro Dpto.)"}
-                      </option>
-                    );
-                  })}
+                  {activeResponsables.length === 0 ? (
+                    <option value="">
+                      -- Sin responsable ni subalternos en {selectedDepartamento} (Use «Nuevo») --
+                    </option>
+                  ) : (
+                    activeResponsables.map((resp) => {
+                      const titularDept = activeResponsables.find((r) => !r.esSubalterno);
+                      const supNombre =
+                        resp.responsableSuperiorNombre || titularDept?.nombre || "";
+                      return (
+                        <option key={resp.id} value={resp.id}>
+                          {resp.nombre} —{" "}
+                          {resp.esSubalterno
+                            ? `Subalterno${supNombre ? ` (Resp: ${supNombre})` : ""}`
+                            : "Responsable del Departamento"}
+                        </option>
+                      );
+                    })
+                  )}
                 </select>
 
                 {/* Botón "Nuevo" debajo del selector según requerimiento */}
@@ -1206,12 +1236,23 @@ export default function ConsumosPanel({
                   </button>
 
                   {selectedResponsableObj && (
-                    <span className="text-[11px] font-semibold text-slate-500">
-                      Dpto. base:{" "}
-                      <strong className="text-slate-700">
-                        {selectedResponsableObj.departamentoNombre}
-                      </strong>
-                    </span>
+                    <div className="flex flex-wrap items-center gap-1.5 text-[11px] font-semibold text-slate-500">
+                      <span
+                        className={`px-2 py-0.5 rounded-full text-[10px] font-black uppercase ${
+                          selectedResponsableObj.esSubalterno
+                            ? "bg-indigo-50 text-indigo-800 border border-indigo-200"
+                            : "bg-teal-50 text-teal-800 border border-teal-200"
+                        }`}
+                      >
+                        {selectedResponsableObj.esSubalterno ? "Subalterno" : "Responsable Titular"}
+                      </span>
+                      <span>
+                        Dpto:{" "}
+                        <strong className="text-slate-700">
+                          {selectedResponsableObj.departamentoNombre}
+                        </strong>
+                      </span>
+                    </div>
                   )}
                 </div>
 
@@ -1221,7 +1262,7 @@ export default function ConsumosPanel({
                     <div className="flex items-center justify-between">
                       <span className="text-[11px] font-black uppercase tracking-wider text-teal-900 flex items-center gap-1.5">
                         <UserPlus className="w-3.5 h-3.5 text-teal-700" />
-                        Registrar Nuevo Responsable
+                        Registrar Nuevo Responsable o Subalterno
                       </span>
                       <button
                         type="button"
@@ -1235,14 +1276,14 @@ export default function ConsumosPanel({
                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
                       <div className="sm:col-span-2">
                         <label className="block text-[10px] font-black uppercase text-slate-600 mb-1">
-                          Nombre Completo del Responsable *
+                          Nombre Completo *
                         </label>
                         <input
                           type="text"
                           value={nuevoRespNombre}
                           onChange={(e) => setNuevoRespNombre(e.target.value)}
-                          placeholder="Ej: Lic. Iris Aybar / Dr. Carlos Pérez"
-                          className="w-full bg-white rounded-xl border border-slate-200 px-3 py-2 text-xs font-bold text-slate-800 outline-none focus:ring-2 focus:ring-teal-400"
+                          placeholder="Ej: Lic. Iris Aybar / Aux. Pedro Santana"
+                          className="w-full min-h-[40px] bg-white rounded-xl border border-slate-200 px-3 py-2 text-xs font-bold text-slate-800 outline-none focus:ring-2 focus:ring-teal-400"
                         />
                       </div>
 
@@ -1253,7 +1294,7 @@ export default function ConsumosPanel({
                         <select
                           value={nuevoRespDept}
                           onChange={(e) => setNuevoRespDept(e.target.value)}
-                          className="w-full bg-white rounded-xl border border-slate-200 px-3 py-2 text-xs font-bold text-slate-800 outline-none focus:ring-2 focus:ring-teal-400"
+                          className="w-full min-h-[40px] bg-white rounded-xl border border-slate-200 px-3 py-2 text-xs font-bold text-slate-800 outline-none focus:ring-2 focus:ring-teal-400"
                         >
                           {departamentosDisponibles.map((d) => (
                             <option key={d.id} value={d.nombre}>
@@ -1271,9 +1312,61 @@ export default function ConsumosPanel({
                           type="text"
                           value={nuevoRespCargo}
                           onChange={(e) => setNuevoRespCargo(e.target.value)}
-                          placeholder="Ej: Coordinador(a) / Encargado(a)"
-                          className="w-full bg-white rounded-xl border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-800 outline-none focus:ring-2 focus:ring-teal-400"
+                          placeholder={
+                            nuevoRespEsSubalterno
+                              ? "Ej: Auxiliar / Subalterno"
+                              : "Ej: Coordinador(a) / Encargado(a)"
+                          }
+                          className="w-full min-h-[40px] bg-white rounded-xl border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-800 outline-none focus:ring-2 focus:ring-teal-400"
                         />
+                      </div>
+
+                      {/* Checkbox "Es subalterno" */}
+                      <div className="sm:col-span-2 bg-white border border-teal-200/80 rounded-xl p-2.5 space-y-2">
+                        <label className="inline-flex items-center gap-2.5 cursor-pointer select-none">
+                          <input
+                            type="checkbox"
+                            checked={nuevoRespEsSubalterno}
+                            onChange={(e) => setNuevoRespEsSubalterno(e.target.checked)}
+                            className="w-4 h-4 rounded border-slate-300 text-teal-700 focus:ring-teal-500 cursor-pointer"
+                          />
+                          <div>
+                            <span className="text-xs font-black text-slate-800 block">
+                              Es subalterno
+                            </span>
+                            <span className="text-[10px] text-slate-500 font-medium block">
+                              {nuevoRespEsSubalterno
+                                ? "Se registrará como subalterno asociado al departamento y a su responsable titular."
+                                : "Sin marcar: se registrará como responsable titular del departamento."}
+                            </span>
+                          </div>
+                        </label>
+
+                        {nuevoRespEsSubalterno && (
+                          <div className="pt-1.5 border-t border-slate-100">
+                            <label className="block text-[10px] font-black uppercase text-slate-600 mb-1">
+                              Responsable Titular de {nuevoRespDept || selectedDepartamento}
+                            </label>
+                            {titularesParaNuevoSubalterno.length > 0 ? (
+                              <select
+                                value={nuevoRespSuperiorId}
+                                onChange={(e) => setNuevoRespSuperiorId(e.target.value)}
+                                className="w-full min-h-[38px] bg-slate-50 rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-bold text-teal-900 outline-none focus:ring-2 focus:ring-teal-400"
+                              >
+                                {titularesParaNuevoSubalterno.map((tit) => (
+                                  <option key={tit.id} value={tit.id}>
+                                    {tit.nombre} ({tit.departamentoNombre})
+                                  </option>
+                                ))}
+                              </select>
+                            ) : (
+                              <p className="text-[11px] font-semibold text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-2.5 py-1.5">
+                                Este departamento aún no tiene un responsable titular registrado. Se asociará automáticamente al departamento{" "}
+                                <strong>{nuevoRespDept || selectedDepartamento}</strong> y a su responsable cuando se asigne.
+                              </p>
+                            )}
+                          </div>
+                        )}
                       </div>
                     </div>
 
@@ -1297,28 +1390,13 @@ export default function ConsumosPanel({
                   </div>
                 )}
 
-                {/* Alerta de validación de relación Departamento ↔ Responsable */}
-                {!relacionResponsableCheck.valido && (
-                  <div className="bg-amber-50 border border-amber-200 rounded-xl p-3 text-xs text-amber-900 space-y-2">
-                    <div className="flex items-start gap-2">
-                      <AlertCircle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
-                      <p className="font-semibold leading-relaxed">
-                        {relacionResponsableCheck.mensaje}
-                      </p>
-                    </div>
-                    {isAdmin && (
-                      <label className="flex items-center gap-2 pt-1 cursor-pointer select-none font-bold text-amber-950">
-                        <input
-                          type="checkbox"
-                          checked={asignacionEspecialAdmin}
-                          onChange={(e) => setAsignacionEspecialAdmin(e.target.checked)}
-                          className="rounded border-amber-400 text-teal-600 focus:ring-teal-500"
-                        />
-                        <span>
-                          Autorizar asignación especial interdepartamental (Permiso Administrador)
-                        </span>
-                      </label>
-                    )}
+                {/* Alerta cuando un departamento aún no tiene responsable ni subalternos */}
+                {activeResponsables.length === 0 && (
+                  <div className="bg-amber-50 border border-amber-200 rounded-xl p-3 text-xs text-amber-900 flex items-start gap-2">
+                    <AlertCircle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+                    <p className="font-semibold leading-relaxed">
+                      El departamento <strong>{selectedDepartamento}</strong> aún no tiene un responsable o subalterno asignado. Pulse el botón <strong>«Nuevo»</strong> para registrarlo.
+                    </p>
                   </div>
                 )}
               </div>

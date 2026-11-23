@@ -5,6 +5,8 @@ import {
   getDefaultTiposConsumo,
   getDefaultResponsables,
   ensureLicIrisAybarPresent,
+  getPersonalPorDepartamento,
+  getResponsablesTitularesPorDepartamento,
   registrarNuevoResponsableRapido,
   validarRelacionResponsableDepartamento,
   procesarConsumoEnMemoria,
@@ -589,3 +591,80 @@ test("9. Consistencia del Resumen por Departamento, Responsable e Interno vs Ext
   assert.equal(corr.consumoActualizado?.historialCorrecciones?.length, 1);
   assert.equal(corr.consumoActualizado?.totalUnidades, 30, "Las unidades entregadas originales se mantienen auditables");
 });
+
+test("10. Gestión de subalternos por departamento, relación con su responsable y filtrado estricto por departamento", async () => {
+  let lista = getDefaultResponsables("sede-central"); // Lic. Iris Aybar (Responsable de Enfermería)
+
+  // 1. Crear un subalterno en Enfermería (checkbox 'Es subalterno' = true)
+  const sub1 = await registrarNuevoResponsableRapido({
+    nombre: "Aux. Pedro Santana",
+    departamentoNombre: "Enfermería",
+    cargo: "Auxiliar de Enfermería",
+    esSubalterno: true,
+    sedeId: "sede-central",
+    existingResponsables: lista
+  });
+
+  assert.equal(sub1.exito, true);
+  assert.ok(sub1.responsable);
+  assert.equal(sub1.responsable.esSubalterno, true);
+  assert.equal(sub1.responsable.departamentoNombre, "Enfermería");
+  assert.equal(sub1.responsable.responsableSuperiorNombre, "Lic. Iris Aybar", "El subalterno debe quedar asociado automáticamente a Lic. Iris Aybar");
+  lista = sub1.listaActualizada;
+
+  // 2. Crear un segundo subalterno en Enfermería
+  const sub2 = await registrarNuevoResponsableRapido({
+    nombre: "Enf. Luisa Fernández",
+    departamentoNombre: "Enfermería",
+    esSubalterno: true,
+    sedeId: "sede-central",
+    existingResponsables: lista
+  });
+  assert.equal(sub2.exito, true);
+  lista = sub2.listaActualizada;
+
+  // 3. Crear un responsable titular y un subalterno en Laboratorio
+  const respLab = await registrarNuevoResponsableRapido({
+    nombre: "Lic. Roberto Díaz",
+    departamentoNombre: "Laboratorio",
+    esSubalterno: false,
+    sedeId: "sede-central",
+    existingResponsables: lista
+  });
+  assert.equal(respLab.exito, true);
+  assert.equal(respLab.responsable?.esSubalterno, false);
+  lista = respLab.listaActualizada;
+
+  const subLab = await registrarNuevoResponsableRapido({
+    nombre: "Téc. Ana Marte",
+    departamentoNombre: "Laboratorio",
+    esSubalterno: true,
+    sedeId: "sede-central",
+    existingResponsables: lista
+  });
+  assert.equal(subLab.exito, true);
+  assert.equal(subLab.responsable?.responsableSuperiorNombre, "Lic. Roberto Díaz");
+  lista = subLab.listaActualizada;
+
+  // 4. Al seleccionar el departamento 'Enfermería', solo deben aparecer Lic. Iris Aybar y sus 2 subalternos (ninguno de Laboratorio)
+  const personalEnfermeria = getPersonalPorDepartamento(lista, "Enfermería");
+  assert.equal(personalEnfermeria.length, 3, "Enfermería debe tener 1 responsable y 2 subalternos");
+  assert.equal(personalEnfermeria[0].nombre, "Lic. Iris Aybar", "El responsable titular debe listarse primero");
+  assert.equal(
+    personalEnfermeria.some((p) => p.departamentoNombre !== "Enfermería"),
+    false,
+    "No deben aparecer responsables ni subalternos de otros departamentos"
+  );
+
+  // 5. Al seleccionar el departamento 'Laboratorio', solo deben aparecer Lic. Roberto Díaz y Téc. Ana Marte
+  const personalLaboratorio = getPersonalPorDepartamento(lista, "Laboratorio");
+  assert.equal(personalLaboratorio.length, 2);
+  assert.equal(personalLaboratorio[0].nombre, "Lic. Roberto Díaz");
+  assert.equal(personalLaboratorio[1].nombre, "Téc. Ana Marte");
+
+  // 6. getResponsablesTitularesPorDepartamento solo devuelve al responsable titular
+  const titularesEnf = getResponsablesTitularesPorDepartamento(lista, "Enfermería");
+  assert.equal(titularesEnf.length, 1);
+  assert.equal(titularesEnf[0].nombre, "Lic. Iris Aybar");
+});
+

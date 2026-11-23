@@ -3,105 +3,158 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=5.0, viewport-fit=cover" />
-    <title>Control de Stock Hospitalario</title>
-    <meta name="description" content="Sistema de control de inventario de medicamentos y gestión de solicitudes y órdenes hospitalarias." />
-    <meta property="og:title" content="Control de Stock Hospitalario" />
-    <meta property="og:description" content="Sistema de control de inventario de medicamentos y gestión de solicitudes y órdenes hospitalarias." />
-    <meta property="og:image" content="/assets/aistudio/farmacia_6a281112.png" />
+    <title>Control de Stock — Suministros Hospitalarios</title>
+    <meta name="description" content="Sistema de Inventario, Solicitudes, Consumos y Control de Suministros Hospitalarios — Dr. José Manuel Rodríguez" />
+    <meta property="og:title" content="Control de Stock — Suministros Hospitalarios" />
+    <meta property="og:description" content="Sistema de Inventario, Solicitudes, Consumos y Control de Suministros Hospitalarios — Dr. José Manuel Rodríguez" />
+    <link rel="manifest" href="./manifest.json" />
     <meta name="theme-color" content="#115e59" />
     <meta name="mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
-    <meta name="apple-mobile-web-app-title" content="Farmacia" />
-    <link rel="manifest" href="/manifest.webmanifest" />
-    <link rel="manifest" href="/manifest.json" />
-    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
-    <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png" />
-    <link rel="icon" type="image/png" sizes="512x512" href="/assets/aistudio/farmacia_6a281112.png" />
-    <link rel="icon" type="image/png" sizes="192x192" href="/pwa-192x192.png" />
-    <link rel="shortcut icon" type="image/png" href="/favicon.png" />
+    <meta name="apple-mobile-web-app-title" content="Control Stock" />
+    <meta name="application-name" content="Control Stock" />
+    <link rel="icon" type="image/png" sizes="64x64" href="./favicon.png" />
+    <link rel="icon" type="image/png" sizes="192x192" href="./pwa-192x192.png" />
+    <link rel="icon" type="image/png" sizes="512x512" href="./pwa-512x512.png" />
+    <link rel="apple-touch-icon" sizes="180x180" href="./apple-touch-icon.png" />
     <script>
-      window.addEventListener('beforeinstallprompt', function(e) {
-        e.preventDefault();
+      window.__deferredPWAInstallPrompt = null;
+      window.__REACT_APP_MOUNTED__ = false;
+
+      // Capture beforeinstallprompt so in-app buttons work while keeping browser address-bar install icon available
+      window.addEventListener('beforeinstallprompt', function (e) {
         window.__deferredPWAInstallPrompt = e;
         window.dispatchEvent(new CustomEvent('pwa-prompt-ready'));
       });
-      if ('serviceWorker' in navigator) {
-        window.addEventListener('load', function() {
-          navigator.serviceWorker.register('/sw.js').then(function(reg) {
-            console.log('[PWA] ServiceWorker registrado exitosamente con scope:', reg.scope);
-          }).catch(function(err) {
-            console.warn('[PWA] Fallo registro de ServiceWorker:', err);
-          });
-        });
-      }
-      // Polyfill storage APIs to prevent SecurityError under file:// protocol
-      (function() {
-        function createMockStorage() {
-          var store = {};
-          return {
-            getItem: function(key) { return key in store ? store[key] : null; },
-            setItem: function(key, value) { store[key] = String(value); },
-            removeItem: function(key) { delete store[key]; },
-            clear: function() { store = {}; },
-            key: function(index) { return Object.keys(store)[index] || null; },
-            get length() { return Object.keys(store).length; }
-          };
-        }
 
+      // Global self-healing function for desktop & mobile PWA cache/service-worker repair
+      window.__repairMobilePWA = async function (clearSession) {
         try {
-          var test = window.localStorage;
-          if (!test) throw new Error();
-          test.setItem('__test__', '1');
-          test.removeItem('__test__');
-        } catch (e) {
-          console.warn("localStorage is blocked or not supported. Using polyfill.");
-          Object.defineProperty(window, 'localStorage', {
-            value: createMockStorage(),
-            configurable: true,
-            writable: true
-          });
+          if ('serviceWorker' in navigator) {
+            const regs = await navigator.serviceWorker.getRegistrations();
+            await Promise.all(regs.map(function (r) { return r.unregister(); }));
+          }
+          if ('caches' in window) {
+            const keys = await caches.keys();
+            await Promise.all(keys.map(function (k) { return caches.delete(k); }));
+          }
+          if (clearSession) {
+            localStorage.removeItem('current_user');
+          }
+          localStorage.setItem('pwa_cache_v5_migrated', '1');
+        } catch (err) {
+          console.warn('Error cleaning PWA caches:', err);
         }
+        var baseDir = window.location.pathname.endsWith('/')
+          ? window.location.pathname
+          : window.location.pathname.replace(/\/[^/]*$/, '/');
+        var cleanUrl = baseDir + '?repaired=' + Date.now();
+        window.location.replace(cleanUrl);
+      };
 
+      // One-time migration to purge old caches so the new logo and relative manifest load immediately
+      (function () {
         try {
-          var testSession = window.sessionStorage;
-          if (!testSession) throw new Error();
-          testSession.setItem('__test__', '1');
-          testSession.removeItem('__test__');
-        } catch (e) {
-          console.warn("sessionStorage is blocked or not supported. Using polyfill.");
-          Object.defineProperty(window, 'sessionStorage', {
-            value: createMockStorage(),
-            configurable: true,
-            writable: true
-          });
-        }
-
-        try {
-          var idb = window.indexedDB;
-        } catch (e) {
-          console.warn("indexedDB is blocked or not supported. Polyfilling with dummy.");
-          Object.defineProperty(window, 'indexedDB', {
-            value: null,
-            configurable: true,
-            writable: true
-          });
-        }
-
-        if (!window.isSecureContext) {
-          try {
-            Object.defineProperty(window, 'isSecureContext', {
-              value: true,
-              configurable: true,
-              writable: true
+          if (localStorage.getItem('pwa_cache_v5_migrated') !== '1' && 'caches' in window) {
+            caches.keys().then(function (names) {
+              names.forEach(function (name) {
+                if (name !== 'farmacia-stock-v5') {
+                  caches.delete(name);
+                }
+              });
             });
-          } catch (e) {}
-        }
+            localStorage.setItem('pwa_cache_v5_migrated', '1');
+          }
+        } catch (e) {}
       })();
+
+      // Automatic recovery if a cached JS bundle fails to load after an update
+      window.addEventListener(
+        'error',
+        function (event) {
+          var target = event && event.target;
+          var isScriptOrLink =
+            target && (target.tagName === 'SCRIPT' || target.tagName === 'LINK');
+          var msg = (event && event.message ? String(event.message) : '').toLowerCase();
+          var isChunkError =
+            isScriptOrLink ||
+            msg.indexOf('failed to fetch dynamically imported module') !== -1 ||
+            msg.indexOf('importing a module script failed') !== -1 ||
+            msg.indexOf('expected a javascript module script') !== -1;
+
+          if (isChunkError && !window.__REACT_APP_MOUNTED__) {
+            try {
+              if (!sessionStorage.getItem('pwa_auto_repaired_v5')) {
+                sessionStorage.setItem('pwa_auto_repaired_v5', '1');
+                window.__repairMobilePWA(false);
+              }
+            } catch (e) {}
+          }
+        },
+        true
+      );
     </script>
   </head>
-  <body>
-    <div id="root"></div>
+  <body style="margin: 0; background-color: #f1f5f9; font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;">
+    <div id="root">
+      <div
+        id="initial-boot-loader"
+        style="min-height: 100vh; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 24px; box-sizing: border-box; background: #f1f5f9; color: #1e293b;"
+      >
+        <div
+          style="background: #ffffff; border: 1px solid #e2e8f0; border-radius: 24px; padding: 28px 24px; max-width: 360px; width: 100%; text-align: center; box-shadow: 0 10px 25px -5px rgba(15, 23, 42, 0.08);"
+        >
+          <div
+            style="width: 68px; height: 68px; margin: 0 auto 16px auto; border-radius: 16px; background: #f8fafc; border: 1px solid #e2e8f0; padding: 8px; display: flex; align-items: center; justify-content: center; box-sizing: border-box;"
+          >
+            <img
+              src="./assets/aistudio/Logo_nuevo_b3fa17de.png"
+              alt="Control de Stock"
+              style="width: 100%; height: 100%; object-fit: contain;"
+              onerror="this.src='./pwa-192x192.png'"
+            />
+          </div>
+          <div
+            style="width: 28px; height: 28px; margin: 0 auto 12px auto; border: 3px solid #ccfbf1; border-top-color: #0d9488; border-radius: 50%; animation: pwaSpin 0.8s linear infinite;"
+          ></div>
+          <div style="font-size: 16px; font-weight: 800; color: #0f172a;">
+            Iniciando Control de Stock
+          </div>
+          <div style="font-size: 12px; font-weight: 600; color: #64748b; margin-top: 6px;">
+            Cargando módulos para tu dispositivo...
+          </div>
+          <div
+            id="pwa-boot-recovery"
+            style="display: none; margin-top: 18px; padding-top: 16px; border-top: 1px solid #e2e8f0;"
+          >
+            <p style="font-size: 11px; color: #475569; margin: 0 0 10px 0; line-height: 1.4; font-weight: 600;">
+              ¿La aplicación tarda en abrir? Actualiza la memoria caché con un toque:
+            </p>
+            <button
+              type="button"
+              onclick="window.__repairMobilePWA && window.__repairMobilePWA(false)"
+              style="width: 100%; background: #115e59; color: #ffffff; border: none; border-radius: 12px; padding: 11px 16px; font-size: 12px; font-weight: 800; text-transform: uppercase; letter-spacing: 0.04em; cursor: pointer;"
+            >
+              Reparar y Abrir Aplicación
+            </button>
+          </div>
+        </div>
+      </div>
+      <style>
+        @keyframes pwaSpin {
+          to { transform: rotate(360deg); }
+        }
+      </style>
+    </div>
+    <script>
+      setTimeout(function () {
+        if (!window.__REACT_APP_MOUNTED__) {
+          var rec = document.getElementById('pwa-boot-recovery');
+          if (rec) rec.style.display = 'block';
+        }
+      }, 4500);
+    </script>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

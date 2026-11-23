@@ -334,7 +334,15 @@ export default function App() {
       const urlParams = new URLSearchParams(window.location.search);
       const tabParam = urlParams.get("tab") || urlParams.get("modulo") || urlParams.get("module");
       const hashSlug = window.location.hash ? window.location.hash.replace(/^#\/?/, "") : "";
-      const pathSlug = window.location.pathname && window.location.pathname !== "/" ? window.location.pathname : "";
+
+      // On GitHub Pages (e.g. /repo-name/), only treat a trailing path segment after the base directory as a route slug
+      const isGitHubPages = window.location.hostname.includes("github.io");
+      const pathSegments = (window.location.pathname || "").split("/").filter(Boolean);
+      const pathSlug = isGitHubPages
+        ? pathSegments.length > 1
+          ? pathSegments[pathSegments.length - 1]
+          : ""
+        : pathSegments[0] || "";
 
       const candidateSlug = tabParam || hashSlug || pathSlug;
       if (candidateSlug) {
@@ -348,9 +356,12 @@ export default function App() {
             setActiveTab(resolvedMod);
             return true;
           } else {
-            // Block unauthorized direct URL access and clean URL
+            // Clean query/hash without stripping the repository base pathname
             try {
-              window.history.replaceState(null, "", window.location.pathname.startsWith("/") ? "/" : window.location.pathname);
+              const safeBasePath = isGitHubPages && pathSegments.length > 0
+                ? `/${pathSegments[0]}/`
+                : "/";
+              window.history.replaceState(null, "", safeBasePath);
             } catch {}
             setToastMessage("Acceso restringido: No tienes autorización para abrir ese módulo.");
             const fallback = enabled[0] || "dashboard";
@@ -412,7 +423,7 @@ export default function App() {
     }
   }, [users, currentUser, activeFarmaciaId]);
 
-  // Listen to Firebase Auth session state
+  // Listen to Firebase Auth session state (with mobile safety timeout so IndexedDB locks never hang startup)
   useEffect(() => {
     const isLocalFileMode = typeof window !== "undefined" && window.location.protocol === "file:";
     if (isLocalFileMode) {
@@ -421,20 +432,56 @@ export default function App() {
       return;
     }
 
-    const unsubAuth = onAuthStateChanged(auth, (fbUser) => {
-      if (fbUser) {
-        setIsFirebaseAuthed(true);
-      } else {
-        setIsFirebaseAuthed(false);
-        // Clear any stale local session that isn't backed by Firebase Auth
-        setCurrentUser(null);
-        localStorage.removeItem("current_user");
+    let resolved = false;
+    const safetyTimer = window.setTimeout(() => {
+      if (!resolved) {
+        resolved = true;
+        const hasCachedUser = !!localStorage.getItem("current_user");
+        setIsFirebaseAuthed(hasCachedUser);
+        setAuthReady(true);
         setLoading(false);
       }
-      setAuthReady(true);
-    });
+    }, 3500);
 
-    return () => unsubAuth();
+    let unsubAuth = () => {};
+    try {
+      unsubAuth = onAuthStateChanged(
+        auth,
+        (fbUser) => {
+          resolved = true;
+          window.clearTimeout(safetyTimer);
+          if (fbUser) {
+            setIsFirebaseAuthed(true);
+          } else {
+            setIsFirebaseAuthed(false);
+            // Clear any stale local session that isn't backed by Firebase Auth
+            setCurrentUser(null);
+            localStorage.removeItem("current_user");
+            setLoading(false);
+          }
+          setAuthReady(true);
+        },
+        (err) => {
+          console.warn("Firebase Auth state check error on startup:", err);
+          resolved = true;
+          window.clearTimeout(safetyTimer);
+          setIsFirebaseAuthed(false);
+          setAuthReady(true);
+          setLoading(false);
+        }
+      );
+    } catch (err) {
+      console.warn("Error subscribing to onAuthStateChanged:", err);
+      resolved = true;
+      window.clearTimeout(safetyTimer);
+      setAuthReady(true);
+      setLoading(false);
+    }
+
+    return () => {
+      window.clearTimeout(safetyTimer);
+      unsubAuth();
+    };
   }, []);
 
   // Catalog Auto-Migration (only after authenticated in principal tenant)
@@ -731,6 +778,10 @@ export default function App() {
     }
 
     setLoading(true);
+    // Mobile network safety timeout: unlock UI within 4s even if cellular Firestore snapshot is still connecting
+    const loadingSafetyTimer = window.setTimeout(() => {
+      setLoading(false);
+    }, 4000);
 
     // 1. Sync configuration (Colores & Periodo)
     const unsubColores = onSnapshot(
@@ -1032,6 +1083,7 @@ export default function App() {
         : () => {};
 
     return () => {
+      window.clearTimeout(loadingSafetyTimer);
       unsubColores();
       unsubPeriodo();
       unsubInstitucion();
@@ -2995,6 +3047,16 @@ export default function App() {
             <LoaderCircle className="w-7 h-7 animate-spin text-teal-600 mb-3" />
             <p className="text-base font-extrabold text-slate-800">Conectando con el sistema</p>
             <p className="text-xs font-semibold text-slate-500 mt-1">Verificando credenciales y catálogo activo...</p>
+            <button
+              type="button"
+              onClick={() => {
+                setAuthReady(true);
+                setLoading(false);
+              }}
+              className="mt-5 text-[11px] font-extrabold text-teal-800 bg-teal-50 hover:bg-teal-100 border border-teal-200 px-4 py-2 rounded-xl transition cursor-pointer"
+            >
+              Continuar ahora
+            </button>
           </div>
         </div>
       ) : !currentUser ? (

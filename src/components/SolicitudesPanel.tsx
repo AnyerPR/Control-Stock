@@ -22,6 +22,8 @@ import {
 import {
   ensureDefaultTiposConsumoPresent,
   ensureLicIrisAybarPresent,
+  getPersonalPorDepartamento,
+  getResponsablesTitularesPorDepartamento,
   loadLocalConsumos,
   loadLocalResponsables,
   loadLocalTiposConsumo,
@@ -221,6 +223,8 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
   const [newRespNombre, setNewRespNombre] = useState<string>("");
   const [newRespDept, setNewRespDept] = useState<string>(department);
   const [newRespCargo, setNewRespCargo] = useState<string>("");
+  const [newRespEsSubalterno, setNewRespEsSubalterno] = useState<boolean>(false);
+  const [newRespSuperiorId, setNewRespSuperiorId] = useState<string>("");
 
   useEffect(() => {
     const syncLocalConfig = () => {
@@ -257,32 +261,39 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
     };
   }, [tenantKey]);
 
-  const activeResponsablesForDept = useMemo(() => {
-    const active = responsablesList.filter((r) => r.activo !== false);
-    if (isAdmin && asignacionEspecialAdmin) return active;
-    return active.filter(
-      (r) => r.departamentoNombre.trim().toLowerCase() === (department || "").trim().toLowerCase()
-    );
-  }, [responsablesList, department, isAdmin, asignacionEspecialAdmin]);
+  const activeResponsablesForDept = useMemo(
+    () => getPersonalPorDepartamento(responsablesList, department),
+    [responsablesList, department]
+  );
+
+  const titularesParaNuevoSubalterno = useMemo(
+    () => getResponsablesTitularesPorDepartamento(responsablesList, newRespDept || department),
+    [responsablesList, newRespDept, department]
+  );
 
   useEffect(() => {
-    const currentResp = responsablesList.find((r) => r.id === responsableId);
-    if (currentResp) {
-      const check = validarRelacionResponsableDepartamento({
-        responsable: currentResp,
-        departamentoNombre: department,
-        esAdmin: isAdmin,
-        asignacionEspecialAdmin
-      });
-      if (check.valido) return;
+    if (newRespEsSubalterno) {
+      if (
+        !newRespSuperiorId ||
+        !titularesParaNuevoSubalterno.some((t) => t.id === newRespSuperiorId)
+      ) {
+        setNewRespSuperiorId(titularesParaNuevoSubalterno[0]?.id || "");
+      }
+    } else {
+      setNewRespSuperiorId("");
     }
+  }, [newRespEsSubalterno, titularesParaNuevoSubalterno, newRespSuperiorId]);
+
+  useEffect(() => {
+    const currentResp = activeResponsablesForDept.find((r) => r.id === responsableId);
+    if (currentResp) return;
     const matching = activeResponsablesForDept[0];
     setResponsableId(matching ? matching.id : "");
-  }, [department, activeResponsablesForDept, responsablesList, responsableId, isAdmin, asignacionEspecialAdmin]);
+  }, [department, activeResponsablesForDept, responsableId]);
 
   const selectedResponsableObj = useMemo(
-    () => responsablesList.find((r) => r.id === responsableId) || null,
-    [responsablesList, responsableId]
+    () => activeResponsablesForDept.find((r) => r.id === responsableId) || null,
+    [activeResponsablesForDept, responsableId]
   );
 
   const activeTiposConsumo = useMemo(
@@ -299,17 +310,24 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
     e.preventDefault();
     try {
       const targetDept = newRespDept || department;
+      const superiorObj =
+        titularesParaNuevoSubalterno.find((t) => t.id === newRespSuperiorId) ||
+        titularesParaNuevoSubalterno[0];
+
       const res = await registrarNuevoResponsableRapido({
         nombre: newRespNombre,
         departamentoNombre: targetDept,
         cargo: newRespCargo,
+        esSubalterno: newRespEsSubalterno,
+        responsableSuperiorId: newRespEsSubalterno ? superiorObj?.id : undefined,
+        responsableSuperiorNombre: newRespEsSubalterno ? superiorObj?.nombre : undefined,
         sedeId: tenantKey,
         creadoPor: `${currentUser.nombre} (${currentUser.usuario})`,
         existingResponsables: responsablesList
       });
       if (!res.exito || !res.responsable) {
         playSound("negative");
-        showToast(res.error || "No se pudo registrar el responsable.");
+        showToast(res.error || "No se pudo registrar el personal.");
         return;
       }
       setResponsablesList(res.listaActualizada);
@@ -325,12 +343,16 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
       setResponsableId(res.responsable.id);
       setNewRespNombre("");
       setNewRespCargo("");
+      setNewRespEsSubalterno(false);
+      setNewRespSuperiorId("");
       setShowNewRespModal(false);
       playSound("positive");
-      showToast(`Responsable "${res.responsable.nombre}" registrado y asociado a ${res.responsable.departamentoNombre}.`);
+      showToast(
+        `${res.responsable.esSubalterno ? "Subalterno" : "Responsable"} "${res.responsable.nombre}" registrado y asociado a ${res.responsable.departamentoNombre}.`
+      );
     } catch (err: any) {
       playSound("negative");
-      showToast(err?.message || "No se pudo registrar el responsable.");
+      showToast(err?.message || "No se pudo registrar el personal.");
     }
   };
 
@@ -2965,21 +2987,28 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 bg-teal-50/40 border border-teal-200/80 rounded-2xl p-4">
                 <div>
                   <label className="block text-xs font-black uppercase text-slate-600 tracking-wider mb-1.5">
-                    Responsable del Departamento *
+                    Responsable / Subalterno *
                   </label>
                   <select
                     value={responsableId}
                     onChange={(e) => setResponsableId(e.target.value)}
-                    className="w-full bg-white border border-slate-200 rounded-xl px-3 py-2.5 text-xs font-extrabold text-slate-800 outline-none focus:ring-2 focus:ring-teal-400"
+                    className="w-full min-h-[42px] bg-white border border-slate-200 rounded-xl px-3 py-2.5 text-xs font-extrabold text-slate-800 outline-none focus:ring-2 focus:ring-teal-400"
                   >
                     {activeResponsablesForDept.length === 0 ? (
-                      <option value="">-- Sin responsable en {department} --</option>
+                      <option value="">-- Sin responsable ni subalternos en {department} --</option>
                     ) : (
-                      activeResponsablesForDept.map((r) => (
-                        <option key={r.id} value={r.id}>
-                          {r.nombre} ({r.departamentoNombre}){r.cargo ? ` • ${r.cargo}` : ""}
-                        </option>
-                      ))
+                      activeResponsablesForDept.map((r) => {
+                        const titularDept = activeResponsablesForDept.find((x) => !x.esSubalterno);
+                        const supNombre = r.responsableSuperiorNombre || titularDept?.nombre || "";
+                        return (
+                          <option key={r.id} value={r.id}>
+                            {r.nombre} —{" "}
+                            {r.esSubalterno
+                              ? `Subalterno${supNombre ? ` (Resp: ${supNombre})` : ""}`
+                              : "Responsable"}
+                          </option>
+                        );
+                      })
                     )}
                   </select>
                   <div className="mt-2 flex flex-wrap items-center justify-between gap-2">
@@ -2995,17 +3024,6 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
                       <UserPlus className="w-3.5 h-3.5" />
                       <span>Nuevo</span>
                     </button>
-                    {isAdmin && (
-                      <label className="inline-flex items-center gap-1.5 text-[10px] font-bold text-slate-600 cursor-pointer">
-                        <input
-                          type="checkbox"
-                          checked={asignacionEspecialAdmin}
-                          onChange={(e) => setAsignacionEspecialAdmin(e.target.checked)}
-                          className="rounded border-slate-300 text-teal-700 focus:ring-teal-500"
-                        />
-                        <span>Asignación especial (Admin)</span>
-                      </label>
-                    )}
                   </div>
                 </div>
 
@@ -4332,7 +4350,7 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
             <div className="px-5 py-4 bg-slate-50 border-b border-slate-200 flex items-center justify-between">
               <h4 className="text-sm font-black text-slate-900 flex items-center gap-2">
                 <UserPlus className="w-4 h-4 text-teal-700" />
-                <span>Nuevo Responsable de Departamento</span>
+                <span>Nuevo Responsable o Subalterno</span>
               </h4>
               <button
                 type="button"
@@ -4345,15 +4363,15 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
             <form onSubmit={handleQuickCreateResponsableInSolicitud} className="p-5 space-y-4">
               <div>
                 <label className="block text-[11px] font-black uppercase text-slate-500 mb-1">
-                  Nombre Completo del Responsable *
+                  Nombre Completo *
                 </label>
                 <input
                   type="text"
                   required
                   value={newRespNombre}
                   onChange={(e) => setNewRespNombre(e.target.value)}
-                  placeholder="Ej: Lic. Iris Aybar"
-                  className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3.5 py-2.5 text-xs font-bold text-slate-800 outline-none focus:ring-2 focus:ring-teal-500"
+                  placeholder="Ej: Lic. Iris Aybar / Aux. Pedro Santana"
+                  className="w-full min-h-[42px] bg-slate-50 border border-slate-200 rounded-xl px-3.5 py-2.5 text-xs font-bold text-slate-800 outline-none focus:ring-2 focus:ring-teal-500"
                 />
               </div>
               <div>
@@ -4363,7 +4381,7 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
                 <select
                   value={newRespDept}
                   onChange={(e) => setNewRespDept(e.target.value)}
-                  className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3.5 py-2.5 text-xs font-bold text-slate-800 outline-none focus:ring-2 focus:ring-teal-500"
+                  className="w-full min-h-[42px] bg-slate-50 border border-slate-200 rounded-xl px-3.5 py-2.5 text-xs font-bold text-slate-800 outline-none focus:ring-2 focus:ring-teal-500"
                 >
                   {dynamicDepts.map((d) => (
                     <option key={d} value={d}>
@@ -4380,21 +4398,62 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
                   type="text"
                   value={newRespCargo}
                   onChange={(e) => setNewRespCargo(e.target.value)}
-                  placeholder="Ej: Encargada de Área"
-                  className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3.5 py-2.5 text-xs font-bold text-slate-800 outline-none focus:ring-2 focus:ring-teal-500"
+                  placeholder={newRespEsSubalterno ? "Ej: Auxiliar / Subalterno" : "Ej: Encargada de Área"}
+                  className="w-full min-h-[42px] bg-slate-50 border border-slate-200 rounded-xl px-3.5 py-2.5 text-xs font-bold text-slate-800 outline-none focus:ring-2 focus:ring-teal-500"
                 />
               </div>
+
+              <div className="bg-slate-50 border border-slate-200 rounded-2xl p-3 space-y-2">
+                <label className="inline-flex items-center gap-2.5 cursor-pointer select-none">
+                  <input
+                    type="checkbox"
+                    checked={newRespEsSubalterno}
+                    onChange={(e) => setNewRespEsSubalterno(e.target.checked)}
+                    className="w-4 h-4 rounded border-slate-300 text-teal-600 focus:ring-teal-500 cursor-pointer"
+                  />
+                  <div>
+                    <span className="text-xs font-black text-slate-800 block">
+                      Es subalterno
+                    </span>
+                    <span className="text-[10px] text-slate-500 font-medium block">
+                      {newRespEsSubalterno
+                        ? "Se registrará como subalterno de este departamento."
+                        : "Sin marcar: se registrará como responsable titular del departamento."}
+                    </span>
+                  </div>
+                </label>
+
+                {newRespEsSubalterno && titularesParaNuevoSubalterno.length > 0 && (
+                  <div className="pt-1.5 border-t border-slate-200/70">
+                    <label className="block text-[10px] font-black uppercase text-slate-500 mb-1">
+                      Responsable Titular de {newRespDept || department}
+                    </label>
+                    <select
+                      value={newRespSuperiorId}
+                      onChange={(e) => setNewRespSuperiorId(e.target.value)}
+                      className="w-full min-h-[38px] bg-white rounded-xl border border-slate-200 px-3 py-1.5 text-xs font-bold text-teal-900"
+                    >
+                      {titularesParaNuevoSubalterno.map((t) => (
+                        <option key={t.id} value={t.id}>
+                          {t.nombre} ({t.departamentoNombre})
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                )}
+              </div>
+
               <div className="flex gap-2.5 pt-2">
                 <button
                   type="button"
                   onClick={() => setShowNewRespModal(false)}
-                  className="flex-1 py-2.5 rounded-xl border border-slate-200 text-xs font-bold text-slate-600 hover:bg-slate-50 cursor-pointer"
+                  className="flex-1 min-h-[42px] py-2.5 rounded-xl border border-slate-200 text-xs font-bold text-slate-600 hover:bg-slate-50 cursor-pointer"
                 >
                   Cancelar
                 </button>
                 <button
                   type="submit"
-                  className="flex-1 py-2.5 rounded-xl bg-teal-700 hover:bg-teal-800 text-white text-xs font-black shadow-sm cursor-pointer"
+                  className="flex-1 min-h-[42px] py-2.5 rounded-xl bg-teal-700 hover:bg-teal-800 text-white text-xs font-black shadow-sm cursor-pointer"
                 >
                   Guardar y Seleccionar
                 </button>

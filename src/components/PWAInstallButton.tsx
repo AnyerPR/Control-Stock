@@ -1,8 +1,9 @@
 import React, { useState, useEffect } from "react";
 import { Download, Smartphone, Monitor, Share, PlusSquare, ExternalLink, X, CheckCircle2, WifiOff, Copy, Check, ShieldAlert, Sparkles } from "lucide-react";
 import { usePWAInstall, useOnlineStatus } from "../hooks/usePWAInstall";
+import { APP_LOGO } from "../logoData";
 
-export const APP_ICON_PATH = "./assets/aistudio/farmacia_6a281112.png";
+export const APP_ICON_PATH = APP_LOGO;
 
 interface PWAInstallButtonProps {
   variant?: "header" | "login" | "sidebar";

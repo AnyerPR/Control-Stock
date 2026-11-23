@@ -929,6 +929,9 @@ export interface ResponsableDepartamento {
   sedeId: string;
   telefono?: string;
   correo?: string;
+  esSubalterno?: boolean;
+  responsableSuperiorId?: string;
+  responsableSuperiorNombre?: string;
   permitirAsignacionEspecial?: boolean;
   activo: boolean;
   createdAt: number;

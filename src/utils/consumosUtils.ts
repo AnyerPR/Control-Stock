@@ -279,8 +279,49 @@ export async function persistConsumosConfig(
   }
 }
 
+export function getResponsablesTitularesPorDepartamento(
+  responsables: ResponsableDepartamento[],
+  departamentoNombre: string
+): ResponsableDepartamento[] {
+  const deptNorm = normalizeTextToken(departamentoNombre);
+  if (!deptNorm) return [];
+  return responsables
+    .filter(
+      (r) =>
+        r.activo !== false &&
+        !r.esSubalterno &&
+        normalizeTextToken(r.departamentoNombre) === deptNorm
+    )
+    .sort((a, b) => a.nombre.localeCompare(b.nombre, "es"));
+}
+
 /**
- * Registra un nuevo responsable rápidamente desde el botón "Nuevo" en Consumos o Pedidos
+ * Obtiene únicamente al responsable asignado a un departamento y sus subalternos activos,
+ * ordenando primero al responsable titular y después a sus subalternos.
+ * No incluye responsables ni subalternos pertenecientes a otros departamentos.
+ */
+export function getPersonalPorDepartamento(
+  responsables: ResponsableDepartamento[],
+  departamentoNombre: string
+): ResponsableDepartamento[] {
+  const deptNorm = normalizeTextToken(departamentoNombre);
+  if (!deptNorm) return [];
+  return responsables
+    .filter(
+      (r) =>
+        r.activo !== false &&
+        normalizeTextToken(r.departamentoNombre) === deptNorm
+    )
+    .sort((a, b) => {
+      const aSub = a.esSubalterno ? 1 : 0;
+      const bSub = b.esSubalterno ? 1 : 0;
+      if (aSub !== bSub) return aSub - bSub;
+      return a.nombre.localeCompare(b.nombre, "es");
+    });
+}
+
+/**
+ * Registra un nuevo responsable o subalterno rápidamente desde el botón "Nuevo" en Consumos, Pedidos o Configuración
  */
 export async function registrarNuevoResponsableRapido(params: {
   nombre: string;
@@ -289,6 +330,9 @@ export async function registrarNuevoResponsableRapido(params: {
   cargo?: string;
   telefono?: string;
   correo?: string;
+  esSubalterno?: boolean;
+  responsableSuperiorId?: string;
+  responsableSuperiorNombre?: string;
   sedeId?: string;
   creadoPor?: string;
   existingResponsables?: ResponsableDepartamento[];
@@ -296,12 +340,15 @@ export async function registrarNuevoResponsableRapido(params: {
   const tenant = (params.sedeId || getActiveFarmaciaId() || DEFAULT_FARMACIA_ID).trim();
   const cleanName = String(params.nombre || "").trim();
   const cleanDept = String(params.departamentoNombre || "").trim();
+  const isSubalterno = Boolean(params.esSubalterno);
 
   if (!cleanName) {
     return {
       exito: false,
       listaActualizada: params.existingResponsables || loadLocalResponsables(tenant),
-      error: "El nombre del responsable es obligatorio."
+      error: isSubalterno
+        ? "El nombre del subalterno es obligatorio."
+        : "El nombre del responsable es obligatorio."
     };
   }
 
@@ -309,13 +356,33 @@ export async function registrarNuevoResponsableRapido(params: {
     return {
       exito: false,
       listaActualizada: params.existingResponsables || loadLocalResponsables(tenant),
-      error: "Debe seleccionar un departamento para asociar al responsable."
+      error: "Debe seleccionar un departamento para asociar al personal."
     };
   }
 
   const currentList = params.existingResponsables
     ? ensureLicIrisAybarPresent(params.existingResponsables, tenant)
     : loadLocalResponsables(tenant);
+
+  const titularesDept = getResponsablesTitularesPorDepartamento(currentList, cleanDept);
+
+  let resolvedSuperiorId: string | undefined = undefined;
+  let resolvedSuperiorNombre: string | undefined = undefined;
+
+  if (isSubalterno) {
+    const chosenSuperior =
+      (params.responsableSuperiorId
+        ? titularesDept.find((t) => t.id === params.responsableSuperiorId)
+        : undefined) || titularesDept[0];
+
+    if (chosenSuperior) {
+      resolvedSuperiorId = chosenSuperior.id;
+      resolvedSuperiorNombre = chosenSuperior.nombre;
+    } else if (params.responsableSuperiorNombre) {
+      resolvedSuperiorId = params.responsableSuperiorId;
+      resolvedSuperiorNombre = params.responsableSuperiorNombre;
+    }
+  }
 
   const duplicate = currentList.find(
     (r) =>
@@ -325,13 +392,22 @@ export async function registrarNuevoResponsableRapido(params: {
 
   if (duplicate) {
     if (!duplicate.activo) {
+      const reactivatedObj: ResponsableDepartamento = {
+        ...duplicate,
+        activo: true,
+        esSubalterno: isSubalterno,
+        responsableSuperiorId: isSubalterno ? resolvedSuperiorId : undefined,
+        responsableSuperiorNombre: isSubalterno ? resolvedSuperiorNombre : undefined,
+        cargo: params.cargo?.trim() || duplicate.cargo,
+        updatedAt: Date.now()
+      };
       const reactivated = currentList.map((r) =>
-        r.id === duplicate.id ? { ...r, activo: true, updatedAt: Date.now() } : r
+        r.id === duplicate.id ? reactivatedObj : r
       );
       await persistConsumosConfig(reactivated, loadLocalTiposConsumo(tenant), tenant);
       return {
         exito: true,
-        responsable: { ...duplicate, activo: true },
+        responsable: reactivatedObj,
         listaActualizada: reactivated
       };
     }
@@ -339,26 +415,49 @@ export async function registrarNuevoResponsableRapido(params: {
       exito: false,
       responsable: duplicate,
       listaActualizada: currentList,
-      error: `El responsable "${cleanName}" ya está registrado en el departamento "${cleanDept}".`
+      error: `La persona "${cleanName}" ya está registrada en el departamento "${cleanDept}".`
     };
   }
+
+  const defaultCargo = isSubalterno
+    ? "Subalterno Departamental"
+    : "Responsable del Departamento";
 
   const newResp: ResponsableDepartamento = {
     id: `resp-${normalizeTextToken(cleanName).replace(/[^a-z0-9]/g, "-")}-${Date.now().toString(36)}`,
     nombre: cleanName,
-    cargo: (params.cargo || "Responsable de Recepción").trim(),
+    cargo: (params.cargo || defaultCargo).trim(),
     departamentoId: params.departamentoId || `dept-${normalizeTextToken(cleanDept).replace(/[^a-z0-9]/g, "-")}`,
     departamentoNombre: cleanDept,
     sedeId: tenant,
     telefono: (params.telefono || "").trim(),
     correo: (params.correo || "").trim(),
+    esSubalterno: isSubalterno,
+    responsableSuperiorId: isSubalterno ? resolvedSuperiorId : undefined,
+    responsableSuperiorNombre: isSubalterno ? resolvedSuperiorNombre : undefined,
     permitirAsignacionEspecial: false,
     activo: true,
     createdAt: Date.now(),
     creadoPor: params.creadoPor || "Sistema"
   };
 
-  const nextList = [...currentList, newResp];
+  // Si se acaba de registrar un Responsable titular y en ese departamento ya había subalternos sin responsable asociado, vincularlos automáticamente
+  const nextList = [...currentList, newResp].map((r) => {
+    if (
+      !isSubalterno &&
+      r.esSubalterno &&
+      normalizeTextToken(r.departamentoNombre) === normalizeTextToken(cleanDept) &&
+      !r.responsableSuperiorId
+    ) {
+      return {
+        ...r,
+        responsableSuperiorId: newResp.id,
+        responsableSuperiorNombre: newResp.nombre
+      };
+    }
+    return r;
+  });
+
   await persistConsumosConfig(nextList, loadLocalTiposConsumo(tenant), tenant);
 
   return {

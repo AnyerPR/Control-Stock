@@ -28,9 +28,11 @@ import {
 import {
   ensureDefaultTiposConsumoPresent,
   ensureLicIrisAybarPresent,
+  getResponsablesTitularesPorDepartamento,
   loadLocalResponsables,
   loadLocalTiposConsumo,
   mergeDepartamentosSinDuplicados,
+  normalizeTextToken,
   persistConsumosConfig,
   registrarNuevoResponsableRapido
 } from "../utils/consumosUtils";
@@ -208,17 +210,21 @@ export default function ConfiguracionPanel({
     loadLocalTiposConsumo(activeFarmaciaId)
   );
 
-  // Estado formulario Responsables
+  // Estado formulario Responsables y Subalternos
   const [newRespNombre, setNewRespNombre] = useState("");
   const [newRespDept, setNewRespDept] = useState(
     mergedDepartamentos[0]?.nombre || "Enfermería"
   );
   const [newRespCargo, setNewRespCargo] = useState("");
   const [newRespTelefono, setNewRespTelefono] = useState("");
+  const [newRespEsSubalterno, setNewRespEsSubalterno] = useState(false);
+  const [newRespSuperiorId, setNewRespSuperiorId] = useState("");
   const [editingResp, setEditingResp] = useState<ResponsableDepartamento | null>(null);
   const [editRespNombre, setEditRespNombre] = useState("");
   const [editRespDept, setEditRespDept] = useState("");
   const [editRespCargo, setEditRespCargo] = useState("");
+  const [editRespEsSubalterno, setEditRespEsSubalterno] = useState(false);
+  const [editRespSuperiorId, setEditRespSuperiorId] = useState("");
 
   // Estado formulario Tipos de Consumo
   const [newTipoNombre, setNewTipoNombre] = useState("");
@@ -261,21 +267,44 @@ export default function ConfiguracionPanel({
     };
   }, [activeFarmaciaId, isLocalFileMode]);
 
+  const titularesNewDept = getResponsablesTitularesPorDepartamento(
+    responsablesList,
+    newRespDept || mergedDepartamentos[0]?.nombre || "Enfermería"
+  );
+
+  useEffect(() => {
+    if (newRespEsSubalterno) {
+      if (!newRespSuperiorId || !titularesNewDept.some((t) => t.id === newRespSuperiorId)) {
+        setNewRespSuperiorId(titularesNewDept[0]?.id || "");
+      }
+    } else {
+      setNewRespSuperiorId("");
+    }
+  }, [newRespEsSubalterno, newRespDept, responsablesList]);
+
   const handleCreateResponsableConfig = async (e: React.FormEvent) => {
     e.preventDefault();
     try {
+      const targetDept = newRespDept || mergedDepartamentos[0]?.nombre || "Enfermería";
+      const titulares = getResponsablesTitularesPorDepartamento(responsablesList, targetDept);
+      const superiorObj =
+        titulares.find((t) => t.id === newRespSuperiorId) || titulares[0];
+
       const res = await registrarNuevoResponsableRapido({
         nombre: newRespNombre,
-        departamentoNombre: newRespDept || mergedDepartamentos[0]?.nombre || "Enfermería",
+        departamentoNombre: targetDept,
         cargo: newRespCargo,
         telefono: newRespTelefono,
+        esSubalterno: newRespEsSubalterno,
+        responsableSuperiorId: newRespEsSubalterno ? superiorObj?.id : undefined,
+        responsableSuperiorNombre: newRespEsSubalterno ? superiorObj?.nombre : undefined,
         sedeId: activeFarmaciaId,
         creadoPor: `${currentUser.nombre} (${currentUser.usuario})`,
         existingResponsables: responsablesList
       });
       if (!res.exito || !res.responsable) {
         playSound("negative");
-        showToast(res.error || "No se pudo registrar el responsable.");
+        showToast(res.error || "No se pudo registrar el personal.");
         return;
       }
       setResponsablesList(res.listaActualizada);
@@ -283,11 +312,15 @@ export default function ConfiguracionPanel({
       setNewRespNombre("");
       setNewRespCargo("");
       setNewRespTelefono("");
+      setNewRespEsSubalterno(false);
+      setNewRespSuperiorId("");
       playSound("positive");
-      showToast(`Responsable "${res.responsable.nombre}" registrado para ${res.responsable.departamentoNombre}.`);
+      showToast(
+        `${res.responsable.esSubalterno ? "Subalterno" : "Responsable"} "${res.responsable.nombre}" registrado para ${res.responsable.departamentoNombre}.`
+      );
     } catch (err: any) {
       playSound("negative");
-      showToast(err?.message || "No se pudo registrar el responsable.");
+      showToast(err?.message || "No se pudo registrar el personal.");
     }
   };
 
@@ -296,22 +329,51 @@ export default function ConfiguracionPanel({
     if (!editingResp) return;
     const cleanName = editRespNombre.trim();
     if (!cleanName) return;
-    const nextList = responsablesList.map((r) =>
-      r.id === editingResp.id
-        ? {
-            ...r,
-            nombre: cleanName,
-            departamentoNombre: editRespDept || r.departamentoNombre,
-            cargo: editRespCargo.trim(),
-            updatedAt: Date.now()
-          }
-        : r
+
+    const targetDept = editRespDept || editingResp.departamentoNombre;
+    const titulares = getResponsablesTitularesPorDepartamento(
+      responsablesList.filter((r) => r.id !== editingResp.id),
+      targetDept
     );
+    const superiorObj = editRespEsSubalterno
+      ? titulares.find((t) => t.id === editRespSuperiorId) || titulares[0]
+      : undefined;
+
+    const nextList = responsablesList.map((r) => {
+      if (r.id === editingResp.id) {
+        return {
+          ...r,
+          nombre: cleanName,
+          departamentoNombre: targetDept,
+          cargo:
+            editRespCargo.trim() ||
+            (editRespEsSubalterno ? "Subalterno Departamental" : "Responsable del Departamento"),
+          esSubalterno: editRespEsSubalterno,
+          responsableSuperiorId: editRespEsSubalterno ? superiorObj?.id : undefined,
+          responsableSuperiorNombre: editRespEsSubalterno ? superiorObj?.nombre : undefined,
+          updatedAt: Date.now()
+        };
+      }
+      // Si la persona editada es (o pasa a ser) Responsable Titular, actualizar la referencia en sus subalternos del mismo departamento
+      if (
+        !editRespEsSubalterno &&
+        r.esSubalterno &&
+        normalizeTextToken(r.departamentoNombre) === normalizeTextToken(targetDept) &&
+        (!r.responsableSuperiorId || r.responsableSuperiorId === editingResp.id)
+      ) {
+        return {
+          ...r,
+          responsableSuperiorId: editingResp.id,
+          responsableSuperiorNombre: cleanName
+        };
+      }
+      return r;
+    });
     setResponsablesList(nextList);
     await persistConsumosConfig(nextList, tiposConsumoList, activeFarmaciaId);
     setEditingResp(null);
     playSound("positive");
-    showToast("Responsable actualizado y sincronizado con Consumos y Pedidos.");
+    showToast("Personal actualizado y sincronizado con Consumos y Pedidos.");
   };
 
   const handleToggleResponsableActivo = async (resp: ResponsableDepartamento) => {
@@ -321,7 +383,7 @@ export default function ConfiguracionPanel({
     setResponsablesList(nextList);
     await persistConsumosConfig(nextList, tiposConsumoList, activeFarmaciaId);
     playSound("click");
-    showToast(`Responsable "${resp.nombre}" ${!resp.activo ? "activado" : "desactivado"}.`);
+    showToast(`${resp.esSubalterno ? "Subalterno" : "Responsable"} "${resp.nombre}" ${!resp.activo ? "activado" : "desactivado"}.`);
   };
 
   const handleCreateTipoConsumoConfig = async (e: React.FormEvent) => {
@@ -1929,16 +1991,16 @@ export default function ConfiguracionPanel({
         </div>
       </div>
 
-      {/* Tarjeta de Gestión de Responsables por Departamento (Módulo Consumos y Pedidos) */}
+      {/* Tarjeta de Gestión de Responsables y Subalternos por Departamento (Módulo Consumos y Pedidos) */}
       <div className="w-full min-w-0 max-w-full bg-white rounded-3xl p-4 sm:p-6 border border-slate-200 shadow-sm space-y-5 sm:space-y-6 anim-card-in">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-slate-100 pb-3">
           <div>
             <h3 className="text-lg font-bold text-slate-900 flex items-center gap-2">
               <UserCheck className="w-5 h-5 text-teal-600" />
-              Gestión de Responsables por Departamento (Consumos y Pedidos)
+              Gestión de Responsables y Subalternos por Departamento
             </h3>
             <p className="text-xs text-slate-500 mt-1">
-              Crea, edita, activa o desactiva responsables y asócialos a su departamento y sede correspondiente. Se reflejan inmediatamente en los módulos Consumos y Pedidos.
+              Crea, edita, activa o desactiva responsables titulares y sus subalternos por departamento. Si marcas la casilla <strong>«Es subalterno»</strong>, la persona queda vinculada como subalterno del responsable asignado a ese departamento.
             </p>
           </div>
           <span className="text-[10px] uppercase font-black tracking-wider bg-teal-50 text-teal-700 px-3 py-1 rounded-full border border-teal-200 self-start sm:self-auto">
@@ -1946,69 +2008,119 @@ export default function ConfiguracionPanel({
           </span>
         </div>
 
-        <form onSubmit={handleCreateResponsableConfig} className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3 items-end bg-slate-50 p-4 rounded-2xl border border-slate-200/60">
-          <div className="lg:col-span-2 space-y-1">
-            <label className="block text-[10px] font-black uppercase text-slate-500 tracking-wider">
-              Nombre del Responsable *
-            </label>
-            <input
-              type="text"
-              required
-              value={newRespNombre}
-              onChange={(e) => setNewRespNombre(e.target.value)}
-              placeholder="Ej. Lic. Iris Aybar"
-              className="w-full bg-white rounded-xl border border-slate-200 px-3.5 py-2.5 text-xs font-bold text-slate-800 outline-none focus:ring-2 focus:ring-teal-400"
-            />
-          </div>
-          <div className="space-y-1">
-            <label className="block text-[10px] font-black uppercase text-slate-500 tracking-wider">
-              Departamento Asociado *
-            </label>
-            <select
-              value={newRespDept}
-              onChange={(e) => setNewRespDept(e.target.value)}
-              className="w-full bg-white rounded-xl border border-slate-200 px-3 py-2.5 text-xs font-bold text-slate-800 outline-none focus:ring-2 focus:ring-teal-400"
+        <form onSubmit={handleCreateResponsableConfig} className="space-y-3 bg-slate-50 p-4 rounded-2xl border border-slate-200/60">
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3 items-end">
+            <div className="lg:col-span-2 space-y-1">
+              <label className="block text-[10px] font-black uppercase text-slate-500 tracking-wider">
+                Nombre Completo *
+              </label>
+              <input
+                type="text"
+                required
+                value={newRespNombre}
+                onChange={(e) => setNewRespNombre(e.target.value)}
+                placeholder="Ej. Lic. Iris Aybar / Aux. Pedro Santana"
+                className="w-full min-h-[42px] bg-white rounded-xl border border-slate-200 px-3.5 py-2.5 text-xs font-bold text-slate-800 outline-none focus:ring-2 focus:ring-teal-400"
+              />
+            </div>
+            <div className="space-y-1">
+              <label className="block text-[10px] font-black uppercase text-slate-500 tracking-wider">
+                Departamento Asociado *
+              </label>
+              <select
+                value={newRespDept}
+                onChange={(e) => setNewRespDept(e.target.value)}
+                className="w-full min-h-[42px] bg-white rounded-xl border border-slate-200 px-3 py-2.5 text-xs font-bold text-slate-800 outline-none focus:ring-2 focus:ring-teal-400"
+              >
+                {mergedDepartamentos.map((d) => (
+                  <option key={d.id} value={d.nombre}>
+                    {d.nombre}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div className="space-y-1">
+              <label className="block text-[10px] font-black uppercase text-slate-500 tracking-wider">
+                Cargo / Función
+              </label>
+              <input
+                type="text"
+                value={newRespCargo}
+                onChange={(e) => setNewRespCargo(e.target.value)}
+                placeholder={newRespEsSubalterno ? "Ej. Auxiliar / Subalterno" : "Ej. Encargada de Área"}
+                className="w-full min-h-[42px] bg-white rounded-xl border border-slate-200 px-3.5 py-2.5 text-xs font-semibold text-slate-800 outline-none focus:ring-2 focus:ring-teal-400"
+              />
+            </div>
+            <button
+              type="submit"
+              className="w-full min-h-[42px] px-4 py-2.5 bg-teal-600 hover:bg-teal-700 text-white font-extrabold text-xs uppercase tracking-wider rounded-xl transition active:scale-95 shadow-sm flex items-center justify-center gap-1.5 cursor-pointer"
             >
-              {mergedDepartamentos.map((d) => (
-                <option key={d.id} value={d.nombre}>
-                  {d.nombre}
-                </option>
-              ))}
-            </select>
+              <Plus className="w-4 h-4" />
+              <span>{newRespEsSubalterno ? "Agregar Subalterno" : "Agregar Responsable"}</span>
+            </button>
           </div>
-          <div className="space-y-1">
-            <label className="block text-[10px] font-black uppercase text-slate-500 tracking-wider">
-              Cargo / Función
+
+          {/* Checkbox "Es subalterno" y asociación con el responsable del departamento */}
+          <div className="bg-white border border-slate-200 rounded-xl p-3 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <label className="inline-flex items-center gap-2.5 cursor-pointer select-none">
+              <input
+                type="checkbox"
+                checked={newRespEsSubalterno}
+                onChange={(e) => setNewRespEsSubalterno(e.target.checked)}
+                className="w-4 h-4 rounded border-slate-300 text-teal-600 focus:ring-teal-500 cursor-pointer"
+              />
+              <div>
+                <span className="text-xs font-black text-slate-800 block">
+                  Es subalterno
+                </span>
+                <span className="text-[10px] text-slate-500 font-medium block">
+                  {newRespEsSubalterno
+                    ? "Marcado: la persona se registra como subalterno asignado a este departamento y a su responsable."
+                    : "Sin marcar: la persona se considera responsable titular del departamento."}
+                </span>
+              </div>
             </label>
-            <input
-              type="text"
-              value={newRespCargo}
-              onChange={(e) => setNewRespCargo(e.target.value)}
-              placeholder="Ej. Encargada de Área"
-              className="w-full bg-white rounded-xl border border-slate-200 px-3.5 py-2.5 text-xs font-semibold text-slate-800 outline-none focus:ring-2 focus:ring-teal-400"
-            />
+
+            {newRespEsSubalterno && (
+              <div className="w-full sm:w-auto sm:min-w-[260px]">
+                <label className="block text-[10px] font-black uppercase text-slate-500 mb-1">
+                  Responsable Titular de {newRespDept}
+                </label>
+                {titularesNewDept.length > 0 ? (
+                  <select
+                    value={newRespSuperiorId}
+                    onChange={(e) => setNewRespSuperiorId(e.target.value)}
+                    className="w-full min-h-[38px] bg-slate-50 rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-bold text-teal-900 outline-none focus:ring-2 focus:ring-teal-400"
+                  >
+                    {titularesNewDept.map((tit) => (
+                      <option key={tit.id} value={tit.id}>
+                        {tit.nombre} ({tit.departamentoNombre})
+                      </option>
+                    ))}
+                  </select>
+                ) : (
+                  <span className="inline-block text-[11px] font-semibold text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-2.5 py-1.5">
+                    Sin responsable titular aún en {newRespDept} (se vinculará automáticamente al crearlo).
+                  </span>
+                )}
+              </div>
+            )}
           </div>
-          <button
-            type="submit"
-            className="w-full px-4 py-2.5 bg-teal-600 hover:bg-teal-700 text-white font-extrabold text-xs uppercase tracking-wider rounded-xl transition active:scale-95 shadow-sm flex items-center justify-center gap-1.5 cursor-pointer h-[40px]"
-          >
-            <Plus className="w-4 h-4" />
-            <span>Agregar Responsable</span>
-          </button>
         </form>
 
         <div className="space-y-1.5">
           <p className="sm:hidden text-[10px] font-bold text-slate-400 flex items-center justify-between px-1">
-            <span>Responsable fijo a la izquierda</span>
+            <span>Personal fijo a la izquierda</span>
             <span>Desliza a los lados ↔</span>
           </p>
           <div className="w-full max-w-full overflow-x-auto overscroll-x-contain touch-pan-x [-webkit-overflow-scrolling:touch] border border-slate-200 rounded-2xl bg-slate-50">
-            <table className="min-w-[650px] w-full text-left border-collapse text-xs">
+            <table className="min-w-[780px] w-full text-left border-collapse text-xs">
               <thead>
                 <tr className="bg-slate-100 border-b border-slate-200 text-[10px] font-black text-slate-500 uppercase tracking-wider">
                   <th className="sticky left-0 z-10 bg-slate-100 px-4 py-3 shadow-[2px_0_5px_-2px_rgba(0,0,0,0.08)]">
-                    Responsable (Fijo)
+                    Personal (Fijo)
                   </th>
+                  <th className="px-4 py-3">Rol / Relación</th>
                   <th className="px-4 py-3">Departamento</th>
                   <th className="px-4 py-3">Cargo</th>
                   <th className="px-4 py-3">Sede</th>
@@ -2019,6 +2131,19 @@ export default function ConfiguracionPanel({
               <tbody className="divide-y divide-slate-200 bg-white">
                 {responsablesList.map((resp) => {
                   const isEditing = editingResp?.id === resp.id;
+                  const titularesEditDept = isEditing
+                    ? getResponsablesTitularesPorDepartamento(
+                        responsablesList.filter((r) => r.id !== resp.id),
+                        editRespDept || resp.departamentoNombre
+                      )
+                    : [];
+                  const titularDelMismoDepto = getResponsablesTitularesPorDepartamento(
+                    responsablesList,
+                    resp.departamentoNombre
+                  )[0];
+                  const nombreSuperiorMostrar =
+                    resp.responsableSuperiorNombre || titularDelMismoDepto?.nombre || "Pendiente de asignar";
+
                   return (
                     <tr key={resp.id} className="hover:bg-slate-50/60 transition group">
                       <td className="sticky left-0 z-10 bg-white group-hover:bg-slate-50/60 px-4 py-3 font-extrabold text-slate-800 shadow-[2px_0_5px_-2px_rgba(0,0,0,0.08)]">
@@ -2033,11 +2158,70 @@ export default function ConfiguracionPanel({
                           <span>{resp.nombre}</span>
                         )}
                       </td>
+                      <td className="px-4 py-3 whitespace-nowrap">
+                        {isEditing ? (
+                          <div className="space-y-1.5 min-w-[180px]">
+                            <label className="inline-flex items-center gap-2 cursor-pointer select-none">
+                              <input
+                                type="checkbox"
+                                checked={editRespEsSubalterno}
+                                onChange={(e) => {
+                                  const checked = e.target.checked;
+                                  setEditRespEsSubalterno(checked);
+                                  if (checked) {
+                                    setEditRespSuperiorId(titularesEditDept[0]?.id || "");
+                                  } else {
+                                    setEditRespSuperiorId("");
+                                  }
+                                }}
+                                className="w-3.5 h-3.5 rounded border-slate-300 text-teal-600 focus:ring-teal-500"
+                              />
+                              <span className="text-xs font-extrabold text-slate-800">
+                                Es subalterno
+                              </span>
+                            </label>
+                            {editRespEsSubalterno && titularesEditDept.length > 0 && (
+                              <select
+                                value={editRespSuperiorId || titularesEditDept[0]?.id || ""}
+                                onChange={(e) => setEditRespSuperiorId(e.target.value)}
+                                className="w-full rounded-lg border border-teal-400 px-2 py-1 text-[11px] font-bold text-teal-900"
+                              >
+                                {titularesEditDept.map((t) => (
+                                  <option key={t.id} value={t.id}>
+                                    Resp: {t.nombre}
+                                  </option>
+                                ))}
+                              </select>
+                            )}
+                          </div>
+                        ) : resp.esSubalterno ? (
+                          <div>
+                            <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-[10px] font-black uppercase bg-indigo-50 text-indigo-800 border border-indigo-200">
+                              Subalterno
+                            </span>
+                            <span className="block text-[10px] font-semibold text-slate-500 mt-0.5">
+                              Resp: <strong className="text-slate-700">{nombreSuperiorMostrar}</strong>
+                            </span>
+                          </div>
+                        ) : (
+                          <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-[10px] font-black uppercase bg-teal-50 text-teal-800 border border-teal-200">
+                            Responsable del Departamento
+                          </span>
+                        )}
+                      </td>
                       <td className="px-4 py-3 font-bold text-teal-800 whitespace-nowrap">
                         {isEditing ? (
                           <select
                             value={editRespDept}
-                            onChange={(e) => setEditRespDept(e.target.value)}
+                            onChange={(e) => {
+                              const nextD = e.target.value;
+                              setEditRespDept(nextD);
+                              const tits = getResponsablesTitularesPorDepartamento(
+                                responsablesList.filter((r) => r.id !== resp.id),
+                                nextD
+                              );
+                              setEditRespSuperiorId(tits[0]?.id || "");
+                            }}
                             className="w-full rounded-lg border border-teal-400 px-2.5 py-1.5 text-xs font-bold"
                           >
                             {mergedDepartamentos.map((d) => (
@@ -2116,6 +2300,8 @@ export default function ConfiguracionPanel({
                               setEditRespNombre(resp.nombre);
                               setEditRespDept(resp.departamentoNombre);
                               setEditRespCargo(resp.cargo || "");
+                              setEditRespEsSubalterno(Boolean(resp.esSubalterno));
+                              setEditRespSuperiorId(resp.responsableSuperiorId || "");
                             }}
                             className="inline-flex items-center gap-1 px-3 py-1.5 text-xs font-bold rounded-lg border border-slate-200 hover:bg-slate-50 text-slate-700 cursor-pointer"
                           >

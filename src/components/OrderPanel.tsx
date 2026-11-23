@@ -25,6 +25,8 @@ import {
 import { exportOrderToPDF, exportOrderToWord } from "../utils/exportUtils";
 import { isLotExpiredWithStock } from "../utils/inventoryStatus";
 import {
+  getPersonalPorDepartamento,
+  getResponsablesTitularesPorDepartamento,
   loadLocalResponsables,
   loadLocalTiposConsumo,
   mergeDepartamentosSinDuplicados,
@@ -164,41 +166,51 @@ export default function OrderPanel({
   const [nuevoRespNombre, setNuevoRespNombre] = useState<string>("");
   const [nuevoRespCargo, setNuevoRespCargo] = useState<string>("");
   const [nuevoRespDept, setNuevoRespDept] = useState<string>(selectedDepartamento);
+  const [nuevoRespEsSubalterno, setNuevoRespEsSubalterno] = useState<boolean>(false);
+  const [nuevoRespSuperiorId, setNuevoRespSuperiorId] = useState<string>("");
   const [savingNuevoResp, setSavingNuevoResp] = useState<boolean>(false);
 
   useEffect(() => {
     setNuevoRespDept(selectedDepartamento);
   }, [selectedDepartamento]);
 
-  const activeResponsables = useMemo(() => {
-    const active = responsables.filter((r) => r.activo !== false);
-    const deptNorm = normalizeTextToken(selectedDepartamento);
-    return [...active].sort((a, b) => {
-      const aMatch = normalizeTextToken(a.departamentoNombre) === deptNorm ? 1 : 0;
-      const bMatch = normalizeTextToken(b.departamentoNombre) === deptNorm ? 1 : 0;
-      if (aMatch !== bMatch) return bMatch - aMatch;
-      return a.nombre.localeCompare(b.nombre, "es");
-    });
-  }, [responsables, selectedDepartamento]);
+  const titularesParaNuevoSubalterno = useMemo(
+    () => getResponsablesTitularesPorDepartamento(responsables, nuevoRespDept || selectedDepartamento),
+    [responsables, nuevoRespDept, selectedDepartamento]
+  );
+
+  useEffect(() => {
+    if (nuevoRespEsSubalterno) {
+      if (
+        !nuevoRespSuperiorId ||
+        !titularesParaNuevoSubalterno.some((t) => t.id === nuevoRespSuperiorId)
+      ) {
+        setNuevoRespSuperiorId(titularesParaNuevoSubalterno[0]?.id || "");
+      }
+    } else {
+      setNuevoRespSuperiorId("");
+    }
+  }, [nuevoRespEsSubalterno, titularesParaNuevoSubalterno, nuevoRespSuperiorId]);
+
+  const activeResponsables = useMemo(
+    () => getPersonalPorDepartamento(responsables, selectedDepartamento),
+    [responsables, selectedDepartamento]
+  );
 
   useEffect(() => {
     const currentResp = activeResponsables.find((r) => r.id === selectedResponsableId);
-    const deptNorm = normalizeTextToken(selectedDepartamento);
-    if (!currentResp || normalizeTextToken(currentResp.departamentoNombre) !== deptNorm) {
-      const matchingResp = activeResponsables.find(
-        (r) => normalizeTextToken(r.departamentoNombre) === deptNorm
-      );
-      if (matchingResp) {
-        setSelectedResponsableId(matchingResp.id);
-        setAsignacionEspecialAdmin(false);
-      } else if (activeResponsables.length > 0 && !currentResp) {
+    if (!currentResp) {
+      if (activeResponsables.length > 0) {
         setSelectedResponsableId(activeResponsables[0].id);
+        setAsignacionEspecialAdmin(false);
+      } else {
+        setSelectedResponsableId("");
       }
     }
   }, [selectedDepartamento, activeResponsables, selectedResponsableId]);
 
   const selectedResponsableObj = useMemo(
-    () => activeResponsables.find((r) => r.id === selectedResponsableId) || activeResponsables[0] || null,
+    () => activeResponsables.find((r) => r.id === selectedResponsableId) || null,
     [activeResponsables, selectedResponsableId]
   );
 
@@ -234,10 +246,18 @@ export default function OrderPanel({
     if (savingNuevoResp || !nuevoRespNombre.trim()) return;
     setSavingNuevoResp(true);
     try {
+      const targetDept = nuevoRespDept || selectedDepartamento;
+      const superiorObj =
+        titularesParaNuevoSubalterno.find((t) => t.id === nuevoRespSuperiorId) ||
+        titularesParaNuevoSubalterno[0];
+
       const res = await registrarNuevoResponsableRapido({
         nombre: nuevoRespNombre,
-        departamentoNombre: nuevoRespDept || selectedDepartamento,
+        departamentoNombre: targetDept,
         cargo: nuevoRespCargo,
+        esSubalterno: nuevoRespEsSubalterno,
+        responsableSuperiorId: nuevoRespEsSubalterno ? superiorObj?.id : undefined,
+        responsableSuperiorNombre: nuevoRespEsSubalterno ? superiorObj?.nombre : undefined,
         sedeId: activeSedeId,
         creadoPor: currentUser ? `${currentUser.nombre} (${currentUser.usuario})` : "Sistema",
         existingResponsables: responsables
@@ -245,24 +265,26 @@ export default function OrderPanel({
 
       if (!res.exito || !res.responsable) {
         playSound("negative");
-        showToast?.(res.error || "No se pudo registrar el responsable.");
+        showToast?.(res.error || "No se pudo registrar el personal.");
         return;
       }
 
       setResponsables(res.listaActualizada);
       if (
-        nuevoRespDept &&
-        normalizeTextToken(nuevoRespDept) !== normalizeTextToken(selectedDepartamento)
+        targetDept &&
+        normalizeTextToken(targetDept) !== normalizeTextToken(selectedDepartamento)
       ) {
-        setSelectedDepartamento(nuevoRespDept);
+        setSelectedDepartamento(targetDept);
       }
       setSelectedResponsableId(res.responsable.id);
       setNuevoRespNombre("");
       setNuevoRespCargo("");
+      setNuevoRespEsSubalterno(false);
+      setNuevoRespSuperiorId("");
       setShowNuevoRespForm(false);
       playSound("positive");
       showToast?.(
-        `Responsable "${res.responsable.nombre}" registrado en ${res.responsable.departamentoNombre}.`
+        `${res.responsable.esSubalterno ? "Subalterno" : "Responsable"} "${res.responsable.nombre}" registrado para ${res.responsable.departamentoNombre}.`
       );
     } finally {
       setSavingNuevoResp(false);
@@ -445,18 +467,31 @@ export default function OrderPanel({
             {/* 2. Responsable del Departamento + Botón Nuevo */}
             <div className="space-y-1.5">
               <label className="block text-[10px] font-black uppercase text-slate-600 tracking-wider">
-                Responsable del Departamento *
+                Responsable / Subalterno *
               </label>
               <select
                 value={selectedResponsableId}
                 onChange={(e) => setSelectedResponsableId(e.target.value)}
                 className="w-full min-h-[42px] rounded-xl border border-slate-300 bg-white px-3.5 py-2.5 text-xs font-extrabold text-slate-800 outline-none focus:ring-2 focus:ring-teal-500/30 cursor-pointer"
               >
-                {activeResponsables.map((resp) => (
-                  <option key={resp.id} value={resp.id}>
-                    {resp.nombre} ({resp.departamentoNombre})
+                {activeResponsables.length === 0 ? (
+                  <option value="">
+                    -- Sin responsable ni subalternos en {selectedDepartamento} --
                   </option>
-                ))}
+                ) : (
+                  activeResponsables.map((resp) => {
+                    const titularDept = activeResponsables.find((r) => !r.esSubalterno);
+                    const supNombre = resp.responsableSuperiorNombre || titularDept?.nombre || "";
+                    return (
+                      <option key={resp.id} value={resp.id}>
+                        {resp.nombre} —{" "}
+                        {resp.esSubalterno
+                          ? `Subalterno${supNombre ? ` (Resp: ${supNombre})` : ""}`
+                          : "Responsable"}
+                      </option>
+                    );
+                  })
+                )}
               </select>
               <div className="flex flex-wrap items-center justify-between gap-2 pt-0.5">
                 <button
@@ -472,7 +507,8 @@ export default function OrderPanel({
                 </button>
                 {selectedResponsableObj && (
                   <span className="text-[10px] font-semibold text-slate-500">
-                    Dpto: {selectedResponsableObj.departamentoNombre}
+                    {selectedResponsableObj.esSubalterno ? "Subalterno" : "Responsable"} •{" "}
+                    {selectedResponsableObj.departamentoNombre}
                   </span>
                 )}
               </div>
@@ -497,12 +533,12 @@ export default function OrderPanel({
             </div>
           </div>
 
-          {/* Formulario rápido de Nuevo Responsable */}
+          {/* Formulario rápido de Nuevo Responsable o Subalterno */}
           {showNuevoRespForm && (
             <div className="bg-white border border-teal-200 rounded-xl p-3.5 space-y-3">
               <div className="flex items-center justify-between">
                 <span className="text-[11px] font-black uppercase text-teal-900">
-                  Registrar Nuevo Responsable del Departamento
+                  Registrar Nuevo Responsable o Subalterno del Departamento
                 </span>
                 <button
                   type="button"
@@ -517,7 +553,7 @@ export default function OrderPanel({
                   type="text"
                   value={nuevoRespNombre}
                   onChange={(e) => setNuevoRespNombre(e.target.value)}
-                  placeholder="Nombre del responsable *"
+                  placeholder="Nombre completo *"
                   className="w-full min-h-[40px] bg-slate-50 rounded-lg border border-slate-200 px-3 py-2 text-xs font-bold text-slate-800"
                 />
                 <select
@@ -548,6 +584,41 @@ export default function OrderPanel({
                     Guardar
                   </button>
                 </div>
+              </div>
+
+              <div className="bg-slate-50 border border-slate-200 rounded-lg p-2.5 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
+                <label className="inline-flex items-center gap-2 cursor-pointer select-none">
+                  <input
+                    type="checkbox"
+                    checked={nuevoRespEsSubalterno}
+                    onChange={(e) => setNuevoRespEsSubalterno(e.target.checked)}
+                    className="w-4 h-4 rounded border-slate-300 text-teal-600 focus:ring-teal-500 cursor-pointer"
+                  />
+                  <div>
+                    <span className="text-xs font-black text-slate-800 block">
+                      Es subalterno
+                    </span>
+                    <span className="text-[10px] text-slate-500 font-medium block">
+                      {nuevoRespEsSubalterno
+                        ? "Se registrará como subalterno de este departamento."
+                        : "Sin marcar: se registrará como responsable titular del departamento."}
+                    </span>
+                  </div>
+                </label>
+
+                {nuevoRespEsSubalterno && titularesParaNuevoSubalterno.length > 0 && (
+                  <select
+                    value={nuevoRespSuperiorId}
+                    onChange={(e) => setNuevoRespSuperiorId(e.target.value)}
+                    className="w-full sm:w-auto bg-white rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-bold text-teal-900"
+                  >
+                    {titularesParaNuevoSubalterno.map((t) => (
+                      <option key={t.id} value={t.id}>
+                        Resp: {t.nombre}
+                      </option>
+                    ))}
+                  </select>
+                )}
               </div>
             </div>
           )}

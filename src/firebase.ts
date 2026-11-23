@@ -5,7 +5,14 @@ import {
   createUserWithEmailAndPassword,
   signOut
 } from "firebase/auth";
-import { collection, doc, getFirestore, CollectionReference, DocumentReference } from "firebase/firestore";
+import {
+  collection,
+  doc,
+  getFirestore,
+  initializeFirestore,
+  CollectionReference,
+  DocumentReference
+} from "firebase/firestore";
 
 // Configuración real del proyecto de Firebase proporcionada en la compilación
 export const firebaseConfig = {
@@ -30,10 +37,16 @@ try {
 
 let db: any;
 try {
-  db = getFirestore(app);
-} catch (e) {
-  console.error("Firebase firestore initialization failed, creating mock:", e);
-  db = {} as any;
+  db = initializeFirestore(app, {
+    experimentalAutoDetectLongPolling: true
+  });
+} catch {
+  try {
+    db = getFirestore(app);
+  } catch (e) {
+    console.error("Firebase firestore initialization failed, creating mock:", e);
+    db = {} as any;
+  }
 }
 
 let auth: any;
@@ -60,7 +73,13 @@ export async function getDirectoryFirestore() {
     return db;
   }
   const secApp = getSecondaryApp();
-  return getFirestore(secApp);
+  try {
+    return initializeFirestore(secApp, {
+      experimentalAutoDetectLongPolling: true
+    });
+  } catch {
+    return getFirestore(secApp);
+  }
 }
 
 export function normalizeFarmaciaId(rawId?: string | null): string {
