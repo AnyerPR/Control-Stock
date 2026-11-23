@@ -24,7 +24,8 @@ import {
   getUserAvailableCatalogos,
   isModuleAuthorized,
   resolveModuleFromSlug,
-  matchesCatalog
+  matchesCatalog,
+  APP_VERSION
 } from "./types";
 import { playSound, setMuteState } from "./utils/audio";
 import { hashPassword } from "./components/Login";
@@ -3171,6 +3172,9 @@ export default function App() {
                       <div className="min-w-0">
                         <h1 className="text-sm sm:text-xl font-extrabold tracking-tight leading-tight flex items-center gap-2 group-hover:text-teal-200 transition-colors truncate">
                           <span className="truncate">{farmaciaMeta.nombre || "Control de Stock"}</span>
+                          <span className="text-[10px] sm:text-xs font-mono font-black bg-teal-400/20 text-teal-200 border border-teal-300/30 px-2 py-0.5 rounded-lg shrink-0">
+                            v{APP_VERSION}
+                          </span>
                         </h1>
                         <p className="text-teal-100/95 text-[10px] sm:text-xs font-semibold truncate">
                           {farmaciaMeta.subtitulo || "Suministros Hospitalarios • Dr. José Manuel Rodríguez"}

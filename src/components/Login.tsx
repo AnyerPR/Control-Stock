@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from "react";
 import { getDoc, getDocs, setDoc, doc, collection } from "firebase/firestore";
 import { signOut } from "firebase/auth";
-import { Usuario, FarmaciaTenant } from "../types";
+import { Usuario, FarmaciaTenant, APP_VERSION } from "../types";
 import {
   db,
   auth,
@@ -756,6 +756,12 @@ export default function Login({ users, isInitializingUsers, onLoginSuccess }: Lo
           )}
         </div>
         <PWAInstallButton variant="login" />
+        <div className="text-center pt-1">
+          <span className="inline-flex items-center gap-1.5 text-[11px] font-mono font-bold text-slate-500 bg-white/80 border border-slate-200 px-3 py-1 rounded-xl shadow-2xs">
+            <span>Versión de actualización</span>
+            <strong className="text-teal-700 font-black">v{APP_VERSION}</strong>
+          </span>
+        </div>
       </div>
 
       {/* Modal con las Reglas de Seguridad de Firestore listas para copiar */}

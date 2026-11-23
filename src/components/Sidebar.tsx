@@ -19,7 +19,7 @@ import {
   ShieldCheck,
   PackageMinus
 } from "lucide-react";
-import { Usuario } from "../types";
+import { Usuario, APP_VERSION } from "../types";
 import { APP_ICON_PATH, PWAInstallButton } from "./PWAInstallButton";
 
 export interface NavigationItem {
@@ -120,7 +120,7 @@ function Sidebar({
       id: "carga_masiva",
       label: "Carga Masiva",
       icon: FileSpreadsheet,
-      sublabel: "Importar Excel"
+      sublabel: "Importar Excel y PDF"
     });
   }
 
@@ -252,9 +252,14 @@ function Sidebar({
               />
             </div>
             <div className="min-w-0">
-              <h2 className="text-sm font-extrabold text-white tracking-tight truncate leading-tight group-hover:text-teal-300 transition-colors">
-                {farmaciaNombre}
-              </h2>
+              <div className="flex items-center gap-1.5">
+                <h2 className="text-sm font-extrabold text-white tracking-tight truncate leading-tight group-hover:text-teal-300 transition-colors">
+                  {farmaciaNombre}
+                </h2>
+                <span className="text-[9px] font-mono font-black bg-teal-500/20 text-teal-300 border border-teal-400/30 px-1.5 py-0.2 rounded-md shrink-0">
+                  v{APP_VERSION}
+                </span>
+              </div>
               <p className="text-[10px] font-semibold text-slate-400 truncate mt-0.5">
                 {farmaciaSubtitulo}
               </p>
@@ -430,7 +435,7 @@ function Sidebar({
           )}
         </div>
 
-        {/* Pie del Panel Lateral: Usuario, Sonido y Cerrar Sesión */}
+        {/* Pie del Panel Lateral: Usuario, Sonido, Cerrar Sesión y Versión */}
         <div className="p-3 border-t border-slate-800 bg-slate-950/60 shrink-0 space-y-2.5">
           {/* Botón directo de instalación en el menú lateral */}
           <PWAInstallButton variant="sidebar" />
@@ -478,6 +483,11 @@ function Sidebar({
               <LogOut className="w-4 h-4" />
               <span>Cerrar Sesión</span>
             </button>
+          </div>
+
+          <div className="pt-1 border-t border-slate-800/70 flex items-center justify-between text-[10px] text-slate-500 font-mono">
+            <span>Versión de actualización</span>
+            <span className="font-extrabold text-teal-400">v{APP_VERSION}</span>
           </div>
         </div>
       </aside>
