@@ -1,6 +1,6 @@
 import jsPDF from "jspdf";
 import autoTable from "jspdf-autotable";
-import { Producto, Movimiento, InstitucionInfo, FacturaVenta, RegistroConsumo } from "../types";
+import { Producto, Movimiento, InstitucionInfo, FacturaVenta, RegistroConsumo, DocumentoValidacionItem } from "../types";
 import { isLotExpiredWithStock } from "./inventoryStatus";
 import {
   FORMAS_PAGO_DGII,
@@ -2099,4 +2099,531 @@ export const exportConsumoDetalleToWord = (
   document.body.removeChild(a);
   URL.revokeObjectURL(url);
 };
+
+export interface ValidacionExportPayload {
+  codigoValidacion?: string;
+  nombreDocumento: string;
+  tipoDocumento: string;
+  metodoExtraccion?: string;
+  items: DocumentoValidacionItem[];
+  usuarioNombre: string;
+  usuarioDepartamento?: string;
+  fecha?: string;
+  hora?: string;
+  observaciones?: string;
+  previewImageUrl?: string | null;
+  modo: "comparacion" | "documento";
+}
+
+/**
+ * Exporta a PDF (.pdf) la Comparación del Sistema con Inventario o el Documento Escaneado / Extraído
+ */
+export const exportValidacionToPDF = (
+  payload: ValidacionExportPayload,
+  institucion?: InstitucionInfo
+) => {
+  const inst = institucion || getActiveInstitucionInfo();
+  const isComparacion = payload.modo === "comparacion";
+  const doc = new jsPDF(isComparacion ? "l" : "p", "pt", "a4");
+  const headerWidth = isComparacion ? 762 : 515;
+
+  const title = isComparacion
+    ? "Reporte de Comparación de Validación vs. Inventario"
+    : "Documento Escaneado / Extraído (Módulo de Validación)";
+
+  drawPdfInstitutionHeader(doc, title, inst, headerWidth);
+
+  const fechaStr = payload.fecha || new Date().toLocaleDateString("es-DO");
+  const horaStr = payload.hora || new Date().toLocaleTimeString("es-DO", { hour: "2-digit", minute: "2-digit" });
+  const totalItems = payload.items.length;
+  const itemsCoincidentes = payload.items.filter(
+    (i) => i.productoCodigoSeleccionado && !i.tieneDiscrepancia
+  ).length;
+  const itemsConDiferencia = payload.items.filter((i) => i.tieneDiscrepancia).length;
+  const totalUnidadesDoc = payload.items.reduce(
+    (acc, i) => acc + Number(i.cantidadDocumento || 0),
+    0
+  );
+
+  doc.setFont("helvetica", "bold");
+  doc.setFontSize(8.5);
+  doc.setTextColor(30, 41, 59);
+  doc.text("Documento:", 45, 110);
+  doc.text("Responsable:", 45, 123);
+  doc.text("Tipo / Motor:", 45, 136);
+
+  const rightColX = isComparacion ? 450 : 300;
+  doc.text("Fecha y Hora:", rightColX, 110);
+  doc.text("Código Validación:", rightColX, 123);
+  doc.text("Resumen:", rightColX, 136);
+
+  doc.setFont("helvetica", "normal");
+  doc.setTextColor(71, 85, 105);
+  doc.text((payload.nombreDocumento || "Documento Escaneado").slice(0, 48), 118, 110);
+  doc.text(
+    `${payload.usuarioNombre}${payload.usuarioDepartamento ? ` (${payload.usuarioDepartamento})` : ""}`.slice(0, 48),
+    118,
+    123
+  );
+  doc.text(
+    `${payload.tipoDocumento || "PDF"} • ${payload.metodoExtraccion || "IA / OCR"}`,
+    118,
+    136
+  );
+
+  doc.text(`${fechaStr} ${horaStr}`, rightColX + 85, 110);
+  doc.text(payload.codigoValidacion || "EN CURSO", rightColX + 85, 123);
+  doc.text(
+    isComparacion
+      ? `${totalItems} ítems (${itemsCoincidentes} coinciden / ${itemsConDiferencia} con diferencia)`
+      : `${totalItems} renglones • ${totalUnidadesDoc} unidades totales`,
+    rightColX + 85,
+    136
+  );
+
+  let startY = 150;
+  if (payload.observaciones) {
+    doc.setFont("helvetica", "italic");
+    doc.setFontSize(8);
+    doc.setTextColor(100, 116, 139);
+    doc.text(`Observaciones: ${payload.observaciones.slice(0, 110)}`, 45, 149);
+    startY = 160;
+  }
+
+  if (isComparacion) {
+    const columns = [
+      { header: "Ítem", dataKey: "numeroItem" },
+      { header: "Producto en Documento", dataKey: "docProduct" },
+      { header: "Código y Producto en Inventario", dataKey: "invProduct" },
+      { header: "Coinc.", dataKey: "match" },
+      { header: "Cant. Doc", dataKey: "cantDoc" },
+      { header: "Stock Inv.", dataKey: "stockInv" },
+      { header: "Diferencia", dataKey: "diff" },
+      { header: "Consumo", dataKey: "consumo" },
+      { header: "Costo / Vencimiento", dataKey: "costoVto" },
+      { header: "Estado", dataKey: "estado" }
+    ];
+
+    const rows = payload.items.map((it, idx) => {
+      const hasCode = Boolean(it.productoCodigoSeleccionado);
+      const diff = Number(it.diferenciaCantidad || 0);
+      const diffStr = diff > 0 ? `+${diff}` : `${diff}`;
+      const costoDocStr =
+        it.costoDocumento !== undefined ? `Doc: RD$ ${Number(it.costoDocumento).toFixed(2)}` : "Doc: N/D";
+      const costoInvStr =
+        it.costoInventarioActual !== undefined
+          ? `Inv: RD$ ${Number(it.costoInventarioActual).toFixed(2)}`
+          : "Inv: —";
+      const vtoStr =
+        it.fechaVencimientoDocumento || it.fechaVencimientoInventarioActual
+          ? `Vto: ${it.fechaVencimientoDocumento || it.fechaVencimientoInventarioActual}`
+          : "";
+
+      return {
+        numeroItem: it.numeroItem || String(idx + 1),
+        docProduct: `${it.nombreDocumento || "—"}\n(${it.unidadMedidaDocumento || "Unidad"})`,
+        invProduct: hasCode
+          ? `${it.productoCodigoSeleccionado} — ${it.productoNombreInventario || ""}\n(${it.unidadMedidaInventario || "Unidad"})`
+          : "SIN CÓDIGO VINCULADO",
+        match: hasCode ? `${it.nivelCoincidencia}%` : "0%",
+        cantDoc: `${it.cantidadDocumento}`,
+        stockInv: `Sis: ${it.existenciaSistemaActual}\nFís: ${it.existenciaFisicaActual}`,
+        diff: `${diffStr} und.`,
+        consumo: `${it.consumoRegistradoTotal} und.\n(${it.consumoMovimientosCount} sal.)`,
+        costoVto: [costoDocStr, costoInvStr, vtoStr].filter(Boolean).join("\n"),
+        estado: !hasCode
+          ? "Sin vincular"
+          : it.tieneDiscrepancia
+          ? "Con diferencia"
+          : "Coincide"
+      };
+    });
+
+    autoTable(doc, {
+      columns,
+      body: rows,
+      startY,
+      theme: "striped",
+      headStyles: {
+        fillColor: [15, 118, 110],
+        textColor: 255,
+        fontSize: 8,
+        fontStyle: "bold"
+      },
+      styles: {
+        fontSize: 7.5,
+        cellPadding: 4,
+        overflow: "linebreak",
+        valign: "middle"
+      },
+      columnStyles: {
+        numeroItem: { cellWidth: 32, halign: "center", fontStyle: "bold" },
+        docProduct: { cellWidth: 140 },
+        invProduct: { cellWidth: 155 },
+        match: { cellWidth: 42, halign: "center", fontStyle: "bold" },
+        cantDoc: { cellWidth: 50, halign: "right", fontStyle: "bold" },
+        stockInv: { cellWidth: 58, halign: "right" },
+        diff: { cellWidth: 54, halign: "right", fontStyle: "bold" },
+        consumo: { cellWidth: 58, halign: "right" },
+        costoVto: { cellWidth: 105 },
+        estado: { cellWidth: 68, halign: "center", fontStyle: "bold" }
+      },
+      margin: { left: 40, right: 40 },
+      didDrawPage: (data: any) => {
+        doc.setFontSize(7.5);
+        doc.setTextColor(148, 163, 184);
+        const footerLeft =
+          inst.piePagina ||
+          `Comparación de Validación Documental • Generado el ${fechaStr} ${horaStr}`;
+        doc.text(footerLeft, 40, doc.internal.pageSize.height - 20);
+        doc.text(
+          `Página ${data.pageNumber}`,
+          doc.internal.pageSize.width - 80,
+          doc.internal.pageSize.height - 20
+        );
+      }
+    });
+  } else {
+    const columns = [
+      { header: "Ítem #", dataKey: "numeroItem" },
+      { header: "Descripción / Producto Escaneado", dataKey: "nombre" },
+      { header: "Unidad Medida", dataKey: "unidad" },
+      { header: "Código Sugerido", dataKey: "codigo" },
+      { header: "Cantidad", dataKey: "cantidad" },
+      { header: "Costo Unit.", dataKey: "costo" },
+      { header: "Subtotal", dataKey: "subtotal" },
+      { header: "Vencimiento", dataKey: "vto" }
+    ];
+
+    let totalCosto = 0;
+    const rows = payload.items.map((it, idx) => {
+      const cant = Number(it.cantidadDocumento || 0);
+      const costo = it.costoDocumento !== undefined ? Number(it.costoDocumento) : 0;
+      const sub = cant * costo;
+      totalCosto += sub;
+
+      return {
+        numeroItem: it.numeroItem || String(idx + 1),
+        nombre: it.nombreDocumento || "—",
+        unidad: it.unidadMedidaDocumento || "Unidad",
+        codigo: it.productoCodigoSeleccionado || "—",
+        cantidad: `${cant}`,
+        costo: it.costoDocumento !== undefined ? `RD$ ${costo.toFixed(2)}` : "N/D",
+        subtotal: it.costoDocumento !== undefined ? `RD$ ${sub.toFixed(2)}` : "—",
+        vto: it.fechaVencimientoDocumento || "—"
+      };
+    });
+
+    rows.push({
+      numeroItem: "",
+      nombre: "TOTAL DOCUMENTO ESCANEADO",
+      unidad: `${totalItems} renglones`,
+      codigo: "",
+      cantidad: `${totalUnidadesDoc}`,
+      costo: "—",
+      subtotal: totalCosto > 0 ? `RD$ ${totalCosto.toFixed(2)}` : "—",
+      vto: ""
+    });
+
+    autoTable(doc, {
+      columns,
+      body: rows,
+      startY,
+      theme: "striped",
+      headStyles: {
+        fillColor: [15, 118, 110],
+        textColor: 255,
+        fontSize: 8,
+        fontStyle: "bold"
+      },
+      styles: {
+        fontSize: 8,
+        cellPadding: 5,
+        overflow: "linebreak",
+        valign: "middle"
+      },
+      columnStyles: {
+        numeroItem: { cellWidth: 36, halign: "center", fontStyle: "bold" },
+        nombre: { cellWidth: 165, fontStyle: "bold" },
+        unidad: { cellWidth: 64 },
+        codigo: { cellWidth: 55, halign: "center" },
+        cantidad: { cellWidth: 48, halign: "right", fontStyle: "bold" },
+        costo: { cellWidth: 52, halign: "right" },
+        subtotal: { cellWidth: 55, halign: "right", fontStyle: "bold" },
+        vto: { cellWidth: 40, halign: "center" }
+      },
+      margin: { left: 40, right: 40 },
+      willDrawCell: (data) => {
+        if (data.row.index === rows.length - 1) {
+          data.cell.styles.fontStyle = "bold";
+          data.cell.styles.fillColor = [240, 253, 250];
+          data.cell.styles.textColor = [15, 118, 110];
+        }
+      },
+      didDrawPage: (data: any) => {
+        doc.setFontSize(7.5);
+        doc.setTextColor(148, 163, 184);
+        const footerLeft =
+          inst.piePagina ||
+          `Documento Escaneado • Generado el ${fechaStr} ${horaStr}`;
+        doc.text(footerLeft, 40, doc.internal.pageSize.height - 20);
+        doc.text(
+          `Página ${data.pageNumber}`,
+          doc.internal.pageSize.width - 80,
+          doc.internal.pageSize.height - 20
+        );
+      }
+    });
+  }
+
+  const safeDocName = (payload.nombreDocumento || "Validacion")
+    .replace(/\.[^/.]+$/, "")
+    .replace(/[^a-zA-Z0-9_-]/g, "_");
+  const prefix = isComparacion ? "Comparacion_Validacion" : "Documento_Escaneado";
+  doc.save(`${prefix}_${safeDocName}_${new Date().toISOString().slice(0, 10)}.pdf`);
+};
+
+/**
+ * Exporta a Word (.doc) la Comparación del Sistema con Inventario o el Documento Escaneado / Extraído
+ */
+export const exportValidacionToWord = (
+  payload: ValidacionExportPayload,
+  institucion?: InstitucionInfo
+) => {
+  const inst = institucion || getActiveInstitucionInfo();
+  const isComparacion = payload.modo === "comparacion";
+  const title = isComparacion
+    ? "Reporte de Comparación de Validación vs. Inventario"
+    : "Documento Escaneado / Extraído (Módulo de Validación)";
+
+  const fechaStr = payload.fecha || new Date().toLocaleDateString("es-DO");
+  const horaStr = payload.hora || new Date().toLocaleTimeString("es-DO", { hour: "2-digit", minute: "2-digit" });
+  const totalItems = payload.items.length;
+  const itemsCoincidentes = payload.items.filter(
+    (i) => i.productoCodigoSeleccionado && !i.tieneDiscrepancia
+  ).length;
+  const itemsConDiferencia = payload.items.filter((i) => i.tieneDiscrepancia).length;
+  const totalUnidadesDoc = payload.items.reduce(
+    (acc, i) => acc + Number(i.cantidadDocumento || 0),
+    0
+  );
+
+  let tableHeadHtml = "";
+  let tableRowsHtml = "";
+
+  if (isComparacion) {
+    tableHeadHtml = `
+      <tr>
+        <th style="width: 5%; text-align: center;">Ítem</th>
+        <th style="width: 20%;">Producto en Documento</th>
+        <th style="width: 22%;">Código y Producto en Inventario</th>
+        <th style="width: 7%; text-align: center;">Coinc.</th>
+        <th style="width: 7%; text-align: right;">Cant. Doc</th>
+        <th style="width: 9%; text-align: right;">Stock Inv.</th>
+        <th style="width: 8%; text-align: right;">Diferencia</th>
+        <th style="width: 8%; text-align: right;">Consumo</th>
+        <th style="width: 8%;">Costo / Vto.</th>
+        <th style="width: 6%; text-align: center;">Estado</th>
+      </tr>
+    `;
+
+    tableRowsHtml = payload.items
+      .map((it, idx) => {
+        const hasCode = Boolean(it.productoCodigoSeleccionado);
+        const diff = Number(it.diferenciaCantidad || 0);
+        const diffStr = diff > 0 ? `+${diff}` : `${diff}`;
+        const statusColor = !hasCode
+          ? "#991b1b"
+          : it.tieneDiscrepancia
+          ? "#92400e"
+          : "#065f46";
+        const statusBg = !hasCode
+          ? "#ffe4e6"
+          : it.tieneDiscrepancia
+          ? "#fef3c7"
+          : "#d1fae5";
+        const statusLabel = !hasCode
+          ? "Sin vincular"
+          : it.tieneDiscrepancia
+          ? "Diferencia"
+          : "Coincide";
+
+        return `
+          <tr>
+            <td style="border: 1px solid #cbd5e1; padding: 7px; text-align: center; font-weight: bold;">${it.numeroItem || idx + 1}</td>
+            <td style="border: 1px solid #cbd5e1; padding: 7px;">
+              <strong>${it.nombreDocumento || "—"}</strong>
+              <div style="font-size: 10px; color: #64748b;">U. Medida: ${it.unidadMedidaDocumento || "Unidad"}</div>
+            </td>
+            <td style="border: 1px solid #cbd5e1; padding: 7px;">
+              ${
+                hasCode
+                  ? `<strong style="color: #0f766e;">${it.productoCodigoSeleccionado}</strong> — ${it.productoNombreInventario || ""}<div style="font-size: 10px; color: #64748b;">${it.unidadMedidaInventario || "Unidad"}</div>`
+                  : `<span style="color: #be123c; font-weight: bold;">Sin código vinculado</span>`
+              }
+            </td>
+            <td style="border: 1px solid #cbd5e1; padding: 7px; text-align: center; font-weight: bold;">${hasCode ? `${it.nivelCoincidencia}%` : "0%"}</td>
+            <td style="border: 1px solid #cbd5e1; padding: 7px; text-align: right; font-weight: bold;">${it.cantidadDocumento}</td>
+            <td style="border: 1px solid #cbd5e1; padding: 7px; text-align: right;">
+              <strong>Sis: ${it.existenciaSistemaActual}</strong>
+              <div style="font-size: 10px; color: #64748b;">Fís: ${it.existenciaFisicaActual}</div>
+            </td>
+            <td style="border: 1px solid #cbd5e1; padding: 7px; text-align: right; font-weight: bold; color: ${statusColor};">${diffStr} und.</td>
+            <td style="border: 1px solid #cbd5e1; padding: 7px; text-align: right;">
+              <strong>${it.consumoRegistradoTotal} und.</strong>
+              <div style="font-size: 10px; color: #64748b;">${it.consumoMovimientosCount} sal.</div>
+            </td>
+            <td style="border: 1px solid #cbd5e1; padding: 7px; font-size: 10.5px;">
+              <div>Doc: ${it.costoDocumento !== undefined ? `RD$ ${Number(it.costoDocumento).toFixed(2)}` : "N/D"}</div>
+              <div>Inv: ${it.costoInventarioActual !== undefined ? `RD$ ${Number(it.costoInventarioActual).toFixed(2)}` : "—"}</div>
+              ${
+                it.fechaVencimientoDocumento || it.fechaVencimientoInventarioActual
+                  ? `<div style="color: #475569;">Vto: ${it.fechaVencimientoDocumento || it.fechaVencimientoInventarioActual}</div>`
+                  : ""
+              }
+            </td>
+            <td style="border: 1px solid #cbd5e1; padding: 7px; text-align: center;">
+              <span style="background-color: ${statusBg}; color: ${statusColor}; padding: 2px 6px; border-radius: 4px; font-weight: bold; font-size: 9.5px;">
+                ${statusLabel}
+              </span>
+            </td>
+          </tr>
+        `;
+      })
+      .join("");
+  } else {
+    tableHeadHtml = `
+      <tr>
+        <th style="width: 7%; text-align: center;">Ítem #</th>
+        <th style="width: 36%;">Descripción / Producto Escaneado</th>
+        <th style="width: 14%;">Unidad Medida</th>
+        <th style="width: 11%; text-align: center;">Código Inv.</th>
+        <th style="width: 10%; text-align: right;">Cantidad</th>
+        <th style="width: 11%; text-align: right;">Costo Unit.</th>
+        <th style="width: 11%; text-align: right;">Subtotal</th>
+      </tr>
+    `;
+
+    let totalCosto = 0;
+    tableRowsHtml =
+      payload.items
+        .map((it, idx) => {
+          const cant = Number(it.cantidadDocumento || 0);
+          const costo = it.costoDocumento !== undefined ? Number(it.costoDocumento) : 0;
+          const sub = cant * costo;
+          totalCosto += sub;
+
+          return `
+            <tr>
+              <td style="border: 1px solid #cbd5e1; padding: 8px; text-align: center; font-weight: bold;">${it.numeroItem || idx + 1}</td>
+              <td style="border: 1px solid #cbd5e1; padding: 8px; font-weight: bold;">${it.nombreDocumento || "—"}</td>
+              <td style="border: 1px solid #cbd5e1; padding: 8px;">${it.unidadMedidaDocumento || "Unidad"}</td>
+              <td style="border: 1px solid #cbd5e1; padding: 8px; text-align: center; font-family: monospace; color: #0f766e; font-weight: bold;">${it.productoCodigoSeleccionado || "—"}</td>
+              <td style="border: 1px solid #cbd5e1; padding: 8px; text-align: right; font-weight: bold;">${cant}</td>
+              <td style="border: 1px solid #cbd5e1; padding: 8px; text-align: right;">${it.costoDocumento !== undefined ? `RD$ ${costo.toFixed(2)}` : "N/D"}</td>
+              <td style="border: 1px solid #cbd5e1; padding: 8px; text-align: right; font-weight: bold;">${it.costoDocumento !== undefined ? `RD$ ${sub.toFixed(2)}` : "—"}</td>
+            </tr>
+          `;
+        })
+        .join("") +
+      `
+        <tr>
+          <td colspan="4" style="border: 1px solid #cbd5e1; padding: 9px; text-align: right; font-weight: bold; background-color: #f0fdfa;">
+            TOTAL DOCUMENTO ESCANEADO (${totalItems} renglones):
+          </td>
+          <td style="border: 1px solid #cbd5e1; padding: 9px; text-align: right; font-weight: bold; background-color: #f0fdfa; color: #0f766e;">
+            ${totalUnidadesDoc}
+          </td>
+          <td style="border: 1px solid #cbd5e1; padding: 9px; text-align: right; background-color: #f0fdfa;">—</td>
+          <td style="border: 1px solid #cbd5e1; padding: 9px; text-align: right; font-weight: bold; background-color: #f0fdfa; color: #0f766e;">
+            ${totalCosto > 0 ? `RD$ ${totalCosto.toFixed(2)}` : "—"}
+          </td>
+        </tr>
+      `;
+  }
+
+  const htmlContent = `
+    <html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:w="urn:schemas-microsoft-com:office:word" xmlns="http://www.w3.org/TR/REC-html40">
+    <head>
+      <meta charset="utf-8">
+      <title>${title}</title>
+      <style>
+        @page { size: ${isComparacion ? "11in 8.5in" : "8.5in 11in"}; margin: 0.75in; }
+        body { font-family: Arial, sans-serif; color: #1e293b; line-height: 1.4; }
+        .header-table { width: 100%; border-collapse: collapse; border: none; margin-bottom: 16px; }
+        .header-title { font-size: 18px; font-weight: bold; color: #0f766e; margin: 0; }
+        .header-subtitle { font-size: 12px; color: #4b5563; margin-top: 4px; margin-bottom: 0; }
+        .metadata-box { background-color: #f8fafc; border-left: 4px solid #0f766e; padding: 12px; margin-bottom: 18px; font-size: 11.5px; }
+        .metadata-box table { width: 100%; border-collapse: collapse; border: none; }
+        .metadata-label { font-weight: bold; color: #475569; width: 18%; padding: 3px 0; }
+        .metadata-value { color: #0f172a; width: 32%; padding: 3px 0; }
+        .main-table { width: 100%; border-collapse: collapse; font-size: 11px; }
+        .main-table th { background-color: #0f766e; color: #ffffff; font-weight: bold; text-align: left; padding: 8px; border: 1px solid #0d9488; }
+      </style>
+    </head>
+    <body>
+      ${buildWordInstitutionHeader(title, inst)}
+
+      <div class="metadata-box">
+        <table>
+          <tr>
+            <td class="metadata-label">Documento Origen:</td>
+            <td class="metadata-value"><strong>${payload.nombreDocumento || "Documento Escaneado"}</strong> (${payload.tipoDocumento || "PDF"})</td>
+            <td class="metadata-label">Fecha y Hora:</td>
+            <td class="metadata-value">${fechaStr} • ${horaStr}</td>
+          </tr>
+          <tr>
+            <td class="metadata-label">Responsable:</td>
+            <td class="metadata-value">${payload.usuarioNombre}${payload.usuarioDepartamento ? ` (${payload.usuarioDepartamento})` : ""}</td>
+            <td class="metadata-label">Código Validación:</td>
+            <td class="metadata-value"><strong>${payload.codigoValidacion || "EN CURSO"}</strong></td>
+          </tr>
+          <tr>
+            <td class="metadata-label">Motor de Lectura:</td>
+            <td class="metadata-value">${payload.metodoExtraccion || "IA Multimodal / OCR"}</td>
+            <td class="metadata-label">Resumen:</td>
+            <td class="metadata-value">${
+              isComparacion
+                ? `${totalItems} ítems (${itemsCoincidentes} coinciden / ${itemsConDiferencia} con diferencia)`
+                : `${totalItems} renglones • ${totalUnidadesDoc} unidades totales`
+            }</td>
+          </tr>
+        </table>
+      </div>
+
+      <table class="main-table">
+        <thead>
+          ${tableHeadHtml}
+        </thead>
+        <tbody>
+          ${tableRowsHtml}
+        </tbody>
+      </table>
+
+      ${
+        payload.observaciones
+          ? `<p style="margin-top: 16px; padding: 10px; background-color: #f8fafc; border-left: 4px solid #0f766e; font-size: 11.5px;"><strong>Observaciones:</strong> ${payload.observaciones}</p>`
+          : ""
+      }
+      ${inst.piePagina ? `<p style="margin-top: 20px; font-size: 10.5px; color: #64748b; border-top: 1px solid #e2e8f0; padding-top: 8px;">${inst.piePagina}</p>` : ""}
+    </body>
+    </html>
+  `;
+
+  const safeDocName = (payload.nombreDocumento || "Validacion")
+    .replace(/\.[^/.]+$/, "")
+    .replace(/[^a-zA-Z0-9_-]/g, "_");
+  const prefix = isComparacion ? "Comparacion_Validacion" : "Documento_Escaneado";
+
+  const blob = new Blob(["\ufeff" + htmlContent], { type: "application/msword;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `${prefix}_${safeDocName}_${new Date().toISOString().slice(0, 10)}.doc`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+};
+
 

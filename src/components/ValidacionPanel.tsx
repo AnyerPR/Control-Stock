@@ -37,10 +37,15 @@ import { triggerOpenChatForProductValidation } from "./ChatLateral";
 import ModalVerificacionProducto from "./ModalVerificacionProducto";
 import { playSound } from "../utils/audio";
 import {
+  exportValidacionToPDF,
+  exportValidacionToWord
+} from "../utils/exportUtils";
+import {
   FileCheck2,
   Upload,
   FileText,
   FileSpreadsheet,
+  FileDown,
   Image as ImageIcon,
   Camera,
   Search,
@@ -530,6 +535,71 @@ export default function ValidacionPanel({
       showToast("No se pudo guardar el registro de validación documental.");
     } finally {
       setSavingValidation(false);
+    }
+  };
+
+  // Exportar la comparación del sistema o el documento escaneado en PDF o Word
+  const handleExportValidacion = (
+    modo: "comparacion" | "documento",
+    formato: "pdf" | "word",
+    customRecord?: RegistroValidacionDocumento
+  ) => {
+    const itemsToExport = customRecord ? customRecord.items : comparisonItems;
+    if (!itemsToExport || itemsToExport.length === 0) {
+      playSound("negative");
+      showToast("No hay ítems cargados para exportar.");
+      return;
+    }
+
+    playSound("action");
+    const { fecha, hora } = getNowDateAndTime();
+    const payload = {
+      codigoValidacion: customRecord
+        ? customRecord.numeroValidacion
+        : validationSavedCode || undefined,
+      nombreDocumento: customRecord
+        ? customRecord.nombreArchivo
+        : currentDocName || "Documento_Escaneado",
+      tipoDocumento: customRecord ? customRecord.tipoDocumento : currentDocType,
+      metodoExtraccion: customRecord
+        ? customRecord.metodoExtraccion
+        : currentExtractionMethod,
+      items: itemsToExport,
+      usuarioNombre: customRecord
+        ? customRecord.usuarioValidador
+        : currentUser.nombre,
+      usuarioDepartamento: customRecord
+        ? customRecord.departamentoValidador
+        : normalizeDepartmentName(currentUser.departamento),
+      fecha: customRecord ? customRecord.fecha : fecha,
+      hora: customRecord ? customRecord.hora : hora,
+      observaciones: customRecord
+        ? customRecord.observacionesGenerales
+        : observacionesGeneralesDoc.trim() || undefined,
+      previewImageUrl: customRecord ? null : previewImageUrl,
+      modo
+    };
+
+    try {
+      if (formato === "pdf") {
+        exportValidacionToPDF(payload);
+        showToast(
+          modo === "comparacion"
+            ? "Comparación del sistema exportada en PDF (.pdf)."
+            : "Documento escaneado exportado en PDF (.pdf)."
+        );
+      } else {
+        exportValidacionToWord(payload);
+        showToast(
+          modo === "comparacion"
+            ? "Comparación del sistema exportada en Word (.doc)."
+            : "Documento escaneado exportado en Word (.doc)."
+        );
+      }
+    } catch (err) {
+      console.error("Error exportando validación:", err);
+      playSound("negative");
+      showToast("Ocurrió un error al generar el archivo de exportación.");
     }
   };
 
@@ -1100,6 +1170,75 @@ export default function ValidacionPanel({
                   >
                     Limpiar Mesa
                   </button>
+                </div>
+              </div>
+
+              {/* Barra de Exportación: Comparación del Sistema (PDF / Word) y Documento Escaneado (PDF / Word) */}
+              <div className="bg-gradient-to-r from-teal-50/90 via-slate-50 to-indigo-50/70 border border-teal-200/80 rounded-2xl p-3.5 flex flex-col xl:flex-row xl:items-center justify-between gap-3">
+                <div className="flex items-center gap-2.5">
+                  <div className="w-9 h-9 rounded-xl bg-teal-700 text-white flex items-center justify-center shrink-0 shadow-2xs">
+                    <FileDown className="w-4.5 h-4.5" />
+                  </div>
+                  <div>
+                    <span className="text-xs font-extrabold text-slate-900 block">
+                      Exportar Comparación del Sistema o Documento Escaneado
+                    </span>
+                    <span className="text-[11px] font-medium text-slate-600 block">
+                      Descarga el reporte comparativo frente al inventario o los datos extraídos del documento en formato PDF (.pdf) o Microsoft Word (.doc).
+                    </span>
+                  </div>
+                </div>
+
+                <div className="flex flex-wrap items-center gap-2">
+                  {/* Grupo 1: Exportar Comparación del Sistema */}
+                  <div className="flex items-center gap-1.5 bg-white border border-teal-200 rounded-xl p-1 shadow-2xs">
+                    <span className="text-[10px] font-black uppercase tracking-wider text-teal-900 px-2">
+                      Comparación:
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => handleExportValidacion("comparacion", "pdf")}
+                      className="px-2.5 py-1.5 rounded-lg bg-rose-600 hover:bg-rose-700 text-white text-[11px] font-extrabold transition cursor-pointer flex items-center gap-1"
+                      title="Exportar Comparación del Sistema en PDF"
+                    >
+                      <FileDown className="w-3.5 h-3.5" />
+                      <span>PDF</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleExportValidacion("comparacion", "word")}
+                      className="px-2.5 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-[11px] font-extrabold transition cursor-pointer flex items-center gap-1"
+                      title="Exportar Comparación del Sistema en Word (.doc)"
+                    >
+                      <FileText className="w-3.5 h-3.5" />
+                      <span>Word</span>
+                    </button>
+                  </div>
+
+                  {/* Grupo 2: Exportar Documento Escaneado / Extraído */}
+                  <div className="flex items-center gap-1.5 bg-white border border-indigo-200 rounded-xl p-1 shadow-2xs">
+                    <span className="text-[10px] font-black uppercase tracking-wider text-indigo-950 px-2">
+                      Documento:
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => handleExportValidacion("documento", "pdf")}
+                      className="px-2.5 py-1.5 rounded-lg bg-rose-50 hover:bg-rose-100 text-rose-800 border border-rose-200 text-[11px] font-extrabold transition cursor-pointer flex items-center gap-1"
+                      title="Exportar Documento Escaneado en PDF"
+                    >
+                      <FileDown className="w-3.5 h-3.5" />
+                      <span>PDF</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleExportValidacion("documento", "word")}
+                      className="px-2.5 py-1.5 rounded-lg bg-blue-50 hover:bg-blue-100 text-blue-800 border border-blue-200 text-[11px] font-extrabold transition cursor-pointer flex items-center gap-1"
+                      title="Exportar Documento Escaneado en Word (.doc)"
+                    >
+                      <FileText className="w-3.5 h-3.5" />
+                      <span>Word</span>
+                    </button>
+                  </div>
                 </div>
               </div>
 
@@ -2637,7 +2776,49 @@ export default function ValidacionPanel({
               </div>
             </div>
 
-            <div className="px-5 py-3.5 bg-slate-50 border-t border-slate-200 flex justify-end">
+            <div className="px-5 py-3.5 bg-slate-50 border-t border-slate-200 flex flex-wrap items-center justify-between gap-2.5">
+              <div className="flex flex-wrap items-center gap-1.5">
+                <button
+                  type="button"
+                  onClick={() =>
+                    handleExportValidacion("comparacion", "pdf", inspectValidacionDoc)
+                  }
+                  className="px-3 py-2 rounded-xl bg-rose-600 hover:bg-rose-700 text-white text-xs font-extrabold transition cursor-pointer inline-flex items-center gap-1.5"
+                >
+                  <FileDown className="w-3.5 h-3.5" />
+                  <span>Comparación PDF</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() =>
+                    handleExportValidacion("comparacion", "word", inspectValidacionDoc)
+                  }
+                  className="px-3 py-2 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-xs font-extrabold transition cursor-pointer inline-flex items-center gap-1.5"
+                >
+                  <FileText className="w-3.5 h-3.5" />
+                  <span>Comparación Word</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() =>
+                    handleExportValidacion("documento", "pdf", inspectValidacionDoc)
+                  }
+                  className="px-3 py-2 rounded-xl bg-rose-50 hover:bg-rose-100 text-rose-800 border border-rose-200 text-xs font-extrabold transition cursor-pointer inline-flex items-center gap-1.5"
+                >
+                  <FileDown className="w-3.5 h-3.5" />
+                  <span>Documento PDF</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() =>
+                    handleExportValidacion("documento", "word", inspectValidacionDoc)
+                  }
+                  className="px-3 py-2 rounded-xl bg-blue-50 hover:bg-blue-100 text-blue-800 border border-blue-200 text-xs font-extrabold transition cursor-pointer inline-flex items-center gap-1.5"
+                >
+                  <FileText className="w-3.5 h-3.5" />
+                  <span>Documento Word</span>
+                </button>
+              </div>
               <button
                 type="button"
                 onClick={() => setInspectValidacionDoc(null)}
