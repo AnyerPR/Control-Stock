@@ -6,6 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { SignedXml } from "xml-crypto";
+import { GoogleGenAI, Type } from "@google/genai";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -722,6 +723,134 @@ async function startServer() {
       tenant,
       recepciones: recepcionesStore.get(tenant) || []
     });
+  });
+
+  // ============================================================================
+  // 7. EXTRACCIÓN OCR E IA DE DOCUMENTOS PARA MÓDULO DE VALIDACIÓN
+  // ============================================================================
+  app.post("/api/validacion/ocr-ai", async (req, res) => {
+    try {
+      const apiKey = process.env.GEMINI_API_KEY;
+      if (!apiKey) {
+        res.status(503).json({
+          ok: false,
+          error: "GEMINI_API_KEY no configurada en el servidor."
+        });
+        return;
+      }
+
+      const { base64Data, mimeType, extractedText, fileName = "documento" } = req.body || {};
+      if (!base64Data && !extractedText) {
+        res.status(400).json({
+          ok: false,
+          error: "Debe enviar una imagen/documento (base64Data) o texto extraído (extractedText)."
+        });
+        return;
+      }
+
+      const ai = new GoogleGenAI({
+        apiKey,
+        httpOptions: {
+          headers: {
+            "User-Agent": "aistudio-build"
+          }
+        }
+      });
+
+      const promptText = `Analiza el siguiente documento de suministros médicos/farmacéuticos (${fileName}) y extrae todos los productos o medicamentos listados.
+Para cada renglón o producto identifica cuando estén disponibles:
+- numeroItem: Número de ítem, renglón o código en el documento (ej. "1", "2", "A101").
+- nombreProducto: Nombre completo del producto, medicamento o suministro (incluyendo concentración si aparece).
+- unidadMedida: Unidad de medida, presentación o forma farmacéutica (ej. "Comprimido", "Ampolla", "Frasco", "Caja", "Tableta", "Unidad", "ml", "mg").
+- cantidad: Cantidad numérica indicada en el documento (0 si no aparece).
+- costoUnitario: Costo o precio unitario numérico (0 si no está disponible).
+- fechaVencimiento: Fecha de vencimiento en formato YYYY-MM-DD (o cadena vacía "" si no está disponible).
+- lote: Número de lote si aparece en el documento (o cadena vacía "").`;
+
+      const parts: any[] = [];
+      if (base64Data && mimeType) {
+        parts.push({
+          inlineData: {
+            mimeType: String(mimeType),
+            data: String(base64Data)
+          }
+        });
+      }
+      if (extractedText) {
+        parts.push({
+          text: `${promptText}\n\nCONTENIDO DEL DOCUMENTO:\n${String(extractedText).slice(0, 45000)}`
+        });
+      } else {
+        parts.push({ text: promptText });
+      }
+
+      const response = await ai.models.generateContent({
+        model: "gemini-4-hydrogen",
+        contents: { parts },
+        config: {
+          systemInstruction:
+            "Eres un auditor farmacéutico experto en extracción OCR de facturas, órdenes de compra, condujes, inventarios hospitalarios y listas de medicamentos. Devuelve únicamente el arreglo JSON estructurado con los productos detectados.",
+          responseMimeType: "application/json",
+          responseSchema: {
+            type: Type.ARRAY,
+            items: {
+              type: Type.OBJECT,
+              properties: {
+                numeroItem: {
+                  type: Type.STRING,
+                  description: "Número de ítem o código en el documento"
+                },
+                nombreProducto: {
+                  type: Type.STRING,
+                  description: "Nombre del producto o medicamento"
+                },
+                unidadMedida: {
+                  type: Type.STRING,
+                  description: "Unidad de medida o presentación"
+                },
+                cantidad: {
+                  type: Type.NUMBER,
+                  description: "Cantidad numérica indicada en el documento"
+                },
+                costoUnitario: {
+                  type: Type.NUMBER,
+                  description: "Costo o precio unitario numérico"
+                },
+                fechaVencimiento: {
+                  type: Type.STRING,
+                  description: "Fecha de vencimiento en formato YYYY-MM-DD o vacío"
+                },
+                lote: {
+                  type: Type.STRING,
+                  description: "Número de lote o vacío"
+                }
+              },
+              required: ["numeroItem", "nombreProducto", "unidadMedida", "cantidad"]
+            }
+          }
+        }
+      });
+
+      const rawJson = (response.text ?? "[]").trim();
+      let items: any[] = [];
+      try {
+        items = JSON.parse(rawJson);
+      } catch {
+        items = [];
+      }
+
+      res.json({
+        ok: true,
+        metodo: "IA_OCR",
+        items: Array.isArray(items) ? items : []
+      });
+    } catch (err: any) {
+      const msg = err instanceof Error ? err.message : String(err);
+      res.status(500).json({
+        ok: false,
+        error: msg
+      });
+    }
   });
 
   // Integración Vite en desarrollo / archivos estáticos en producción

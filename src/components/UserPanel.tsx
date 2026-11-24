@@ -5,6 +5,7 @@ import { UserPlus, User, Users, Trash2, Key, Pen, ShieldAlert, X, CheckCircle } 
 
 export const MODULOS_DISPONIBLES = [
   { id: "inventory", nombre: "Suministros (Inventario)" },
+  { id: "validacion", nombre: "Validación (OCR, Comparación y Ajustes)" },
   { id: "venta", nombre: "Venta (Facturación)" },
   { id: "dgii", nombre: "Cumplimiento DGII (e-CF / 606 / 607)" },
   { id: "carga_masiva", nombre: "Carga Masiva" },
@@ -74,9 +75,9 @@ export default function UserPanel({
   // Auto-fill modules defaults based on selected role for new user
   useEffect(() => {
     if (newRole === "Administrador") {
-      setNewModulos(["inventory", "dgii", "carga_masiva", "solicitudes", "consumos", "historial", "usuarios", "configuracion"]);
+      setNewModulos(["inventory", "validacion", "dgii", "carga_masiva", "solicitudes", "consumos", "historial", "usuarios", "configuracion"]);
     } else {
-      setNewModulos(["solicitudes", "consumos", "historial"]);
+      setNewModulos(["validacion", "solicitudes", "consumos", "historial"]);
     }
   }, [newRole]);
 
@@ -95,9 +96,9 @@ export default function UserPanel({
     if (user.modulos && Array.isArray(user.modulos)) {
       setEditModulos(user.modulos);
     } else if (user.rol === "Administrador") {
-      setEditModulos(["inventory", "dgii", "carga_masiva", "solicitudes", "consumos", "historial", "usuarios", "configuracion"]);
+      setEditModulos(["inventory", "validacion", "dgii", "carga_masiva", "solicitudes", "consumos", "historial", "usuarios", "configuracion"]);
     } else {
-      setEditModulos(["solicitudes", "consumos", "historial"]);
+      setEditModulos(["validacion", "solicitudes", "consumos", "historial"]);
     }
 
     // Set catalogos (normalizados por ID para que coincidan siempre con las casillas)
@@ -133,9 +134,9 @@ export default function UserPanel({
     }
     // Default modules
     if (newRole === "Administrador") {
-      setNewModulos(["inventory", "dgii", "carga_masiva", "solicitudes", "historial", "usuarios", "configuracion"]);
+      setNewModulos(["inventory", "validacion", "dgii", "carga_masiva", "solicitudes", "historial", "usuarios", "configuracion"]);
     } else {
-      setNewModulos(["solicitudes", "historial"]);
+      setNewModulos(["validacion", "solicitudes", "historial"]);
     }
   };
 
@@ -331,10 +332,12 @@ export default function UserPanel({
                           const mapModNames: Record<string, string> = {
                             dashboard: "Dashboard",
                             inventory: "Suministros",
+                            validacion: "Validación",
                             venta: "Venta",
                             dgii: "DGII Fiscal",
                             carga_masiva: "Carga Masiva",
                             solicitudes: u.rol === "Administrador" ? "Órdenes" : "Solicitudes",
+                            consumos: "Consumos",
                             historial: "Historial",
                             usuarios: "Personal",
                             configuracion: "Configurar"

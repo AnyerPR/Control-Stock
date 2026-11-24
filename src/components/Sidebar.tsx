@@ -17,7 +17,8 @@ import {
   Layers,
   ShoppingCart,
   ShieldCheck,
-  PackageMinus
+  PackageMinus,
+  FileCheck2
 } from "lucide-react";
 import { Usuario, APP_VERSION } from "../types";
 import { APP_ICON_PATH, PWAInstallButton } from "./PWAInstallButton";
@@ -94,6 +95,17 @@ function Sidebar({
       label: "Suministros",
       icon: Package,
       sublabel: "Control de Stock"
+    });
+  }
+
+  if (enabledModules.includes("validacion")) {
+    navItems.push({
+      id: "validacion",
+      label: "Validación",
+      icon: FileCheck2,
+      sublabel: "Auditoría OCR y Control",
+      badge: "OCR & IA",
+      badgeColor: "bg-teal-500/20 text-teal-200 border-teal-400/30"
     });
   }
 

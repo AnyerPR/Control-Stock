@@ -572,6 +572,7 @@ export interface RecepcionECFRecord {
 export const ALL_SYSTEM_MODULES = [
   "dashboard",
   "inventory",
+  "validacion",
   "consumos",
   "venta",
   "dgii",
@@ -585,8 +586,9 @@ export const ALL_SYSTEM_MODULES = [
 export function getEnabledModules(user: Usuario | null | undefined): string[] {
   if (!user) return [];
   if (user.modulos && Array.isArray(user.modulos)) {
-    // Respetar estrictamente los módulos asignados al usuario, garantizando que el Administrador tenga acceso a Cumplimiento DGII y Consumos
+    // Respetar estrictamente los módulos asignados al usuario, garantizando que el Administrador tenga acceso a Cumplimiento DGII, Consumos y Validación
     const assigned = [...user.modulos.filter(Boolean)];
+    if (!assigned.includes("validacion")) assigned.push("validacion");
     if (user.rol === "Administrador") {
       if (!assigned.includes("dgii")) assigned.push("dgii");
       if (!assigned.includes("consumos")) assigned.push("consumos");
@@ -595,11 +597,11 @@ export function getEnabledModules(user: Usuario | null | undefined): string[] {
   }
   if (user.rol === "Administrador") {
     if (user.usuario?.toLowerCase() === "anyer") {
-      return ["inventory", "consumos", "venta", "dgii", "carga_masiva", "solicitudes", "historial", "usuarios", "configuracion"];
+      return ["inventory", "validacion", "consumos", "venta", "dgii", "carga_masiva", "solicitudes", "historial", "usuarios", "configuracion"];
     }
-    return ["inventory", "consumos", "dgii", "carga_masiva", "solicitudes", "historial", "usuarios", "configuracion"];
+    return ["inventory", "validacion", "consumos", "dgii", "carga_masiva", "solicitudes", "historial", "usuarios", "configuracion"];
   }
-  return ["consumos", "solicitudes", "historial"];
+  return ["validacion", "consumos", "solicitudes", "historial"];
 }
 
 export function isModuleAuthorized(user: Usuario | null | undefined, moduleId: string): boolean {
@@ -626,6 +628,9 @@ export function resolveModuleFromSlug(rawSlug: string | null | undefined): strin
     inventario: "inventory",
     suministros: "inventory",
     stock: "inventory",
+    validacion: "validacion",
+    validar: "validacion",
+    verificacion: "validacion",
     consumos: "consumos",
     consumo: "consumos",
     "consumo-departamental": "consumos",
@@ -1045,4 +1050,212 @@ export interface RegistroConsumo {
   estado: "CONFIRMADO" | "CORREGIDO";
   historialCorrecciones?: CorreccionConsumo[];
 }
+
+// ============================================================================
+// TIPOS Y MODELOS DEL MÓDULO «VALIDACIÓN» Y VERIFICACIÓN INTERDEPARTAMENTAL
+// ============================================================================
+
+export type TipoDocumentoValidacion = "PDF" | "Word" | "Excel" | "Imagen";
+
+export type MetodoExtraccionValidacion = "IA_OCR" | "OCR_LOCAL" | "PARSER_ESTRUCTURADO";
+
+export interface DocumentoValidacionItem {
+  id: string;
+  numeroItem: string;
+  nombreDocumento: string;
+  unidadMedidaDocumento: string;
+  cantidadDocumento: number;
+  costoDocumento?: number;
+  fechaVencimientoDocumento?: string;
+  loteDocumento?: string;
+  // Vinculación con inventario
+  productoCodigoSugerido?: string;
+  productoNombreSugerido?: string;
+  productoCodigoSeleccionado: string; // "" si no está vinculado a ningún producto del inventario
+  productoNombreInventario?: string;
+  unidadMedidaInventario?: string;
+  nivelCoincidencia: number; // 0 a 100
+  razonCoincidencia?: string;
+  fueCorregidoManualmente?: boolean;
+  // Métricas de comparación con inventario
+  existenciaSistemaActual: number;
+  existenciaFisicaActual: number;
+  diferenciaCantidad: number; // cantidadDocumento - existenciaSistemaActual
+  diferenciaFisica: number; // cantidadDocumento - existenciaFisicaActual
+  consumoRegistradoTotal: number;
+  consumoMovimientosCount: number;
+  costoInventarioActual?: number;
+  fechaVencimientoInventarioActual?: string;
+  loteIdObjetivo?: string;
+  numeroLoteInventarioActual?: string;
+  tieneDiscrepancia: boolean;
+  observacionItem?: string;
+  propuestaAjusteId?: string;
+}
+
+export interface RegistroValidacionDocumento {
+  id: string;
+  numeroValidacion: string; // Ej: VAL-00001
+  sedeId: string;
+  nombreArchivo: string;
+  tipoDocumento: TipoDocumentoValidacion;
+  metodoExtraccion: MetodoExtraccionValidacion;
+  fecha: string; // YYYY-MM-DD
+  hora: string; // HH:MM
+  timestamp: number;
+  catalogId: string;
+  catalogNombre?: string;
+  usuarioValidador: string;
+  usuarioValidadorId?: string;
+  departamentoValidador: string;
+  rolValidador?: string;
+  totalItems: number;
+  itemsCoincidentes: number;
+  itemsConDiscrepancia: number;
+  itemsSinVincular: number;
+  items: DocumentoValidacionItem[];
+  observacionesGenerales?: string;
+  propuestasGeneradasIds?: string[];
+}
+
+export type EstadoPropuestaAjuste = "PENDIENTE_AUTORIZACION" | "APROBADO" | "RECHAZADO";
+
+export interface PropuestaAjusteInventario {
+  id: string;
+  codigoPropuesta: string; // Ej: AJU-00001
+  sedeId: string;
+  origen: "VALIDACION_DOCUMENTAL" | "VERIFICACION_FISICA";
+  origenReferenciaId: string;
+  origenReferenciaCodigo: string; // Ej: VAL-00001 o VER-00001
+  nombreDocumentoOrigen?: string;
+  catalogId: string;
+  productoCodigo: string;
+  // Valores actuales al momento de proponer
+  productoNombreActual: string;
+  unidadMedidaActual: string;
+  loteId?: string;
+  numeroLoteActual: string;
+  existenciaSistemaActual: number;
+  existenciaFisicaActual: number;
+  costoActual: number;
+  fechaVencimientoActual: string;
+  // Valores propuestos
+  productoNombrePropuesto: string;
+  unidadMedidaPropuesta: string;
+  numeroLotePropuesto: string;
+  existenciaSistemaPropuesta: number;
+  existenciaFisicaPropuesta: number;
+  costoPropuesto: number;
+  fechaVencimientoPropuesta: string;
+  // Resumen de diferencia y justificación
+  diferenciaCantidadSistema: number;
+  diferenciaCantidadFisica: number;
+  motivoCambio: string;
+  observacionesValidacion?: string;
+  // Quién realizó la validación / propuesta
+  validadoPorNombre: string;
+  validadoPorUsuario: string;
+  validadoPorDepartamento: string;
+  rolValidador: string;
+  fechaValidacion: string; // YYYY-MM-DD
+  horaValidacion: string; // HH:MM
+  timestampValidacion: number;
+  // Estado y datos de autorización
+  estado: EstadoPropuestaAjuste;
+  autorizadoPorNombre?: string;
+  autorizadoPorUsuario?: string;
+  rolAutorizador?: string;
+  fechaAutorizacion?: string; // YYYY-MM-DD
+  horaAutorizacion?: string; // HH:MM
+  timestampAutorizacion?: number;
+  observacionesAutorizacion?: string;
+  movimientoGeneradoId?: string;
+}
+
+export const RESPUESTAS_RAPIDAS_VERIFICACION = [
+  "Código de producto verificado.",
+  "Existencias físicas coinciden con el sistema.",
+  "Diferencia entre existencia física y registrada.",
+  "Información del producto incorrecta.",
+  "Requiere actualización de datos."
+] as const;
+
+export type EstadoSolicitudVerificacion =
+  | "PENDIENTE"
+  | "CONFIRMADA_COINCIDE"
+  | "CONFIRMADA_CON_DIFERENCIA";
+
+export interface SolicitudVerificacionProducto {
+  id: string;
+  codigoSolicitud: string; // Ej: VER-00001
+  sedeId: string;
+  tipo: "Solicitud de verificación";
+  catalogId: string;
+  productoCodigo: string;
+  productoNombre: string;
+  unidadMedida: string;
+  existenciaSistemaAlSolicitar: number;
+  existenciaFisicaAlSolicitar: number;
+  costoUnitarioAlSolicitar: number;
+  proximoVencimientoAlSolicitar: string;
+  ubicacionFisica?: string;
+  lotesSnapshot: Array<{
+    id: string;
+    numeroLote: string;
+    cantidad: number;
+    cantidadF: number;
+    fechaVencimiento: string;
+    precio: number;
+    loteFisico?: string;
+  }>;
+  mensajeSolicitud: string;
+  departamentoOrigen: string;
+  usuarioSolicitanteNombre: string;
+  usuarioSolicitanteId: string;
+  rolSolicitante: string;
+  fechaSolicitud: string; // YYYY-MM-DD
+  horaSolicitud: string; // HH:MM
+  timestampSolicitud: number;
+  departamentoDestino: string; // Por defecto "Almacén y Suministros"
+  estado: EstadoSolicitudVerificacion;
+  // Resultado de la comprobación física
+  respuestasRapidasSeleccionadas?: string[];
+  observacionesVerificacion?: string;
+  existenciaFisicaComprobada?: number;
+  detectoDiferencias?: boolean;
+  verificadoPorNombre?: string;
+  verificadoPorUsuario?: string;
+  verificadoPorDepartamento?: string;
+  rolVerificador?: string;
+  fechaVerificacion?: string;
+  horaVerificacion?: string;
+  timestampVerificacion?: number;
+  propuestaAjusteId?: string;
+  propuestaAjusteCodigo?: string;
+  chatMensajeId?: string;
+}
+
+export interface HistorialOperacionValidacion {
+  id: string;
+  sedeId: string;
+  tipoOperacion:
+    | "VALIDACION_DOCUMENTO"
+    | "SOLICITUD_VERIFICACION"
+    | "CONFIRMACION_VERIFICACION"
+    | "PROPUESTA_AJUSTE_CREADA"
+    | "AJUSTE_AUTORIZADO"
+    | "AJUSTE_RECHAZADO";
+  referenciaCodigo: string;
+  productoCodigo?: string;
+  productoNombre?: string;
+  descripcion: string;
+  usuarioNombre: string;
+  usuarioRol: string;
+  departamento: string;
+  fecha: string; // YYYY-MM-DD
+  hora: string; // HH:MM
+  timestamp: number;
+  detalles?: string;
+}
+
 

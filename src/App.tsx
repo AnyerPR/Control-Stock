@@ -44,7 +44,8 @@ import ConfiguracionPanel from "./components/ConfiguracionPanel";
 import VentaPanel from "./components/VentaPanel";
 import FiscalDGIIPanel from "./components/FiscalDGIIPanel";
 import DashboardPanel from "./components/DashboardPanel";
-import ChatLateral from "./components/ChatLateral";
+import ChatLateral, { triggerOpenChatForProductValidation } from "./components/ChatLateral";
+import ValidacionPanel from "./components/ValidacionPanel";
 import ProductPhotosEditor from "./components/ProductPhotosEditor";
 import ImageLightbox from "./components/ImageLightbox";
 import Sidebar from "./components/Sidebar";
@@ -108,7 +109,8 @@ import {
   Clock,
   AlertCircle,
   Receipt,
-  Menu
+  Menu,
+  ShieldCheck
 } from "lucide-react";
 
 // Filtros del catálogo
@@ -3454,6 +3456,18 @@ export default function App() {
               />
             )}
 
+            {activeTab === "validacion" && enabledModules.includes("validacion") && (
+              <ValidacionPanel
+                products={products}
+                currentUser={currentUser}
+                activeCatalogId={activeCatalogId}
+                catalogos={catalogos}
+                departamentos={departamentos}
+                onProductsUpdated={(updated) => setProducts(updated)}
+                showToast={showToast}
+              />
+            )}
+
             {activeTab === "carga_masiva" && enabledModules.includes("carga_masiva") && (
               <CargaMasiva
                 products={products}
@@ -3815,6 +3829,23 @@ export default function App() {
                                 )}
                               </button>
 
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  triggerOpenChatForProductValidation(
+                                    p,
+                                    coords !== "No asignado" ? coords : undefined
+                                  );
+                                  playSound("open");
+                                }}
+                                className="inline-flex items-center gap-1 text-[11px] font-extrabold px-3 py-1 rounded-xl bg-teal-50 text-teal-800 border border-teal-300 hover:bg-teal-600 hover:text-white hover:border-teal-600 transition cursor-pointer shadow-2xs"
+                                title="Solicitar verificación física y validación por Chat Interno"
+                              >
+                                <ShieldCheck className="w-3.5 h-3.5" />
+                                <span>Validar</span>
+                              </button>
+
                               {stats.hasExpired && (
                                 <span className="inline-flex items-center gap-1 text-[11px] font-extrabold px-3 py-1 rounded-xl bg-rose-50 text-rose-700 border border-rose-200 animate-pulse">
                                   <TriangleAlert className="w-3.5 h-3.5" />
@@ -3935,16 +3966,38 @@ export default function App() {
                   >
                     <X className="w-5 h-5" />
                   </button>
-                  <span className="font-mono text-xs font-extrabold text-teal-800 bg-teal-50 px-3.5 py-1.5 rounded-xl border border-teal-200 uppercase tracking-wider truncate max-w-[65vw]">
+                  <span className="font-mono text-xs font-extrabold text-teal-800 bg-teal-50 px-3.5 py-1.5 rounded-xl border border-teal-200 uppercase tracking-wider truncate max-w-[45vw]">
                     Suministro: {selectedProductCode}
                   </span>
-                  <button
-                    onClick={handleDeleteProduct}
-                    className="p-2 text-rose-500 hover:text-rose-700 hover:bg-rose-50 rounded-xl active:scale-90 transition cursor-pointer"
-                    title="Eliminar suministro"
-                  >
-                    <Trash2 className="w-5 h-5" />
-                  </button>
+                  <div className="flex items-center gap-1.5">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const prodObj = products.find((pr) => pr.codigo === selectedProductCode);
+                        if (prodObj) {
+                          const coordStr = getProductCoordinates(prodObj.codigo);
+                          setSelectedProductCode(null);
+                          triggerOpenChatForProductValidation(
+                            prodObj,
+                            coordStr !== "No asignado" ? coordStr : undefined
+                          );
+                          playSound("open");
+                        }
+                      }}
+                      className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-teal-600 hover:bg-teal-700 text-white text-xs font-extrabold transition cursor-pointer shadow-2xs"
+                      title="Solicitar verificación física y validación por Chat Interno"
+                    >
+                      <ShieldCheck className="w-3.5 h-3.5" />
+                      <span>Validar</span>
+                    </button>
+                    <button
+                      onClick={handleDeleteProduct}
+                      className="p-2 text-rose-500 hover:text-rose-700 hover:bg-rose-50 rounded-xl active:scale-90 transition cursor-pointer"
+                      title="Eliminar suministro"
+                    >
+                      <Trash2 className="w-5 h-5" />
+                    </button>
+                  </div>
                 </div>
 
                 <div className="flex-1 overflow-y-auto px-4 sm:px-6 py-4 sm:py-6 space-y-5 sm:space-y-6">
@@ -4826,7 +4879,14 @@ export default function App() {
           />
 
           {/* Global Lateral Chat drawer */}
-          {!showProductAdd && <ChatLateral currentUser={currentUser} />}
+          {!showProductAdd && (
+            <ChatLateral
+              currentUser={currentUser}
+              departamentos={departamentos}
+              products={products}
+              showToast={showToast}
+            />
+          )}
           </div>
         </div>
       )}

@@ -354,6 +354,22 @@ service cloud.firestore {
       allow read, write: if belongsToPrincipal();
     }
 
+    match /validaciones_documentos/{docId} {
+      allow read, write: if belongsToPrincipal();
+    }
+
+    match /solicitudes_verificacion/{docId} {
+      allow read, write: if belongsToPrincipal();
+    }
+
+    match /propuestas_ajuste_inventario/{docId} {
+      allow read, write: if belongsToPrincipal();
+    }
+
+    match /historial_validacion/{docId} {
+      allow read, write: if belongsToPrincipal();
+    }
+
     // 2. Multi-Farmacia (Datos aislados por cliente comercial en /farmacias/{farmaciaId})
     match /farmacias/{farmaciaId} {
       allow get: if true;
