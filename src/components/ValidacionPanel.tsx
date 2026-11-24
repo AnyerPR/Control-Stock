@@ -18,6 +18,7 @@ import {
 import {
   buildValidationComparisonItems,
   extractItemsFromValidationDocument,
+  parseFreeTextLinesToItems,
   recalculateValidationItemWithProduct,
   RawExtractedDocItem
 } from "../utils/validacionEngine";
@@ -116,6 +117,8 @@ export default function ValidacionPanel({
   const [currentExtractionMethod, setCurrentExtractionMethod] =
     useState<MetodoExtraccionValidacion>("PARSER_ESTRUCTURADO");
   const [previewImageUrl, setPreviewImageUrl] = useState<string | null>(null);
+  const [rawOcrText, setRawOcrText] = useState<string>("");
+  const [showRawOcrEditor, setShowRawOcrEditor] = useState<boolean>(false);
   const [comparisonItems, setComparisonItems] = useState<DocumentoValidacionItem[]>([]);
   const [observacionesGeneralesDoc, setObservacionesGeneralesDoc] = useState("");
   const [validationSavedCode, setValidationSavedCode] = useState<string | null>(null);
@@ -216,15 +219,13 @@ export default function ValidacionPanel({
     return () => unsub();
   }, [currentUser.farmaciaId]);
 
-  // Procesar archivo subido (PDF, Word, Excel o Imagen)
-  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-
+  const processFileObject = async (file: File) => {
     setIsExtracting(true);
     setExtractionStatus("Iniciando lectura y análisis del documento...");
     setValidationSavedCode(null);
     setPreviewImageUrl(null);
+    setRawOcrText("");
+    setShowRawOcrEditor(false);
     playSound("action");
 
     try {
@@ -238,9 +239,11 @@ export default function ValidacionPanel({
       if (output.previewImageUrl) {
         setPreviewImageUrl(output.previewImageUrl);
       }
+      if (output.textoCrudo) {
+        setRawOcrText(output.textoCrudo);
+      }
 
       if (output.rawItems.length === 0) {
-        // Si la imagen o documento no tenía filas estructuradas automáticas, abrir una fila editable para transcripción asistida
         const fallbackRow: RawExtractedDocItem = {
           numeroItem: "1",
           nombreProducto: "",
@@ -254,8 +257,11 @@ export default function ValidacionPanel({
           consumos
         );
         setComparisonItems(built);
+        if (output.textoCrudo) {
+          setShowRawOcrEditor(true);
+        }
         showToast(
-          "Documento cargado. Puedes completar o ajustar los ítems extraídos manualmente antes de comparar."
+          "Documento leído. Puedes revisar el texto OCR detectado o completar los ítems abajo."
         );
       } else {
         const built = buildValidationComparisonItems(
@@ -273,12 +279,42 @@ export default function ValidacionPanel({
     } catch (err) {
       console.error("Error procesando documento para validación:", err);
       playSound("negative");
-      showToast("Error al procesar el documento. Verifique el formato del archivo.");
+      showToast("No se pudo leer automáticamente el archivo. Puedes ingresar o pegar el texto manualmente.");
     } finally {
       setIsExtracting(false);
       setExtractionStatus("");
-      if (e.target) e.target.value = "";
     }
+  };
+
+  // Procesar archivo subido (PDF, Word, Excel o Imagen)
+  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    await processFileObject(file);
+    if (e.target) e.target.value = "";
+  };
+
+  // Re-procesar texto OCR editado o pegado por el usuario
+  const handleReparseRawOcrText = () => {
+    const lines = rawOcrText
+      .split(/\r?\n/)
+      .map((l) => l.trim())
+      .filter(Boolean);
+    const parsed = parseFreeTextLinesToItems(lines);
+    if (parsed.length === 0) {
+      playSound("negative");
+      showToast("No se detectaron renglones con producto y cantidad en el texto.");
+      return;
+    }
+    const built = buildValidationComparisonItems(
+      parsed,
+      catalogProducts,
+      movimientos,
+      consumos
+    );
+    setComparisonItems(built);
+    playSound("positive");
+    showToast(`Se actualizaron ${built.length} ítems a partir del texto del documento.`);
   };
 
   // Cargar documento demostrativo con ejemplos de similitud inteligente (incluyendo Paracetamol 500 mg)
@@ -1067,22 +1103,62 @@ export default function ValidacionPanel({
                 </div>
               </div>
 
-              {/* Si se subió una fotografía, mostrar miniatura expandible */}
-              {previewImageUrl && (
-                <div className="bg-slate-50 border border-slate-200 rounded-2xl p-3.5 flex flex-col sm:flex-row items-center gap-4">
-                  <img
-                    src={previewImageUrl}
-                    alt="Documento escaneado"
-                    className="h-28 w-auto rounded-xl border border-slate-300 object-contain bg-white p-1"
-                  />
-                  <div className="space-y-1 text-xs">
-                    <span className="font-extrabold text-slate-900 block">
-                      Vista Previa de Imagen Escaneada con OCR
-                    </span>
-                    <p className="text-slate-600 font-medium">
-                      Puedes editar cualquier celda de la tabla inferior si deseas refinar algún carácter leído de la fotografía o cambiar manualmente el código del producto vinculado.
-                    </p>
+              {/* Si se subió una fotografía o se extrajo texto OCR, mostrar vista previa y editor opcional de texto OCR */}
+              {(previewImageUrl || rawOcrText) && (
+                <div className="bg-slate-50 border border-slate-200 rounded-2xl p-3.5 space-y-3">
+                  <div className="flex flex-col sm:flex-row items-center justify-between gap-4">
+                    <div className="flex flex-col sm:flex-row items-center gap-4">
+                      {previewImageUrl && (
+                        <img
+                          src={previewImageUrl}
+                          alt="Documento escaneado"
+                          className="h-28 w-auto rounded-xl border border-slate-300 object-contain bg-white p-1 shrink-0"
+                        />
+                      )}
+                      <div className="space-y-1 text-xs">
+                        <span className="font-extrabold text-slate-900 block">
+                          Documento Escaneado con OCR ({comparisonItems.length} renglones detectados)
+                        </span>
+                        <p className="text-slate-600 font-medium">
+                          Puedes editar cualquier celda de la tabla inferior directamente, cambiar el código del producto vinculado o revisar el texto crudo leído por el OCR.
+                        </p>
+                      </div>
+                    </div>
+
+                    {rawOcrText && (
+                      <button
+                        type="button"
+                        onClick={() => setShowRawOcrEditor((prev) => !prev)}
+                        className="px-3.5 py-2 rounded-xl bg-white hover:bg-slate-100 text-slate-800 border border-slate-300 text-xs font-extrabold transition cursor-pointer shrink-0"
+                      >
+                        {showRawOcrEditor ? "Ocultar Texto OCR" : "Ver / Editar Texto OCR"}
+                      </button>
+                    )}
                   </div>
+
+                  {showRawOcrEditor && (
+                    <div className="pt-2 border-t border-slate-200 space-y-2">
+                      <label className="block text-[11px] font-extrabold uppercase text-slate-600">
+                        Texto leído del documento (puedes corregir o pegar líneas y pulsar &laquo;Re-analizar Texto&raquo;):
+                      </label>
+                      <textarea
+                        rows={6}
+                        value={rawOcrText}
+                        onChange={(e) => setRawOcrText(e.target.value)}
+                        className="w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-xs font-mono text-slate-800 outline-none focus:ring-2 focus:ring-teal-500/30"
+                      />
+                      <div className="flex justify-end">
+                        <button
+                          type="button"
+                          onClick={handleReparseRawOcrText}
+                          className="px-4 py-2 rounded-xl bg-teal-700 hover:bg-teal-800 text-white text-xs font-extrabold transition cursor-pointer flex items-center gap-1.5"
+                        >
+                          <RefreshCw className="w-3.5 h-3.5" />
+                          <span>Re-analizar Texto OCR</span>
+                        </button>
+                      </div>
+                    </div>
+                  )}
                 </div>
               )}
 
