@@ -28,6 +28,7 @@ import {
   APP_VERSION
 } from "./types";
 import { playSound, setMuteState } from "./utils/audio";
+import { loadDraft, saveDraft } from "./utils/draftPersistence";
 import { hashPassword } from "./components/Login";
 
 // Componentes modulares
@@ -136,7 +137,59 @@ export default function App() {
   const [departamentos, setDepartamentos] = useState<Departamento[]>([]);
   const [catalogos, setCatalogos] = useState<any[]>([]);
   const [conceptos, setConceptos] = useState<ConceptoFactura[]>(DEFAULT_CONCEPTOS_FACTURA);
-  const [activeCatalogId, setActiveCatalogId] = useState<string>("default-cat");
+  const [activeFarmaciaId, setActiveFarmaciaIdState] = useState<string>(() => getActiveFarmaciaId());
+  const appWorkDraftKey = `app_work_draft_${activeFarmaciaId}`;
+  const initialAppWorkDraft = useMemo(
+    () =>
+      loadDraft(appWorkDraftKey, {
+        activeTab: "inventory",
+        activeCatalogId: "default-cat",
+        catalogFilter: "todos",
+        searchQuery: "",
+        showUnverifiedOnly: false,
+        showOrder: false,
+        orderItems: [] as any[],
+        orderSelectedProduct: null as string | null,
+        orderSelectedLot: null as string | null,
+        orderSelectedQuantity: null as number | null,
+        orderProductSearch: "",
+        orderCatalogId: "",
+        showLotAdd: false,
+        newLotNum: "",
+        newLotQty: "",
+        newLotQtyF: "",
+        newLotLocation: "",
+        newLotExpDate: "",
+        newLotPhysExpDate: "",
+        newLotPrice: "",
+        showProductAdd: false,
+        invoiceNum: "",
+        invoiceDate: new Date().toISOString().slice(0, 10),
+        invoiceSupplier: "",
+        invoiceIncluirEn606: false,
+        invoiceRncSuplidor: "",
+        invoiceNcfCompra: "",
+        invoiceItbisFacturado: "",
+        invoiceTipoBienes606: "09",
+        invoiceFormaPago606: "04" as FormaPagoDGII,
+        pendingEntryItems: [] as any[],
+        newProdCode: "",
+        newProdName: "",
+        newProdDesc: "",
+        newProdLotNum: "",
+        newProdLotQty: "",
+        newProdLotQtyF: "",
+        newProdLotLocation: "",
+        newProdLotExpDate: "",
+        newProdLotPhysExpDate: "",
+        newProdLotPrice: ""
+      }),
+    [appWorkDraftKey]
+  );
+
+  const [activeCatalogId, setActiveCatalogId] = useState<string>(
+    initialAppWorkDraft.activeCatalogId || "default-cat"
+  );
   const [currentUser, setCurrentUser] = useState<Usuario | null>(() => {
     const saved = localStorage.getItem("current_user");
     if (saved) {
@@ -144,7 +197,6 @@ export default function App() {
     }
     return null;
   });
-  const [activeFarmaciaId, setActiveFarmaciaIdState] = useState<string>(() => getActiveFarmaciaId());
   const [farmaciaMeta, setFarmaciaMeta] = useState<{ nombre: string; subtitulo: string; logoUrl?: string }>(() => {
     let savedInstLogo = "";
     try {
@@ -173,15 +225,23 @@ export default function App() {
   const [authReady, setAuthReady] = useState(false);
   const [isFirebaseAuthed, setIsFirebaseAuthed] = useState(false);
 
-  const [activeTab, setActiveTab] = useState<string>("inventory");
+  const [activeTab, setActiveTab] = useState<string>(
+    initialAppWorkDraft.activeTab || "inventory"
+  );
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState<boolean>(() => {
     if (typeof window === "undefined") return false;
     return localStorage.getItem("sidebar_collapsed") === "true";
   });
   const [isMobileSidebarOpen, setIsMobileSidebarOpen] = useState(false);
-  const [catalogFilter, setCatalogFilter] = useState("todos");
-  const [searchQuery, setSearchTerm] = useState("");
-  const [showUnverifiedOnly, setShowUnverifiedOnly] = useState(false);
+  const [catalogFilter, setCatalogFilter] = useState(
+    initialAppWorkDraft.catalogFilter || "todos"
+  );
+  const [searchQuery, setSearchTerm] = useState(
+    initialAppWorkDraft.searchQuery || ""
+  );
+  const [showUnverifiedOnly, setShowUnverifiedOnly] = useState(
+    Boolean(initialAppWorkDraft.showUnverifiedOnly)
+  );
   const [inventoryVisibleCount, setInventoryVisibleCount] = useState<number>(36);
 
   // Edit / Details Modal State
@@ -197,13 +257,25 @@ export default function App() {
   const [coincidenLotesMap, setCoincidenLotesMap] = useState<Record<string, boolean>>({});
 
   // Order / Pedido State
-  const [showOrder, setShowOrder] = useState(false);
-  const [orderItems, setOrderItems] = useState<any[]>([]);
-  const [orderSelectedProduct, setOrderSelectedProduct] = useState<string | null>(null);
-  const [orderSelectedLot, setOrderSelectedLot] = useState<string | null>(null);
-  const [orderSelectedQuantity, setOrderSelectedQuantity] = useState<number | null>(null);
-  const [orderProductSearch, setOrderProductSearch] = useState("");
-  const [orderCatalogId, setOrderCatalogId] = useState<string>("");
+  const [showOrder, setShowOrder] = useState(Boolean(initialAppWorkDraft.showOrder));
+  const [orderItems, setOrderItems] = useState<any[]>(() =>
+    Array.isArray(initialAppWorkDraft.orderItems) ? initialAppWorkDraft.orderItems : []
+  );
+  const [orderSelectedProduct, setOrderSelectedProduct] = useState<string | null>(
+    initialAppWorkDraft.orderSelectedProduct || null
+  );
+  const [orderSelectedLot, setOrderSelectedLot] = useState<string | null>(
+    initialAppWorkDraft.orderSelectedLot || null
+  );
+  const [orderSelectedQuantity, setOrderSelectedQuantity] = useState<number | null>(
+    initialAppWorkDraft.orderSelectedQuantity ?? null
+  );
+  const [orderProductSearch, setOrderProductSearch] = useState(
+    initialAppWorkDraft.orderProductSearch || ""
+  );
+  const [orderCatalogId, setOrderCatalogId] = useState<string>(
+    initialAppWorkDraft.orderCatalogId || ""
+  );
 
   // Blocks State
   const [showBlocks, setShowBlocks] = useState(false);
@@ -214,26 +286,46 @@ export default function App() {
   const [blockProductSearch, setBlockProductSearch] = useState("");
 
   // Lot Create Form inside Details
-  const [showLotAdd, setShowLotAdd] = useState(false);
-  const [newLotNum, setNewLotNum] = useState("");
-  const [newLotQty, setNewLotQty] = useState("");
-  const [newLotQtyF, setNewLotQtyF] = useState("");
-  const [newLotLocation, setNewLotLocation] = useState("");
-  const [newLotExpDate, setNewLotExpDate] = useState("");
-  const [newLotPhysExpDate, setNewLotPhysExpDate] = useState("");
-  const [newLotPrice, setNewLotPrice] = useState("");
+  const [showLotAdd, setShowLotAdd] = useState(Boolean(initialAppWorkDraft.showLotAdd));
+  const [newLotNum, setNewLotNum] = useState(initialAppWorkDraft.newLotNum || "");
+  const [newLotQty, setNewLotQty] = useState(initialAppWorkDraft.newLotQty || "");
+  const [newLotQtyF, setNewLotQtyF] = useState(initialAppWorkDraft.newLotQtyF || "");
+  const [newLotLocation, setNewLotLocation] = useState(initialAppWorkDraft.newLotLocation || "");
+  const [newLotExpDate, setNewLotExpDate] = useState(initialAppWorkDraft.newLotExpDate || "");
+  const [newLotPhysExpDate, setNewLotPhysExpDate] = useState(
+    initialAppWorkDraft.newLotPhysExpDate || ""
+  );
+  const [newLotPrice, setNewLotPrice] = useState(initialAppWorkDraft.newLotPrice || "");
 
   // Product / Invoice Entry Form (Imagen 3: Registro de Entrada de Productos)
-  const [showProductAdd, setShowProductAdd] = useState(false);
-  const [invoiceNum, setInvoiceNum] = useState("");
-  const [invoiceDate, setInvoiceDate] = useState(() => new Date().toISOString().slice(0, 10));
-  const [invoiceSupplier, setInvoiceSupplier] = useState("");
-  const [invoiceIncluirEn606, setInvoiceIncluirEn606] = useState(false);
-  const [invoiceRncSuplidor, setInvoiceRncSuplidor] = useState("");
-  const [invoiceNcfCompra, setInvoiceNcfCompra] = useState("");
-  const [invoiceItbisFacturado, setInvoiceItbisFacturado] = useState("");
-  const [invoiceTipoBienes606, setInvoiceTipoBienes606] = useState("09");
-  const [invoiceFormaPago606, setInvoiceFormaPago606] = useState<FormaPagoDGII>("04");
+  const [showProductAdd, setShowProductAdd] = useState(
+    Boolean(initialAppWorkDraft.showProductAdd)
+  );
+  const [invoiceNum, setInvoiceNum] = useState(initialAppWorkDraft.invoiceNum || "");
+  const [invoiceDate, setInvoiceDate] = useState(
+    () => initialAppWorkDraft.invoiceDate || new Date().toISOString().slice(0, 10)
+  );
+  const [invoiceSupplier, setInvoiceSupplier] = useState(
+    initialAppWorkDraft.invoiceSupplier || ""
+  );
+  const [invoiceIncluirEn606, setInvoiceIncluirEn606] = useState(
+    Boolean(initialAppWorkDraft.invoiceIncluirEn606)
+  );
+  const [invoiceRncSuplidor, setInvoiceRncSuplidor] = useState(
+    initialAppWorkDraft.invoiceRncSuplidor || ""
+  );
+  const [invoiceNcfCompra, setInvoiceNcfCompra] = useState(
+    initialAppWorkDraft.invoiceNcfCompra || ""
+  );
+  const [invoiceItbisFacturado, setInvoiceItbisFacturado] = useState(
+    initialAppWorkDraft.invoiceItbisFacturado || ""
+  );
+  const [invoiceTipoBienes606, setInvoiceTipoBienes606] = useState(
+    initialAppWorkDraft.invoiceTipoBienes606 || "09"
+  );
+  const [invoiceFormaPago606, setInvoiceFormaPago606] = useState<FormaPagoDGII>(
+    (initialAppWorkDraft.invoiceFormaPago606 as FormaPagoDGII) || "04"
+  );
   const [pendingEntryItems, setPendingEntryItems] = useState<
     Array<{
       tempId: string;
@@ -250,23 +342,137 @@ export default function App() {
       imagen?: string;
       imagenes?: string[];
     }>
-  >([]);
+  >(() =>
+    Array.isArray(initialAppWorkDraft.pendingEntryItems)
+      ? initialAppWorkDraft.pendingEntryItems
+      : []
+  );
   const [confirmingEntry, setConfirmingEntry] = useState(false);
 
-  const [newProdCode, setNewProdCode] = useState("");
-  const [newProdName, setNewProdName] = useState("");
-  const [newProdDesc, setNewProdDesc] = useState("");
-  const [newProdLotNum, setNewProdLotNum] = useState("");
-  const [newProdLotQty, setNewProdLotQty] = useState("");
-  const [newProdLotQtyF, setNewProdLotQtyF] = useState("");
-  const [newProdLotLocation, setNewProdLotLocation] = useState("");
-  const [newProdLotExpDate, setNewProdLotExpDate] = useState("");
-  const [newProdLotPhysExpDate, setNewProdLotPhysExpDate] = useState("");
-  const [newProdLotPrice, setNewProdLotPrice] = useState("");
+  const [newProdCode, setNewProdCode] = useState(initialAppWorkDraft.newProdCode || "");
+  const [newProdName, setNewProdName] = useState(initialAppWorkDraft.newProdName || "");
+  const [newProdDesc, setNewProdDesc] = useState(initialAppWorkDraft.newProdDesc || "");
+  const [newProdLotNum, setNewProdLotNum] = useState(initialAppWorkDraft.newProdLotNum || "");
+  const [newProdLotQty, setNewProdLotQty] = useState(initialAppWorkDraft.newProdLotQty || "");
+  const [newProdLotQtyF, setNewProdLotQtyF] = useState(initialAppWorkDraft.newProdLotQtyF || "");
+  const [newProdLotLocation, setNewProdLotLocation] = useState(
+    initialAppWorkDraft.newProdLotLocation || ""
+  );
+  const [newProdLotExpDate, setNewProdLotExpDate] = useState(
+    initialAppWorkDraft.newProdLotExpDate || ""
+  );
+  const [newProdLotPhysExpDate, setNewProdLotPhysExpDate] = useState(
+    initialAppWorkDraft.newProdLotPhysExpDate || ""
+  );
+  const [newProdLotPrice, setNewProdLotPrice] = useState(initialAppWorkDraft.newProdLotPrice || "");
   const [newProdPhotos, setNewProdPhotos] = useState<string[]>([]);
   const [newProdPhotoProductCode, setNewProdPhotoProductCode] = useState<string | null>(null);
   const [newProdPhoto, setNewProdPhoto] = useState("");
   const [pendingNewProdPhoto, setPendingNewProdPhoto] = useState<string | null>(null);
+
+  // Guardar borrador automático de módulo activo, entrada de productos/facturas, pedido y lotes
+  useEffect(() => {
+    const safePendingEntryItems = (pendingEntryItems || []).map((item) => ({
+      ...item,
+      imagen: item.imagen && item.imagen.length < 150000 ? item.imagen : undefined,
+      imagenes: undefined
+    }));
+    const currentDraft = {
+      activeTab,
+      activeCatalogId,
+      catalogFilter,
+      searchQuery,
+      showUnverifiedOnly,
+      showOrder,
+      orderItems,
+      orderSelectedProduct,
+      orderSelectedLot,
+      orderSelectedQuantity,
+      orderProductSearch,
+      orderCatalogId,
+      showLotAdd,
+      newLotNum,
+      newLotQty,
+      newLotQtyF,
+      newLotLocation,
+      newLotExpDate,
+      newLotPhysExpDate,
+      newLotPrice,
+      showProductAdd,
+      invoiceNum,
+      invoiceDate,
+      invoiceSupplier,
+      invoiceIncluirEn606,
+      invoiceRncSuplidor,
+      invoiceNcfCompra,
+      invoiceItbisFacturado,
+      invoiceTipoBienes606,
+      invoiceFormaPago606,
+      pendingEntryItems: safePendingEntryItems,
+      newProdCode,
+      newProdName,
+      newProdDesc,
+      newProdLotNum,
+      newProdLotQty,
+      newProdLotQtyF,
+      newProdLotLocation,
+      newProdLotExpDate,
+      newProdLotPhysExpDate,
+      newProdLotPrice
+    };
+    saveDraft(appWorkDraftKey, currentDraft);
+
+    const flushDraft = () => saveDraft(appWorkDraftKey, currentDraft);
+    window.addEventListener("pagehide", flushDraft);
+    document.addEventListener("visibilitychange", flushDraft);
+    return () => {
+      window.removeEventListener("pagehide", flushDraft);
+      document.removeEventListener("visibilitychange", flushDraft);
+    };
+  }, [
+    appWorkDraftKey,
+    activeTab,
+    activeCatalogId,
+    catalogFilter,
+    searchQuery,
+    showUnverifiedOnly,
+    showOrder,
+    orderItems,
+    orderSelectedProduct,
+    orderSelectedLot,
+    orderSelectedQuantity,
+    orderProductSearch,
+    orderCatalogId,
+    showLotAdd,
+    newLotNum,
+    newLotQty,
+    newLotQtyF,
+    newLotLocation,
+    newLotExpDate,
+    newLotPhysExpDate,
+    newLotPrice,
+    showProductAdd,
+    invoiceNum,
+    invoiceDate,
+    invoiceSupplier,
+    invoiceIncluirEn606,
+    invoiceRncSuplidor,
+    invoiceNcfCompra,
+    invoiceItbisFacturado,
+    invoiceTipoBienes606,
+    invoiceFormaPago606,
+    pendingEntryItems,
+    newProdCode,
+    newProdName,
+    newProdDesc,
+    newProdLotNum,
+    newProdLotQty,
+    newProdLotQtyF,
+    newProdLotLocation,
+    newProdLotExpDate,
+    newProdLotPhysExpDate,
+    newProdLotPrice
+  ]);
 
   // Global Config (Cierre de mes & Colores)
   const [activePeriod, setActivePeriod] = useState<string>("Julio 2026");

@@ -45,6 +45,7 @@ import {
   validateRncOrCedulaDGII
 } from "../utils/dgiiUtils";
 import { playSound } from "../utils/audio";
+import { loadDraft, saveDraft } from "../utils/draftPersistence";
 import { logSystemEvent } from "../utils/chatHelper";
 import {
   ShoppingBag,
@@ -138,8 +139,34 @@ export default function VentaPanel({
     return getActiveInstitucionInfo();
   }, [institucion]);
 
+  const ventaDraftKey = `venta_form_draft_${currentUser?.farmaciaId || "default"}`;
+  const initialVentaDraft = useMemo(
+    () =>
+      loadDraft(ventaDraftKey, {
+        subTab: "nueva" as "nueva" | "historial",
+        rncCliente: "",
+        formaPagoDGII: "01" as FormaPagoDGII,
+        fechaFactura: new Date().toISOString().slice(0, 10),
+        conceptoSeleccionado: activeConceptos[0]?.nombre || "Venta",
+        clienteNombre: "",
+        clienteContacto: "",
+        observaciones: "",
+        aplicaItbisFactura: false,
+        aplicaItbisProducto: false,
+        tasaItbisSeleccionada: 18 as 18 | 16 | 0,
+        descuentoPorcentajeInput: "0",
+        productSearch: "",
+        selectedProductCode: "",
+        selectedLoteId: "",
+        cantidadInput: "1",
+        precioUnitarioInput: "",
+        itemsFactura: [] as VentaItem[]
+      }),
+    [ventaDraftKey]
+  );
+
   // Sub-tabs inside Venta module: "nueva" (Emitir Factura) | "historial" (Facturas Emitidas)
-  const [subTab, setSubTab] = useState<"nueva" | "historial">("nueva");
+  const [subTab, setSubTab] = useState<"nueva" | "historial">(initialVentaDraft.subTab || "nueva");
 
   // DGII Fiscal Configuration state
   const [dgiiConfig, setDgiiConfig] = useState<ConfiguracionFiscalDGII>(() =>
@@ -150,8 +177,10 @@ export default function VentaPanel({
   );
   const [tipoComprobante, setTipoComprobante] = useState<TipoComprobanteDGII>("E32");
   const [ncfInput, setNcfInput] = useState<string>("E320000000001");
-  const [rncCliente, setRncCliente] = useState<string>("");
-  const [formaPagoDGII, setFormaPagoDGII] = useState<FormaPagoDGII>("01");
+  const [rncCliente, setRncCliente] = useState<string>(initialVentaDraft.rncCliente || "");
+  const [formaPagoDGII, setFormaPagoDGII] = useState<FormaPagoDGII>(
+    initialVentaDraft.formaPagoDGII || "01"
+  );
   const [ncfModificado, setNcfModificado] = useState<string>("");
   const [fechaNcfModificado, setFechaNcfModificado] = useState<string>("");
   const [codigoModificacion, setCodigoModificacion] = useState<"01" | "02" | "03" | "04">("03");
@@ -162,32 +191,111 @@ export default function VentaPanel({
   // Invoice Header State
   const [facturasHistorial, setFacturasHistorial] = useState<FacturaVenta[]>([]);
   const [numeroFactura, setNumeroFactura] = useState<string>("FAC-0001");
-  const [fechaFactura, setFechaFactura] = useState<string>(() =>
-    new Date().toISOString().slice(0, 10)
+  const [fechaFactura, setFechaFactura] = useState<string>(
+    () => initialVentaDraft.fechaFactura || new Date().toISOString().slice(0, 10)
   );
   const [conceptoSeleccionado, setConceptoSeleccionado] = useState<string>(
-    () => activeConceptos[0]?.nombre || "Venta"
+    () => initialVentaDraft.conceptoSeleccionado || activeConceptos[0]?.nombre || "Venta"
   );
-  const [clienteNombre, setClienteNombre] = useState<string>("");
-  const [clienteContacto, setClienteContacto] = useState<string>("");
-  const [observaciones, setObservaciones] = useState<string>("");
+  const [clienteNombre, setClienteNombre] = useState<string>(
+    initialVentaDraft.clienteNombre || ""
+  );
+  const [clienteContacto, setClienteContacto] = useState<string>(
+    initialVentaDraft.clienteContacto || ""
+  );
+  const [observaciones, setObservaciones] = useState<string>(
+    initialVentaDraft.observaciones || ""
+  );
 
   // ITBIS State (Product level & Invoice level: 18%, 16%, 0% Exento)
-  const [aplicaItbisFactura, setAplicaItbisFactura] = useState<boolean>(false);
-  const [aplicaItbisProducto, setAplicaItbisProducto] = useState<boolean>(false);
-  const [tasaItbisSeleccionada, setTasaItbisSeleccionada] = useState<18 | 16 | 0>(18);
-  const [descuentoPorcentajeInput, setDescuentoPorcentajeInput] = useState<string>("0");
+  const [aplicaItbisFactura, setAplicaItbisFactura] = useState<boolean>(
+    Boolean(initialVentaDraft.aplicaItbisFactura)
+  );
+  const [aplicaItbisProducto, setAplicaItbisProducto] = useState<boolean>(
+    Boolean(initialVentaDraft.aplicaItbisProducto)
+  );
+  const [tasaItbisSeleccionada, setTasaItbisSeleccionada] = useState<18 | 16 | 0>(
+    initialVentaDraft.tasaItbisSeleccionada ?? 18
+  );
+  const [descuentoPorcentajeInput, setDescuentoPorcentajeInput] = useState<string>(
+    initialVentaDraft.descuentoPorcentajeInput || "0"
+  );
 
   // Product Selection State
-  const [productSearch, setProductSearch] = useState<string>("");
-  const [selectedProductCode, setSelectedProductCode] = useState<string>("");
-  const [selectedLoteId, setSelectedLoteId] = useState<string>("");
-  const [cantidadInput, setCantidadInput] = useState<string>("1");
-  const [precioUnitarioInput, setPrecioUnitarioInput] = useState<string>("");
+  const [productSearch, setProductSearch] = useState<string>(
+    initialVentaDraft.productSearch || ""
+  );
+  const [selectedProductCode, setSelectedProductCode] = useState<string>(
+    initialVentaDraft.selectedProductCode || ""
+  );
+  const [selectedLoteId, setSelectedLoteId] = useState<string>(
+    initialVentaDraft.selectedLoteId || ""
+  );
+  const [cantidadInput, setCantidadInput] = useState<string>(
+    initialVentaDraft.cantidadInput || "1"
+  );
+  const [precioUnitarioInput, setPrecioUnitarioInput] = useState<string>(
+    initialVentaDraft.precioUnitarioInput || ""
+  );
 
   // Invoice Items State
-  const [itemsFactura, setItemsFactura] = useState<VentaItem[]>([]);
+  const [itemsFactura, setItemsFactura] = useState<VentaItem[]>(() =>
+    Array.isArray(initialVentaDraft.itemsFactura) ? initialVentaDraft.itemsFactura : []
+  );
   const [submitting, setSubmitting] = useState<boolean>(false);
+
+  // Guardar borrador automático de Facturación / Venta
+  useEffect(() => {
+    const currentDraft = {
+      subTab,
+      rncCliente,
+      formaPagoDGII,
+      fechaFactura,
+      conceptoSeleccionado,
+      clienteNombre,
+      clienteContacto,
+      observaciones,
+      aplicaItbisFactura,
+      aplicaItbisProducto,
+      tasaItbisSeleccionada,
+      descuentoPorcentajeInput,
+      productSearch,
+      selectedProductCode,
+      selectedLoteId,
+      cantidadInput,
+      precioUnitarioInput,
+      itemsFactura
+    };
+    saveDraft(ventaDraftKey, currentDraft);
+
+    const flushDraft = () => saveDraft(ventaDraftKey, currentDraft);
+    window.addEventListener("pagehide", flushDraft);
+    document.addEventListener("visibilitychange", flushDraft);
+    return () => {
+      window.removeEventListener("pagehide", flushDraft);
+      document.removeEventListener("visibilitychange", flushDraft);
+    };
+  }, [
+    ventaDraftKey,
+    subTab,
+    rncCliente,
+    formaPagoDGII,
+    fechaFactura,
+    conceptoSeleccionado,
+    clienteNombre,
+    clienteContacto,
+    observaciones,
+    aplicaItbisFactura,
+    aplicaItbisProducto,
+    tasaItbisSeleccionada,
+    descuentoPorcentajeInput,
+    productSearch,
+    selectedProductCode,
+    selectedLoteId,
+    cantidadInput,
+    precioUnitarioInput,
+    itemsFactura
+  ]);
 
   // History Search & Modal Preview / Annulment State
   const [historySearch, setHistorySearch] = useState<string>("");

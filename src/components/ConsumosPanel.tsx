@@ -45,6 +45,7 @@ import {
   exportConsumosReportToWord
 } from "../utils/exportUtils";
 import { playSound } from "../utils/audio";
+import { loadDraft, saveDraft } from "../utils/draftPersistence";
 import {
   AlertCircle,
   BarChart3,
@@ -101,8 +102,36 @@ export default function ConsumosPanel({
   const activeSedeId = getActiveFarmaciaId() || DEFAULT_FARMACIA_ID;
   const isAdmin = currentUser?.rol === "Administrador";
 
+  const consumosDraftKey = `consumos_form_draft_${activeSedeId}`;
+  const initialConsumosDraft = useMemo(
+    () =>
+      loadDraft(consumosDraftKey, {
+        activeSubTab: "registro" as "registro" | "historial" | "resumen",
+        asignacionEspecialAdmin: false,
+        selectedTipoConsumoId: "tipo-interno",
+        destinoExternoInstitucion: "",
+        destinoExternoPersona: "",
+        fechaConsumo: new Date().toLocaleDateString("en-CA"),
+        observaciones: "",
+        productSearch: "",
+        selectedProductCode: "",
+        selectedLotId: "",
+        cantidadInput: 1,
+        draftItems: [] as ConsumoItem[],
+        showNuevoResponsableModal: false,
+        nuevoRespNombre: "",
+        nuevoRespCargo: "",
+        nuevoRespTelefono: "",
+        nuevoRespEsSubalterno: false,
+        nuevoRespSuperiorId: ""
+      }),
+    [consumosDraftKey]
+  );
+
   // Sub-pestañas principales del módulo Consumos
-  const [activeSubTab, setActiveSubTab] = useState<"registro" | "historial" | "resumen">("registro");
+  const [activeSubTab, setActiveSubTab] = useState<"registro" | "historial" | "resumen">(
+    initialConsumosDraft.activeSubTab || "registro"
+  );
 
   // Departamentos y catálogos creados desde el mismo módulo de Consumos (hidratados al instante)
   const [localCreatedDepts, setLocalCreatedDepts] = useState<Departamento[]>(() => {
@@ -299,14 +328,24 @@ export default function ConsumosPanel({
     }
   }, [selectedResponsableId, activeSedeId]);
 
-  const [asignacionEspecialAdmin, setAsignacionEspecialAdmin] = useState<boolean>(false);
-  const [selectedTipoConsumoId, setSelectedTipoConsumoId] = useState<string>("tipo-interno");
-  const [destinoExternoInstitucion, setDestinoExternoInstitucion] = useState<string>("");
-  const [destinoExternoPersona, setDestinoExternoPersona] = useState<string>("");
-  const [fechaConsumo, setFechaConsumo] = useState<string>(() =>
-    new Date().toLocaleDateString("en-CA")
+  const [asignacionEspecialAdmin, setAsignacionEspecialAdmin] = useState<boolean>(
+    Boolean(initialConsumosDraft.asignacionEspecialAdmin)
   );
-  const [observaciones, setObservaciones] = useState<string>("");
+  const [selectedTipoConsumoId, setSelectedTipoConsumoId] = useState<string>(
+    initialConsumosDraft.selectedTipoConsumoId || "tipo-interno"
+  );
+  const [destinoExternoInstitucion, setDestinoExternoInstitucion] = useState<string>(
+    initialConsumosDraft.destinoExternoInstitucion || ""
+  );
+  const [destinoExternoPersona, setDestinoExternoPersona] = useState<string>(
+    initialConsumosDraft.destinoExternoPersona || ""
+  );
+  const [fechaConsumo, setFechaConsumo] = useState<string>(
+    () => initialConsumosDraft.fechaConsumo || new Date().toLocaleDateString("en-CA")
+  );
+  const [observaciones, setObservaciones] = useState<string>(
+    initialConsumosDraft.observaciones || ""
+  );
   // ============================================================================
   // MULTI-CATÁLOGO EN BUSCADOR DE PRODUCTOS Y BUSCADOR DINÁMICO DE DEPARTAMENTO / CATÁLOGO
   // ============================================================================
@@ -536,13 +575,25 @@ export default function ConsumosPanel({
   };
 
   // Modal / Panel rápido para botón "Nuevo" debajo de Responsable del departamento
-  const [showNuevoResponsableModal, setShowNuevoResponsableModal] = useState<boolean>(false);
-  const [nuevoRespNombre, setNuevoRespNombre] = useState<string>("");
-  const [nuevoRespCargo, setNuevoRespCargo] = useState<string>("");
+  const [showNuevoResponsableModal, setShowNuevoResponsableModal] = useState<boolean>(
+    Boolean(initialConsumosDraft.showNuevoResponsableModal)
+  );
+  const [nuevoRespNombre, setNuevoRespNombre] = useState<string>(
+    initialConsumosDraft.nuevoRespNombre || ""
+  );
+  const [nuevoRespCargo, setNuevoRespCargo] = useState<string>(
+    initialConsumosDraft.nuevoRespCargo || ""
+  );
   const [nuevoRespDept, setNuevoRespDept] = useState<string>(selectedDepartamento);
-  const [nuevoRespTelefono, setNuevoRespTelefono] = useState<string>("");
-  const [nuevoRespEsSubalterno, setNuevoRespEsSubalterno] = useState<boolean>(false);
-  const [nuevoRespSuperiorId, setNuevoRespSuperiorId] = useState<string>("");
+  const [nuevoRespTelefono, setNuevoRespTelefono] = useState<string>(
+    initialConsumosDraft.nuevoRespTelefono || ""
+  );
+  const [nuevoRespEsSubalterno, setNuevoRespEsSubalterno] = useState<boolean>(
+    Boolean(initialConsumosDraft.nuevoRespEsSubalterno)
+  );
+  const [nuevoRespSuperiorId, setNuevoRespSuperiorId] = useState<string>(
+    initialConsumosDraft.nuevoRespSuperiorId || ""
+  );
   const [savingNuevoResp, setSavingNuevoResp] = useState<boolean>(false);
 
   useEffect(() => {
@@ -569,11 +620,74 @@ export default function ConsumosPanel({
   }, [nuevoRespEsSubalterno, titularesParaNuevoSubalterno, nuevoRespSuperiorId]);
 
   // Selección de productos e insumos
-  const [productSearch, setProductSearch] = useState<string>("");
-  const [selectedProductCode, setSelectedProductCode] = useState<string>("");
-  const [selectedLotId, setSelectedLotId] = useState<string>("");
-  const [cantidadInput, setCantidadInput] = useState<number>(1);
-  const [draftItems, setDraftItems] = useState<ConsumoItem[]>([]);
+  const [productSearch, setProductSearch] = useState<string>(
+    initialConsumosDraft.productSearch || ""
+  );
+  const [selectedProductCode, setSelectedProductCode] = useState<string>(
+    initialConsumosDraft.selectedProductCode || ""
+  );
+  const [selectedLotId, setSelectedLotId] = useState<string>(
+    initialConsumosDraft.selectedLotId || ""
+  );
+  const [cantidadInput, setCantidadInput] = useState<number>(
+    Number(initialConsumosDraft.cantidadInput) > 0 ? Number(initialConsumosDraft.cantidadInput) : 1
+  );
+  const [draftItems, setDraftItems] = useState<ConsumoItem[]>(() =>
+    Array.isArray(initialConsumosDraft.draftItems) ? initialConsumosDraft.draftItems : []
+  );
+
+  // Guardar borrador automáticamente cada vez que el usuario modifica el registro de consumo o sale de la app
+  useEffect(() => {
+    const currentDraft = {
+      activeSubTab,
+      asignacionEspecialAdmin,
+      selectedTipoConsumoId,
+      destinoExternoInstitucion,
+      destinoExternoPersona,
+      fechaConsumo,
+      observaciones,
+      productSearch,
+      selectedProductCode,
+      selectedLotId,
+      cantidadInput,
+      draftItems,
+      showNuevoResponsableModal,
+      nuevoRespNombre,
+      nuevoRespCargo,
+      nuevoRespTelefono,
+      nuevoRespEsSubalterno,
+      nuevoRespSuperiorId
+    };
+    saveDraft(consumosDraftKey, currentDraft);
+
+    const flushDraft = () => saveDraft(consumosDraftKey, currentDraft);
+    window.addEventListener("pagehide", flushDraft);
+    document.addEventListener("visibilitychange", flushDraft);
+    return () => {
+      window.removeEventListener("pagehide", flushDraft);
+      document.removeEventListener("visibilitychange", flushDraft);
+    };
+  }, [
+    consumosDraftKey,
+    activeSubTab,
+    asignacionEspecialAdmin,
+    selectedTipoConsumoId,
+    destinoExternoInstitucion,
+    destinoExternoPersona,
+    fechaConsumo,
+    observaciones,
+    productSearch,
+    selectedProductCode,
+    selectedLotId,
+    cantidadInput,
+    draftItems,
+    showNuevoResponsableModal,
+    nuevoRespNombre,
+    nuevoRespCargo,
+    nuevoRespTelefono,
+    nuevoRespEsSubalterno,
+    nuevoRespSuperiorId
+  ]);
 
   // Modal de vista previa y confirmación atómica
   const [showConfirmPreview, setShowConfirmPreview] = useState<boolean>(false);

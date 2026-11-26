@@ -40,6 +40,7 @@ import {
   exportValidacionToPDF,
   exportValidacionToWord
 } from "../utils/exportUtils";
+import { loadDraft, saveDraft } from "../utils/draftPersistence";
 import {
   FileCheck2,
   Upload,
@@ -92,9 +93,29 @@ export default function ValidacionPanel({
   onProductsUpdated,
   showToast
 }: ValidacionPanelProps) {
+  const activeSedeId = getActiveFarmaciaId() || "default";
+  const validacionDraftKey = `validacion_form_draft_${activeSedeId}`;
+  const initialValidacionDraft = useMemo(
+    () =>
+      loadDraft(validacionDraftKey, {
+        activeSubTab: "documentos" as "documentos" | "autorizaciones" | "verificaciones" | "historial",
+        currentDocName: "",
+        currentDocType: "PDF" as TipoDocumentoValidacion,
+        currentExtractionMethod: "PARSER_ESTRUCTURADO" as MetodoExtraccionValidacion,
+        previewImageUrl: null as string | null,
+        rawOcrText: "",
+        showRawOcrEditor: false,
+        comparisonItems: [] as DocumentoValidacionItem[],
+        observacionesGeneralesDoc: "",
+        validationSavedCode: null as string | null,
+        filterComparisonMode: "TODOS" as "TODOS" | "DISCREPANCIAS" | "COINCIDENTES"
+      }),
+    [validacionDraftKey]
+  );
+
   const [activeSubTab, setActiveSubTab] = useState<
     "documentos" | "autorizaciones" | "verificaciones" | "historial"
-  >("documentos");
+  >(initialValidacionDraft.activeSubTab || "documentos");
 
   const [fetchedMovimientos, setFetchedMovimientos] = useState<Movimiento[]>([]);
   const [fetchedConsumos, setFetchedConsumos] = useState<RegistroConsumo[]>(() =>
@@ -117,20 +138,77 @@ export default function ValidacionPanel({
   // Estado del escáner / cargador de documentos (Pestaña 1)
   const [isExtracting, setIsExtracting] = useState(false);
   const [extractionStatus, setExtractionStatus] = useState("");
-  const [currentDocName, setCurrentDocName] = useState("");
-  const [currentDocType, setCurrentDocType] = useState<TipoDocumentoValidacion>("PDF");
+  const [currentDocName, setCurrentDocName] = useState(initialValidacionDraft.currentDocName || "");
+  const [currentDocType, setCurrentDocType] = useState<TipoDocumentoValidacion>(
+    initialValidacionDraft.currentDocType || "PDF"
+  );
   const [currentExtractionMethod, setCurrentExtractionMethod] =
-    useState<MetodoExtraccionValidacion>("PARSER_ESTRUCTURADO");
-  const [previewImageUrl, setPreviewImageUrl] = useState<string | null>(null);
-  const [rawOcrText, setRawOcrText] = useState<string>("");
-  const [showRawOcrEditor, setShowRawOcrEditor] = useState<boolean>(false);
-  const [comparisonItems, setComparisonItems] = useState<DocumentoValidacionItem[]>([]);
-  const [observacionesGeneralesDoc, setObservacionesGeneralesDoc] = useState("");
-  const [validationSavedCode, setValidationSavedCode] = useState<string | null>(null);
+    useState<MetodoExtraccionValidacion>(
+      initialValidacionDraft.currentExtractionMethod || "PARSER_ESTRUCTURADO"
+    );
+  const [previewImageUrl, setPreviewImageUrl] = useState<string | null>(
+    initialValidacionDraft.previewImageUrl || null
+  );
+  const [rawOcrText, setRawOcrText] = useState<string>(initialValidacionDraft.rawOcrText || "");
+  const [showRawOcrEditor, setShowRawOcrEditor] = useState<boolean>(
+    Boolean(initialValidacionDraft.showRawOcrEditor)
+  );
+  const [comparisonItems, setComparisonItems] = useState<DocumentoValidacionItem[]>(() =>
+    Array.isArray(initialValidacionDraft.comparisonItems)
+      ? initialValidacionDraft.comparisonItems
+      : []
+  );
+  const [observacionesGeneralesDoc, setObservacionesGeneralesDoc] = useState(
+    initialValidacionDraft.observacionesGeneralesDoc || ""
+  );
+  const [validationSavedCode, setValidationSavedCode] = useState<string | null>(
+    initialValidacionDraft.validationSavedCode || null
+  );
   const [savingValidation, setSavingValidation] = useState(false);
   const [filterComparisonMode, setFilterComparisonMode] = useState<
     "TODOS" | "DISCREPANCIAS" | "COINCIDENTES"
-  >("TODOS");
+  >(initialValidacionDraft.filterComparisonMode || "TODOS");
+
+  // Guardar borrador de Validación automáticamente
+  useEffect(() => {
+    const safePreview =
+      previewImageUrl && previewImageUrl.length < 350000 ? previewImageUrl : null;
+    const currentDraft = {
+      activeSubTab,
+      currentDocName,
+      currentDocType,
+      currentExtractionMethod,
+      previewImageUrl: safePreview,
+      rawOcrText,
+      showRawOcrEditor,
+      comparisonItems,
+      observacionesGeneralesDoc,
+      validationSavedCode,
+      filterComparisonMode
+    };
+    saveDraft(validacionDraftKey, currentDraft);
+
+    const flushDraft = () => saveDraft(validacionDraftKey, currentDraft);
+    window.addEventListener("pagehide", flushDraft);
+    document.addEventListener("visibilitychange", flushDraft);
+    return () => {
+      window.removeEventListener("pagehide", flushDraft);
+      document.removeEventListener("visibilitychange", flushDraft);
+    };
+  }, [
+    validacionDraftKey,
+    activeSubTab,
+    currentDocName,
+    currentDocType,
+    currentExtractionMethod,
+    previewImageUrl,
+    rawOcrText,
+    showRawOcrEditor,
+    comparisonItems,
+    observacionesGeneralesDoc,
+    validationSavedCode,
+    filterComparisonMode
+  ]);
 
   // Modal para cambiar / seleccionar manualmente el código de producto de una fila
   const [codePickerRowId, setCodePickerRowId] = useState<string | null>(null);

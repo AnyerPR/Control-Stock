@@ -38,6 +38,7 @@ import {
   validarRelacionResponsableDepartamento
 } from "../utils/consumosUtils";
 import { playSound } from "../utils/audio";
+import { loadDraft, saveDraft } from "../utils/draftPersistence";
 import { logSystemEvent } from "../utils/chatHelper";
 import { isLotExpiredWithStock } from "../utils/inventoryStatus";
 import { FileText, ClipboardList, Plus, Search, Filter, AlertCircle, Calendar, Clock, RefreshCw, Layers, LoaderCircle, User, X, PlusCircle, Trash2, Sparkles, ShieldCheck, CheckCircle2, XCircle, Eye, ChevronDown, UserPlus, Globe } from "lucide-react";
@@ -120,10 +121,35 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
     return Math.ceil((expDate.getTime() - today.getTime()) / 86400000);
   };
 
+  const solicitudesDraftKey = `solicitudes_form_draft_${tenantKey}`;
+  const initialSolicitudesDraft = useMemo(
+    () =>
+      loadDraft(solicitudesDraftKey, {
+        activeSubTab: "reabastecimiento" as "list" | "create" | "history" | "reabastecimiento",
+        solicitudCatalogId: "",
+        department: "",
+        description: "",
+        priority: "Media" as "Baja" | "Media" | "Alta",
+        observations: "",
+        responsableId: "",
+        asignacionEspecialAdmin: false,
+        tipoConsumoId: "tipo-interno",
+        destinoExternoInstitucion: "",
+        destinoExternoPersona: "",
+        solicitudItems: [] as Omit<SolicitudItem, "id">[],
+        selectedProdCode: "",
+        qtyRequested: "1",
+        itemSearch: ""
+      }),
+    [solicitudesDraftKey]
+  );
+
   const [solicitudes, setSolicitudes] = useState<Solicitud[]>(() => initialCache?.solicitudes || []);
   const [historialList, setHistorialList] = useState<RegistroHistorial[]>(() => initialCache?.historial || []);
   const [loading, setLoading] = useState<boolean>(() => !initialCache);
-  const [activeSubTab, setActiveSubTab] = useState<"list" | "create" | "history" | "reabastecimiento">("reabastecimiento");
+  const [activeSubTab, setActiveSubTab] = useState<"list" | "create" | "history" | "reabastecimiento">(
+    initialSolicitudesDraft.activeSubTab || "reabastecimiento"
+  );
 
   const availableCatalogosMemo = useMemo(
     () => getUserAvailableCatalogos(currentUser, catalogos),
@@ -135,6 +161,12 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
   // Catalog Active state for new solicitud
   const [solicitudCatalogId, setSolicitudCatalogId] = useState<string>(() => {
     const allowed = getUserAvailableCatalogos(currentUser, catalogos);
+    if (
+      initialSolicitudesDraft.solicitudCatalogId &&
+      allowed.some((c) => c.id === initialSolicitudesDraft.solicitudCatalogId)
+    ) {
+      return initialSolicitudesDraft.solicitudCatalogId;
+    }
     if (activeCatalogId && allowed.some((c) => c.id === activeCatalogId)) {
       return activeCatalogId;
     }
@@ -161,8 +193,6 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
     }
 
     if (solicitudItems.length > 0 && catId !== solicitudCatalogId) {
-      const confirmChange = window.confirm("Cambiar el catálogo eliminará los productos ya seleccionados en la solicitud actual. ¿Desea continuar?");
-      if (!confirmChange) return;
       setSolicitudItems([]);
     }
     setSolicitudCatalogId(catId);
@@ -200,13 +230,18 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
       currentUser.rol === "Administrador" ||
       currentUser.departamento === "Farmacia" ||
       currentUser.departamento === "Almacén y Suministro";
+    if (canChooseDept && initialSolicitudesDraft.department) {
+      return initialSolicitudesDraft.department;
+    }
     return canChooseDept
       ? dynamicDepts[0] || DEPARTAMENTOS[0]
       : currentUser.departamento || DEPARTAMENTOS[0];
   });
-  const [description, setDescription] = useState("");
-  const [priority, setPriority] = useState<"Baja" | "Media" | "Alta">("Media");
-  const [observations, setObservations] = useState("");
+  const [description, setDescription] = useState(initialSolicitudesDraft.description || "");
+  const [priority, setPriority] = useState<"Baja" | "Media" | "Alta">(
+    initialSolicitudesDraft.priority || "Media"
+  );
+  const [observations, setObservations] = useState(initialSolicitudesDraft.observations || "");
   const [creating, setCreating] = useState(false);
 
   // Estado de Responsables y Tipos de Consumo para integración Solicitudes -> Consumos
@@ -216,11 +251,21 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
   const [tiposConsumoList, setTiposConsumoList] = useState<TipoConsumoConfig[]>(() =>
     loadLocalTiposConsumo(tenantKey)
   );
-  const [responsableId, setResponsableId] = useState<string>("");
-  const [asignacionEspecialAdmin, setAsignacionEspecialAdmin] = useState<boolean>(false);
-  const [tipoConsumoId, setTipoConsumoId] = useState<string>("tipo-interno");
-  const [destinoExternoInstitucion, setDestinoExternoInstitucion] = useState<string>("");
-  const [destinoExternoPersona, setDestinoExternoPersona] = useState<string>("");
+  const [responsableId, setResponsableId] = useState<string>(
+    initialSolicitudesDraft.responsableId || ""
+  );
+  const [asignacionEspecialAdmin, setAsignacionEspecialAdmin] = useState<boolean>(
+    Boolean(initialSolicitudesDraft.asignacionEspecialAdmin)
+  );
+  const [tipoConsumoId, setTipoConsumoId] = useState<string>(
+    initialSolicitudesDraft.tipoConsumoId || "tipo-interno"
+  );
+  const [destinoExternoInstitucion, setDestinoExternoInstitucion] = useState<string>(
+    initialSolicitudesDraft.destinoExternoInstitucion || ""
+  );
+  const [destinoExternoPersona, setDestinoExternoPersona] = useState<string>(
+    initialSolicitudesDraft.destinoExternoPersona || ""
+  );
 
   // Modal rápido "+ Nuevo" responsable dentro de Solicitudes
   const [showNewRespModal, setShowNewRespModal] = useState<boolean>(false);
@@ -379,11 +424,64 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
   }, [currentUser.rol, currentUser.departamento, department]);
 
   // Custom structured products in solicitud creation
-  const [solicitudItems, setSolicitudItems] = useState<Omit<SolicitudItem, "id">[]>([]);
-  const [selectedProdCode, setSelectedProdCode] = useState("");
-  const [qtyRequested, setQtyRequested] = useState("1");
-  const [itemSearch, setItemSearch] = useState("");
+  const [solicitudItems, setSolicitudItems] = useState<Omit<SolicitudItem, "id">[]>(() =>
+    Array.isArray(initialSolicitudesDraft.solicitudItems)
+      ? initialSolicitudesDraft.solicitudItems
+      : []
+  );
+  const [selectedProdCode, setSelectedProdCode] = useState(
+    initialSolicitudesDraft.selectedProdCode || ""
+  );
+  const [qtyRequested, setQtyRequested] = useState(initialSolicitudesDraft.qtyRequested || "1");
+  const [itemSearch, setItemSearch] = useState(initialSolicitudesDraft.itemSearch || "");
   const [onlyUnverified, setOnlyUnverified] = useState(false);
+
+  // Guardar borrador de Solicitudes automáticamente
+  useEffect(() => {
+    const currentDraft = {
+      activeSubTab,
+      solicitudCatalogId,
+      department,
+      description,
+      priority,
+      observations,
+      responsableId,
+      asignacionEspecialAdmin,
+      tipoConsumoId,
+      destinoExternoInstitucion,
+      destinoExternoPersona,
+      solicitudItems,
+      selectedProdCode,
+      qtyRequested,
+      itemSearch
+    };
+    saveDraft(solicitudesDraftKey, currentDraft);
+
+    const flushDraft = () => saveDraft(solicitudesDraftKey, currentDraft);
+    window.addEventListener("pagehide", flushDraft);
+    document.addEventListener("visibilitychange", flushDraft);
+    return () => {
+      window.removeEventListener("pagehide", flushDraft);
+      document.removeEventListener("visibilitychange", flushDraft);
+    };
+  }, [
+    solicitudesDraftKey,
+    activeSubTab,
+    solicitudCatalogId,
+    department,
+    description,
+    priority,
+    observations,
+    responsableId,
+    asignacionEspecialAdmin,
+    tipoConsumoId,
+    destinoExternoInstitucion,
+    destinoExternoPersona,
+    solicitudItems,
+    selectedProdCode,
+    qtyRequested,
+    itemSearch
+  ]);
 
   // Edit Status State
   const [selectedSolicitud, setSelectedSolicitud] = useState<Solicitud | null>(null);

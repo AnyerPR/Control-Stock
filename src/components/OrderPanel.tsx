@@ -42,6 +42,7 @@ import {
 import { DEFAULT_FARMACIA_ID, getActiveFarmaciaId, tenantDoc } from "../firebase";
 import { onSnapshot } from "firebase/firestore";
 import { playSound } from "../utils/audio";
+import { loadDraft, saveDraft } from "../utils/draftPersistence";
 
 interface OrderItem {
   productCode: string;
@@ -187,17 +188,62 @@ export default function OrderPanel({
     };
   }, [activeSedeId]);
 
+  const orderDraftKey = `order_panel_meta_draft_${activeSedeId}`;
+  const initialOrderDraft = useMemo(
+    () =>
+      loadDraft(orderDraftKey, {
+        selectedDepartamento: "",
+        selectedResponsableId: "resp-iris-aybar",
+        asignacionEspecialAdmin: false,
+        selectedTipoConsumoId: "tipo-interno",
+        destinoExternoInstitucion: "",
+        destinoExternoPersona: ""
+      }),
+    [orderDraftKey]
+  );
+
   const [selectedDepartamento, setSelectedDepartamento] = useState<string>(() => {
+    if (initialOrderDraft.selectedDepartamento) return initialOrderDraft.selectedDepartamento;
     const enf = mergeDepartamentosSinDuplicados(departamentos).find(
       (d) => normalizeTextToken(d.nombre) === normalizeTextToken("Enfermería")
     );
     return enf?.nombre || departamentosDisponibles[0]?.nombre || "Enfermería";
   });
-  const [selectedResponsableId, setSelectedResponsableId] = useState<string>("resp-iris-aybar");
-  const [asignacionEspecialAdmin, setAsignacionEspecialAdmin] = useState<boolean>(false);
-  const [selectedTipoConsumoId, setSelectedTipoConsumoId] = useState<string>("tipo-interno");
-  const [destinoExternoInstitucion, setDestinoExternoInstitucion] = useState<string>("");
-  const [destinoExternoPersona, setDestinoExternoPersona] = useState<string>("");
+  const [selectedResponsableId, setSelectedResponsableId] = useState<string>(
+    initialOrderDraft.selectedResponsableId || "resp-iris-aybar"
+  );
+  const [asignacionEspecialAdmin, setAsignacionEspecialAdmin] = useState<boolean>(
+    Boolean(initialOrderDraft.asignacionEspecialAdmin)
+  );
+  const [selectedTipoConsumoId, setSelectedTipoConsumoId] = useState<string>(
+    initialOrderDraft.selectedTipoConsumoId || "tipo-interno"
+  );
+  const [destinoExternoInstitucion, setDestinoExternoInstitucion] = useState<string>(
+    initialOrderDraft.destinoExternoInstitucion || ""
+  );
+  const [destinoExternoPersona, setDestinoExternoPersona] = useState<string>(
+    initialOrderDraft.destinoExternoPersona || ""
+  );
+
+  useEffect(() => {
+    const currentDraft = {
+      selectedDepartamento,
+      selectedResponsableId,
+      asignacionEspecialAdmin,
+      selectedTipoConsumoId,
+      destinoExternoInstitucion,
+      destinoExternoPersona
+    };
+    saveDraft(orderDraftKey, currentDraft);
+  }, [
+    orderDraftKey,
+    selectedDepartamento,
+    selectedResponsableId,
+    asignacionEspecialAdmin,
+    selectedTipoConsumoId,
+    destinoExternoInstitucion,
+    destinoExternoPersona
+  ]);
 
   // Estado para el botón "Nuevo" debajo de Responsable del departamento
   const [showNuevoRespForm, setShowNuevoRespForm] = useState<boolean>(false);
