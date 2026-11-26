@@ -32,9 +32,14 @@ import {
   loadLocalResponsables,
   loadLocalTiposConsumo,
   mergeDepartamentosSinDuplicados,
+  mergeResponsablesLists,
+  mergeTiposConsumoLists,
   normalizeTextToken,
   persistConsumosConfig,
-  registrarNuevoResponsableRapido
+  registrarNuevoResponsableRapido,
+  sanitizeResponsableItem,
+  saveLocalResponsables,
+  saveLocalTiposConsumo
 } from "../utils/consumosUtils";
 import { hashPassword } from "./Login";
 import PhotoCaptureField from "./PhotoCaptureField";
@@ -245,17 +250,24 @@ export default function ConfiguracionPanel({
     if (isLocalFileMode) {
       return () => window.removeEventListener("consumos_config_updated", syncLocal);
     }
-    const configRef = tenantDoc("configuracion", "consumos_config");
+    const configRef = tenantDoc("configuracion", "consumos_config", activeFarmaciaId);
     const unsub = onSnapshot(
       configRef,
       (snap) => {
+        const localResp = loadLocalResponsables(activeFarmaciaId);
+        const localTipos = loadLocalTiposConsumo(activeFarmaciaId);
         if (snap.exists()) {
           const data = snap.data();
-          if (Array.isArray(data.responsables)) {
-            setResponsablesList(ensureLicIrisAybarPresent(data.responsables, activeFarmaciaId));
-          }
-          if (Array.isArray(data.tiposConsumo)) {
-            setTiposConsumoList(ensureDefaultTiposConsumoPresent(data.tiposConsumo, activeFarmaciaId));
+          const remoteResp = Array.isArray(data.responsables) ? data.responsables : [];
+          const remoteTipos = Array.isArray(data.tiposConsumo) ? data.tiposConsumo : [];
+          const mergedResp = mergeResponsablesLists(remoteResp, localResp, activeFarmaciaId);
+          const mergedTipos = mergeTiposConsumoLists(remoteTipos, localTipos, activeFarmaciaId);
+          setResponsablesList(mergedResp);
+          setTiposConsumoList(mergedTipos);
+          saveLocalResponsables(mergedResp, activeFarmaciaId, false);
+          saveLocalTiposConsumo(mergedTipos, activeFarmaciaId, false);
+          if (mergedResp.length > remoteResp.length || mergedTipos.length > remoteTipos.length) {
+            persistConsumosConfig(mergedResp, mergedTipos, activeFarmaciaId);
           }
         }
       },
@@ -341,18 +353,21 @@ export default function ConfiguracionPanel({
 
     const nextList = responsablesList.map((r) => {
       if (r.id === editingResp.id) {
-        return {
-          ...r,
-          nombre: cleanName,
-          departamentoNombre: targetDept,
-          cargo:
-            editRespCargo.trim() ||
-            (editRespEsSubalterno ? "Subalterno Departamental" : "Responsable del Departamento"),
-          esSubalterno: editRespEsSubalterno,
-          responsableSuperiorId: editRespEsSubalterno ? superiorObj?.id : undefined,
-          responsableSuperiorNombre: editRespEsSubalterno ? superiorObj?.nombre : undefined,
-          updatedAt: Date.now()
-        };
+        return sanitizeResponsableItem(
+          {
+            ...r,
+            nombre: cleanName,
+            departamentoNombre: targetDept,
+            cargo:
+              editRespCargo.trim() ||
+              (editRespEsSubalterno ? "Subalterno Departamental" : "Responsable del Departamento"),
+            esSubalterno: editRespEsSubalterno,
+            responsableSuperiorId: editRespEsSubalterno ? superiorObj?.id : undefined,
+            responsableSuperiorNombre: editRespEsSubalterno ? superiorObj?.nombre : undefined,
+            updatedAt: Date.now()
+          },
+          activeFarmaciaId
+        );
       }
       // Si la persona editada es (o pasa a ser) Responsable Titular, actualizar la referencia en sus subalternos del mismo departamento
       if (
@@ -361,13 +376,17 @@ export default function ConfiguracionPanel({
         normalizeTextToken(r.departamentoNombre) === normalizeTextToken(targetDept) &&
         (!r.responsableSuperiorId || r.responsableSuperiorId === editingResp.id)
       ) {
-        return {
-          ...r,
-          responsableSuperiorId: editingResp.id,
-          responsableSuperiorNombre: cleanName
-        };
+        return sanitizeResponsableItem(
+          {
+            ...r,
+            responsableSuperiorId: editingResp.id,
+            responsableSuperiorNombre: cleanName,
+            updatedAt: Date.now()
+          },
+          activeFarmaciaId
+        );
       }
-      return r;
+      return sanitizeResponsableItem(r, activeFarmaciaId);
     });
     setResponsablesList(nextList);
     await persistConsumosConfig(nextList, tiposConsumoList, activeFarmaciaId);

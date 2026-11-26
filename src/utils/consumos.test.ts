@@ -11,7 +11,8 @@ import {
   validarRelacionResponsableDepartamento,
   procesarConsumoEnMemoria,
   calcularResumenPorDepartamento,
-  agregarNotaCorreccionConsumo
+  agregarNotaCorreccionConsumo,
+  mergeResponsablesLists
 } from "./consumosUtils";
 import { Producto, RegistroConsumo } from "../types";
 
@@ -666,5 +667,21 @@ test("10. Gestión de subalternos por departamento, relación con su responsable
   const titularesEnf = getResponsablesTitularesPorDepartamento(lista, "Enfermería");
   assert.equal(titularesEnf.length, 1);
   assert.equal(titularesEnf[0].nombre, "Lic. Iris Aybar");
+
+  // 7. Ningún objeto responsable o subalterno debe tener valores 'undefined' (para evitar fallo de setDoc en Firestore)
+  for (const r of lista) {
+    for (const [k, v] of Object.entries(r)) {
+      assert.notEqual(v, undefined, `El campo ${k} en ${r.nombre} no puede ser undefined para Firestore`);
+    }
+  }
+
+  // 8. Al salir y volver a entrar al módulo de Consumos, incluso si Firestore devuelve inicialmente una lista anterior, mergeResponsablesLists conserva todos los responsables y subalternos creados
+  const staleFirestoreList = getDefaultResponsables("sede-central");
+  const mergedOnRemount = mergeResponsablesLists(staleFirestoreList, lista, "sede-central");
+  const labPersonalAfterRemount = getPersonalPorDepartamento(mergedOnRemount, "Laboratorio");
+  assert.equal(labPersonalAfterRemount.length, 2, "Debe conservar el responsable y subalterno de Laboratorio al volver a entrar");
+  assert.equal(labPersonalAfterRemount[0].nombre, "Lic. Roberto Díaz");
+  assert.equal(labPersonalAfterRemount[1].nombre, "Téc. Ana Marte");
 });
+
 

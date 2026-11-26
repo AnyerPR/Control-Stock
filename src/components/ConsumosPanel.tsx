@@ -25,7 +25,10 @@ import {
   loadLocalResponsables,
   loadLocalTiposConsumo,
   mergeDepartamentosSinDuplicados,
+  mergeResponsablesLists,
+  mergeTiposConsumoLists,
   normalizeTextToken,
+  persistConsumosConfig,
   registrarConsumoAtomico,
   registrarNuevoResponsableRapido,
   saveLocalConsumos,
@@ -124,7 +127,7 @@ export default function ConsumosPanel({
     loadLocalConsumos(activeSedeId)
   );
 
-  // Sincronización con Firestore y eventos locales
+  // Sincronización con Firestore y eventos locales (fusionando sin perder datos locales)
   useEffect(() => {
     const refreshLocal = () => {
       setResponsables(loadLocalResponsables(activeSedeId));
@@ -144,18 +147,32 @@ export default function ConsumosPanel({
       unsubConfig = onSnapshot(
         tenantDoc("configuracion", "consumos_config", activeSedeId),
         (snap) => {
+          const localResp = loadLocalResponsables(activeSedeId);
+          const localTipos = loadLocalTiposConsumo(activeSedeId);
+
           if (snap.exists()) {
             const data = snap.data();
-            if (Array.isArray(data.responsables)) {
-              const normResp = ensureLicIrisAybarPresent(data.responsables, activeSedeId);
-              setResponsables(normResp);
-              saveLocalResponsables(normResp, activeSedeId);
+            const remoteResp = Array.isArray(data.responsables) ? data.responsables : [];
+            const remoteTipos = Array.isArray(data.tiposConsumo) ? data.tiposConsumo : [];
+
+            const mergedResp = mergeResponsablesLists(remoteResp, localResp, activeSedeId);
+            const mergedTipos = mergeTiposConsumoLists(remoteTipos, localTipos, activeSedeId);
+
+            setResponsables(mergedResp);
+            setTiposConsumo(mergedTipos);
+            saveLocalResponsables(mergedResp, activeSedeId, false);
+            saveLocalTiposConsumo(mergedTipos, activeSedeId, false);
+
+            // Si en localStorage había responsables o subalternos nuevos que no estaban aún en Firestore, subirlos
+            if (
+              mergedResp.length > remoteResp.length ||
+              mergedTipos.length > remoteTipos.length
+            ) {
+              persistConsumosConfig(mergedResp, mergedTipos, activeSedeId);
             }
-            if (Array.isArray(data.tiposConsumo)) {
-              const normTipos = ensureDefaultTiposConsumoPresent(data.tiposConsumo, activeSedeId);
-              setTiposConsumo(normTipos);
-              saveLocalTiposConsumo(normTipos, activeSedeId);
-            }
+          } else {
+            // Si aún no existe el documento en Firestore, subir la configuración local actual
+            persistConsumosConfig(localResp, localTipos, activeSedeId);
           }
         },
         (err) => console.warn("Aviso escuchando consumos_config:", err)
@@ -199,14 +216,50 @@ export default function ConsumosPanel({
     if (!canChooseAnyDepartment && currentUser.departamento) {
       return currentUser.departamento;
     }
+    if (typeof window !== "undefined" && window.localStorage) {
+      try {
+        const savedDept = localStorage.getItem(`consumos_last_dept_${activeSedeId}`);
+        if (savedDept) {
+          const matched = departamentosDisponibles.find(
+            (d) => normalizeTextToken(d.nombre) === normalizeTextToken(savedDept)
+          );
+          if (matched) return matched.nombre;
+        }
+      } catch {}
+    }
     const enf = departamentosDisponibles.find(
       (d) => normalizeTextToken(d.nombre) === normalizeTextToken("Enfermería")
     );
     return enf?.nombre || departamentosDisponibles[0]?.nombre || "Enfermería";
-  }, [canChooseAnyDepartment, currentUser.departamento, departamentosDisponibles]);
+  }, [canChooseAnyDepartment, currentUser.departamento, departamentosDisponibles, activeSedeId]);
 
   const [selectedDepartamento, setSelectedDepartamento] = useState<string>(defaultDeptName);
-  const [selectedResponsableId, setSelectedResponsableId] = useState<string>("resp-iris-aybar");
+  const [selectedResponsableId, setSelectedResponsableId] = useState<string>(() => {
+    if (typeof window !== "undefined" && window.localStorage) {
+      try {
+        const savedResp = localStorage.getItem(`consumos_last_resp_${activeSedeId}`);
+        if (savedResp) return savedResp;
+      } catch {}
+    }
+    return "resp-iris-aybar";
+  });
+
+  useEffect(() => {
+    if (typeof window !== "undefined" && window.localStorage && selectedDepartamento) {
+      try {
+        localStorage.setItem(`consumos_last_dept_${activeSedeId}`, selectedDepartamento);
+      } catch {}
+    }
+  }, [selectedDepartamento, activeSedeId]);
+
+  useEffect(() => {
+    if (typeof window !== "undefined" && window.localStorage && selectedResponsableId) {
+      try {
+        localStorage.setItem(`consumos_last_resp_${activeSedeId}`, selectedResponsableId);
+      } catch {}
+    }
+  }, [selectedResponsableId, activeSedeId]);
+
   const [asignacionEspecialAdmin, setAsignacionEspecialAdmin] = useState<boolean>(false);
   const [selectedTipoConsumoId, setSelectedTipoConsumoId] = useState<string>("tipo-interno");
   const [destinoExternoInstitucion, setDestinoExternoInstitucion] = useState<string>("");

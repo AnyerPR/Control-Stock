@@ -30,11 +30,17 @@ import {
   loadLocalResponsables,
   loadLocalTiposConsumo,
   mergeDepartamentosSinDuplicados,
+  mergeResponsablesLists,
+  mergeTiposConsumoLists,
   normalizeTextToken,
+  persistConsumosConfig,
   registrarNuevoResponsableRapido,
+  saveLocalResponsables,
+  saveLocalTiposConsumo,
   validarRelacionResponsableDepartamento
 } from "../utils/consumosUtils";
-import { DEFAULT_FARMACIA_ID, getActiveFarmaciaId } from "../firebase";
+import { DEFAULT_FARMACIA_ID, getActiveFarmaciaId, tenantDoc } from "../firebase";
+import { onSnapshot } from "firebase/firestore";
 import { playSound } from "../utils/audio";
 
 interface OrderItem {
@@ -145,8 +151,40 @@ export default function OrderPanel({
       setResponsables(loadLocalResponsables(activeSedeId));
       setTiposConsumo(loadLocalTiposConsumo(activeSedeId));
     };
+    syncConfig();
     window.addEventListener("consumos_config_updated", syncConfig);
-    return () => window.removeEventListener("consumos_config_updated", syncConfig);
+
+    const isLocalFileMode = typeof window !== "undefined" && window.location.protocol === "file:";
+    let unsub: (() => void) | undefined;
+    if (!isLocalFileMode) {
+      unsub = onSnapshot(
+        tenantDoc("configuracion", "consumos_config", activeSedeId),
+        (snap) => {
+          const localResp = loadLocalResponsables(activeSedeId);
+          const localTipos = loadLocalTiposConsumo(activeSedeId);
+          if (snap.exists()) {
+            const data = snap.data();
+            const remoteResp = Array.isArray(data.responsables) ? data.responsables : [];
+            const remoteTipos = Array.isArray(data.tiposConsumo) ? data.tiposConsumo : [];
+            const mergedResp = mergeResponsablesLists(remoteResp, localResp, activeSedeId);
+            const mergedTipos = mergeTiposConsumoLists(remoteTipos, localTipos, activeSedeId);
+            setResponsables(mergedResp);
+            setTiposConsumo(mergedTipos);
+            saveLocalResponsables(mergedResp, activeSedeId, false);
+            saveLocalTiposConsumo(mergedTipos, activeSedeId, false);
+            if (mergedResp.length > remoteResp.length || mergedTipos.length > remoteTipos.length) {
+              persistConsumosConfig(mergedResp, mergedTipos, activeSedeId);
+            }
+          }
+        },
+        () => {}
+      );
+    }
+
+    return () => {
+      window.removeEventListener("consumos_config_updated", syncConfig);
+      if (unsub) unsub();
+    };
   }, [activeSedeId]);
 
   const [selectedDepartamento, setSelectedDepartamento] = useState<string>(() => {

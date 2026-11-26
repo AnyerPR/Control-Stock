@@ -28,9 +28,13 @@ import {
   loadLocalResponsables,
   loadLocalTiposConsumo,
   mergeDepartamentosSinDuplicados,
+  mergeResponsablesLists,
+  mergeTiposConsumoLists,
   persistConsumosConfig,
   registrarConsumoAtomico,
   registrarNuevoResponsableRapido,
+  saveLocalResponsables,
+  saveLocalTiposConsumo,
   validarRelacionResponsableDepartamento
 } from "../utils/consumosUtils";
 import { playSound } from "../utils/audio";
@@ -239,17 +243,24 @@ export default function SolicitudesPanel({ currentUser, activePeriod, showToast,
       return () => window.removeEventListener("consumos_config_updated", syncLocalConfig);
     }
 
-    const configRef = tenantDoc("configuracion", "consumos_config");
+    const configRef = tenantDoc("configuracion", "consumos_config", tenantKey);
     const unsubCfg = onSnapshot(
       configRef,
       (snap) => {
+        const localResp = loadLocalResponsables(tenantKey);
+        const localTipos = loadLocalTiposConsumo(tenantKey);
         if (snap.exists()) {
           const data = snap.data();
-          if (Array.isArray(data.responsables)) {
-            setResponsablesList(ensureLicIrisAybarPresent(data.responsables, tenantKey));
-          }
-          if (Array.isArray(data.tiposConsumo)) {
-            setTiposConsumoList(ensureDefaultTiposConsumoPresent(data.tiposConsumo, tenantKey));
+          const remoteResp = Array.isArray(data.responsables) ? data.responsables : [];
+          const remoteTipos = Array.isArray(data.tiposConsumo) ? data.tiposConsumo : [];
+          const mergedResp = mergeResponsablesLists(remoteResp, localResp, tenantKey);
+          const mergedTipos = mergeTiposConsumoLists(remoteTipos, localTipos, tenantKey);
+          setResponsablesList(mergedResp);
+          setTiposConsumoList(mergedTipos);
+          saveLocalResponsables(mergedResp, tenantKey, false);
+          saveLocalTiposConsumo(mergedTipos, tenantKey, false);
+          if (mergedResp.length > remoteResp.length || mergedTipos.length > remoteTipos.length) {
+            persistConsumosConfig(mergedResp, mergedTipos, tenantKey);
           }
         }
       },

@@ -117,21 +117,129 @@ function getConsumosHistoryStorageKey(sedeId?: string): string {
 }
 
 /**
- * Garantiza que "Lic. Iris Aybar" siempre exista en la lista de responsables de la sede.
+/**
+ * Limpia cualquier propiedad undefined de un objeto ResponsableDepartamento
+ * para que Firestore (setDoc) nunca falle con "Unsupported field value: undefined".
+ */
+export function sanitizeResponsableItem(
+  r: ResponsableDepartamento,
+  sedeId: string = DEFAULT_FARMACIA_ID
+): ResponsableDepartamento {
+  const isSub = Boolean(r.esSubalterno);
+  const clean: ResponsableDepartamento = {
+    id: String(r.id || `resp-${Date.now()}`),
+    nombre: String(r.nombre || "").trim(),
+    cargo: String(
+      r.cargo || (isSub ? "Subalterno Departamental" : "Responsable del Departamento")
+    ).trim(),
+    departamentoId:
+      r.departamentoId ||
+      `dept-${normalizeTextToken(r.departamentoNombre).replace(/[^a-z0-9]/g, "-")}`,
+    departamentoNombre: String(r.departamentoNombre || "").trim(),
+    sedeId: r.sedeId || sedeId,
+    telefono: String(r.telefono || "").trim(),
+    correo: String(r.correo || "").trim(),
+    esSubalterno: isSub,
+    permitirAsignacionEspecial: Boolean(r.permitirAsignacionEspecial),
+    activo: r.activo !== false,
+    createdAt: Number(r.createdAt || 1700000000000),
+    creadoPor: String(r.creadoPor || "Sistema")
+  };
+  if (isSub && r.responsableSuperiorId) {
+    clean.responsableSuperiorId = String(r.responsableSuperiorId);
+  }
+  if (isSub && r.responsableSuperiorNombre) {
+    clean.responsableSuperiorNombre = String(r.responsableSuperiorNombre);
+  }
+  if (r.updatedAt !== undefined && r.updatedAt !== null) {
+    clean.updatedAt = Number(r.updatedAt);
+  }
+  return clean;
+}
+
+/**
+ * Garantiza que "Lic. Iris Aybar" siempre exista en la lista de responsables de la sede
+ * y que ningún elemento tenga campos undefined.
  */
 export function ensureLicIrisAybarPresent(
   list: ResponsableDepartamento[],
   sedeId: string = DEFAULT_FARMACIA_ID
 ): ResponsableDepartamento[] {
-  const hasIris = list.some(
+  const sanitized = (Array.isArray(list) ? list : [])
+    .filter((r) => r && String(r.nombre || "").trim().length > 0)
+    .map((r) => sanitizeResponsableItem(r, sedeId));
+
+  const hasIris = sanitized.some(
     (r) =>
       r.id === "resp-iris-aybar" ||
       normalizeTextToken(r.nombre) === normalizeTextToken("Lic. Iris Aybar")
   );
   if (hasIris) {
-    return list;
+    return sanitized;
   }
-  return [...getDefaultResponsables(sedeId), ...list];
+  return [...getDefaultResponsables(sedeId).map((r) => sanitizeResponsableItem(r, sedeId)), ...sanitized];
+}
+
+/**
+ * Fusiona dos listas de responsables (por ejemplo, Firestore y localStorage) sin perder
+ * ningún responsable o subalterno agregado recientemente.
+ */
+export function mergeResponsablesLists(
+  primaryList: ResponsableDepartamento[] = [],
+  secondaryList: ResponsableDepartamento[] = [],
+  sedeId: string = DEFAULT_FARMACIA_ID
+): ResponsableDepartamento[] {
+  const byKey = new Map<string, ResponsableDepartamento>();
+  const idToKey = new Map<string, string>();
+
+  const getSemanticKey = (r: ResponsableDepartamento): string => {
+    const nameKey = normalizeTextToken(r.nombre);
+    const deptKey = normalizeTextToken(r.departamentoNombre);
+    return `${nameKey}::${deptKey}`;
+  };
+
+  const upsert = (raw: ResponsableDepartamento) => {
+    if (!raw || !String(raw.nombre || "").trim()) return;
+    const item = sanitizeResponsableItem(raw, sedeId);
+    const semKey = getSemanticKey(item);
+    const existingKeyById = idToKey.get(item.id);
+    const targetKey = existingKeyById || (byKey.has(semKey) ? semKey : item.id);
+
+    const existing = byKey.get(targetKey);
+    if (!existing) {
+      byKey.set(targetKey, item);
+      idToKey.set(item.id, targetKey);
+      byKey.set(semKey, item);
+    } else {
+      const existingTs = Number(existing.updatedAt || existing.createdAt || 0);
+      const itemTs = Number(item.updatedAt || item.createdAt || 0);
+      const winner = itemTs >= existingTs ? item : existing;
+      byKey.set(targetKey, winner);
+      idToKey.set(winner.id, targetKey);
+      byKey.set(semKey, winner);
+    }
+  };
+
+  for (const r of primaryList) upsert(r);
+  for (const r of secondaryList) upsert(r);
+
+  // Deduplicar referencias del Map conservando orden
+  const uniqueMap = new Map<string, ResponsableDepartamento>();
+  for (const val of byKey.values()) {
+    const semKey = getSemanticKey(val);
+    const prev = uniqueMap.get(semKey);
+    if (!prev) {
+      uniqueMap.set(semKey, val);
+    } else {
+      const prevTs = Number(prev.updatedAt || prev.createdAt || 0);
+      const valTs = Number(val.updatedAt || val.createdAt || 0);
+      if (valTs >= prevTs) {
+        uniqueMap.set(semKey, val);
+      }
+    }
+  }
+
+  return ensureLicIrisAybarPresent(Array.from(uniqueMap.values()), sedeId);
 }
 
 export function ensureDefaultTiposConsumoPresent(
@@ -139,7 +247,7 @@ export function ensureDefaultTiposConsumoPresent(
   sedeId: string = DEFAULT_FARMACIA_ID
 ): TipoConsumoConfig[] {
   const defaults = getDefaultTiposConsumo(sedeId);
-  const result = [...list];
+  const result = [...(Array.isArray(list) ? list : [])];
   for (const def of defaults) {
     const exists = result.some(
       (t) =>
@@ -152,6 +260,29 @@ export function ensureDefaultTiposConsumoPresent(
     }
   }
   return result;
+}
+
+export function mergeTiposConsumoLists(
+  primaryList: TipoConsumoConfig[] = [],
+  secondaryList: TipoConsumoConfig[] = [],
+  sedeId: string = DEFAULT_FARMACIA_ID
+): TipoConsumoConfig[] {
+  const map = new Map<string, TipoConsumoConfig>();
+  for (const t of [...primaryList, ...secondaryList]) {
+    if (!t || !String(t.nombre || "").trim()) continue;
+    const key = normalizeTextToken(t.nombre);
+    const prev = map.get(key);
+    if (!prev) {
+      map.set(key, t);
+    } else {
+      const prevTs = Number(prev.updatedAt || prev.createdAt || 0);
+      const currTs = Number(t.updatedAt || t.createdAt || 0);
+      if (currTs >= prevTs) {
+        map.set(key, t);
+      }
+    }
+  }
+  return ensureDefaultTiposConsumoPresent(Array.from(map.values()), sedeId);
 }
 
 export function loadLocalResponsables(sedeId?: string): ResponsableDepartamento[] {
@@ -175,13 +306,19 @@ export function loadLocalResponsables(sedeId?: string): ResponsableDepartamento[
   return initial;
 }
 
-export function saveLocalResponsables(list: ResponsableDepartamento[], sedeId?: string): ResponsableDepartamento[] {
+export function saveLocalResponsables(
+  list: ResponsableDepartamento[],
+  sedeId?: string,
+  dispatchEvent: boolean = true
+): ResponsableDepartamento[] {
   const tenant = (sedeId || getActiveFarmaciaId() || DEFAULT_FARMACIA_ID).trim();
   const normalized = ensureLicIrisAybarPresent(list, tenant);
   if (typeof window !== "undefined" && window.localStorage) {
     try {
       localStorage.setItem(getResponsablesStorageKey(tenant), JSON.stringify(normalized));
-      window.dispatchEvent(new Event("consumos_config_updated"));
+      if (dispatchEvent) {
+        window.dispatchEvent(new Event("consumos_config_updated"));
+      }
     } catch {}
   }
   return normalized;
@@ -208,13 +345,19 @@ export function loadLocalTiposConsumo(sedeId?: string): TipoConsumoConfig[] {
   return initial;
 }
 
-export function saveLocalTiposConsumo(list: TipoConsumoConfig[], sedeId?: string): TipoConsumoConfig[] {
+export function saveLocalTiposConsumo(
+  list: TipoConsumoConfig[],
+  sedeId?: string,
+  dispatchEvent: boolean = true
+): TipoConsumoConfig[] {
   const tenant = (sedeId || getActiveFarmaciaId() || DEFAULT_FARMACIA_ID).trim();
   const normalized = ensureDefaultTiposConsumoPresent(list, tenant);
   if (typeof window !== "undefined" && window.localStorage) {
     try {
       localStorage.setItem(getTiposConsumoStorageKey(tenant), JSON.stringify(normalized));
-      window.dispatchEvent(new Event("consumos_config_updated"));
+      if (dispatchEvent) {
+        window.dispatchEvent(new Event("consumos_config_updated"));
+      }
     } catch {}
   }
   return normalized;
@@ -250,7 +393,8 @@ export function saveLocalConsumos(list: RegistroConsumo[], sedeId?: string): Reg
 }
 
 /**
- * Sincroniza configuración de responsables y tipos de consumo con Firestore y localStorage
+ * Sincroniza configuración de responsables y tipos de consumo con Firestore y localStorage.
+ * Garantiza que ningún campo undefined sea enviado a Firestore.
  */
 export async function persistConsumosConfig(
   responsables: ResponsableDepartamento[],
@@ -258,17 +402,19 @@ export async function persistConsumosConfig(
   sedeId?: string
 ): Promise<void> {
   const tenant = (sedeId || getActiveFarmaciaId() || DEFAULT_FARMACIA_ID).trim();
-  const cleanResp = saveLocalResponsables(responsables, tenant);
-  const cleanTipos = saveLocalTiposConsumo(tiposConsumo, tenant);
+  const cleanResp = saveLocalResponsables(responsables, tenant, true);
+  const cleanTipos = saveLocalTiposConsumo(tiposConsumo, tenant, true);
 
   const canSyncFirestore = typeof window !== "undefined" && window.location.protocol !== "file:";
   if (canSyncFirestore) {
     try {
+      const firestoreSafeResp = JSON.parse(JSON.stringify(cleanResp));
+      const firestoreSafeTipos = JSON.parse(JSON.stringify(cleanTipos));
       await setDoc(
         tenantDoc("configuracion", "consumos_config", tenant),
         {
-          responsables: cleanResp,
-          tiposConsumo: cleanTipos,
+          responsables: firestoreSafeResp,
+          tiposConsumo: firestoreSafeTipos,
           updatedAt: Date.now()
         },
         { merge: true }
@@ -342,10 +488,15 @@ export async function registrarNuevoResponsableRapido(params: {
   const cleanDept = String(params.departamentoNombre || "").trim();
   const isSubalterno = Boolean(params.esSubalterno);
 
+  const localStoredList = loadLocalResponsables(tenant);
+  const currentList = params.existingResponsables
+    ? mergeResponsablesLists(params.existingResponsables, localStoredList, tenant)
+    : localStoredList;
+
   if (!cleanName) {
     return {
       exito: false,
-      listaActualizada: params.existingResponsables || loadLocalResponsables(tenant),
+      listaActualizada: currentList,
       error: isSubalterno
         ? "El nombre del subalterno es obligatorio."
         : "El nombre del responsable es obligatorio."
@@ -355,14 +506,10 @@ export async function registrarNuevoResponsableRapido(params: {
   if (!cleanDept) {
     return {
       exito: false,
-      listaActualizada: params.existingResponsables || loadLocalResponsables(tenant),
+      listaActualizada: currentList,
       error: "Debe seleccionar un departamento para asociar al personal."
     };
   }
-
-  const currentList = params.existingResponsables
-    ? ensureLicIrisAybarPresent(params.existingResponsables, tenant)
-    : loadLocalResponsables(tenant);
 
   const titularesDept = getResponsablesTitularesPorDepartamento(currentList, cleanDept);
 
@@ -392,15 +539,18 @@ export async function registrarNuevoResponsableRapido(params: {
 
   if (duplicate) {
     if (!duplicate.activo) {
-      const reactivatedObj: ResponsableDepartamento = {
-        ...duplicate,
-        activo: true,
-        esSubalterno: isSubalterno,
-        responsableSuperiorId: isSubalterno ? resolvedSuperiorId : undefined,
-        responsableSuperiorNombre: isSubalterno ? resolvedSuperiorNombre : undefined,
-        cargo: params.cargo?.trim() || duplicate.cargo,
-        updatedAt: Date.now()
-      };
+      const reactivatedObj = sanitizeResponsableItem(
+        {
+          ...duplicate,
+          activo: true,
+          esSubalterno: isSubalterno,
+          responsableSuperiorId: isSubalterno ? resolvedSuperiorId : undefined,
+          responsableSuperiorNombre: isSubalterno ? resolvedSuperiorNombre : undefined,
+          cargo: params.cargo?.trim() || duplicate.cargo,
+          updatedAt: Date.now()
+        },
+        tenant
+      );
       const reactivated = currentList.map((r) =>
         r.id === duplicate.id ? reactivatedObj : r
       );
@@ -423,23 +573,30 @@ export async function registrarNuevoResponsableRapido(params: {
     ? "Subalterno Departamental"
     : "Responsable del Departamento";
 
-  const newResp: ResponsableDepartamento = {
-    id: `resp-${normalizeTextToken(cleanName).replace(/[^a-z0-9]/g, "-")}-${Date.now().toString(36)}`,
-    nombre: cleanName,
-    cargo: (params.cargo || defaultCargo).trim(),
-    departamentoId: params.departamentoId || `dept-${normalizeTextToken(cleanDept).replace(/[^a-z0-9]/g, "-")}`,
-    departamentoNombre: cleanDept,
-    sedeId: tenant,
-    telefono: (params.telefono || "").trim(),
-    correo: (params.correo || "").trim(),
-    esSubalterno: isSubalterno,
-    responsableSuperiorId: isSubalterno ? resolvedSuperiorId : undefined,
-    responsableSuperiorNombre: isSubalterno ? resolvedSuperiorNombre : undefined,
-    permitirAsignacionEspecial: false,
-    activo: true,
-    createdAt: Date.now(),
-    creadoPor: params.creadoPor || "Sistema"
-  };
+  const nowTs = Date.now();
+  const newResp = sanitizeResponsableItem(
+    {
+      id: `resp-${normalizeTextToken(cleanName).replace(/[^a-z0-9]/g, "-")}-${nowTs.toString(36)}`,
+      nombre: cleanName,
+      cargo: (params.cargo || defaultCargo).trim(),
+      departamentoId:
+        params.departamentoId ||
+        `dept-${normalizeTextToken(cleanDept).replace(/[^a-z0-9]/g, "-")}`,
+      departamentoNombre: cleanDept,
+      sedeId: tenant,
+      telefono: (params.telefono || "").trim(),
+      correo: (params.correo || "").trim(),
+      esSubalterno: isSubalterno,
+      responsableSuperiorId: isSubalterno ? resolvedSuperiorId : undefined,
+      responsableSuperiorNombre: isSubalterno ? resolvedSuperiorNombre : undefined,
+      permitirAsignacionEspecial: false,
+      activo: true,
+      createdAt: nowTs,
+      updatedAt: nowTs,
+      creadoPor: params.creadoPor || "Sistema"
+    },
+    tenant
+  );
 
   // Si se acaba de registrar un Responsable titular y en ese departamento ya había subalternos sin responsable asociado, vincularlos automáticamente
   const nextList = [...currentList, newResp].map((r) => {
@@ -449,13 +606,17 @@ export async function registrarNuevoResponsableRapido(params: {
       normalizeTextToken(r.departamentoNombre) === normalizeTextToken(cleanDept) &&
       !r.responsableSuperiorId
     ) {
-      return {
-        ...r,
-        responsableSuperiorId: newResp.id,
-        responsableSuperiorNombre: newResp.nombre
-      };
+      return sanitizeResponsableItem(
+        {
+          ...r,
+          responsableSuperiorId: newResp.id,
+          responsableSuperiorNombre: newResp.nombre,
+          updatedAt: nowTs
+        },
+        tenant
+      );
     }
-    return r;
+    return sanitizeResponsableItem(r, tenant);
   });
 
   await persistConsumosConfig(nextList, loadLocalTiposConsumo(tenant), tenant);
