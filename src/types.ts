@@ -75,6 +75,8 @@ export interface Movimiento {
   tipoConsumo?: string;
 }
 
+export type NivelPermisoModulo = "editar" | "visualizar";
+
 export interface Usuario {
   id: string;
   nombre: string;
@@ -85,6 +87,7 @@ export interface Usuario {
   updatedAt: number;
   departamento: string;
   modulos?: string[];
+  permisosModulos?: Record<string, NivelPermisoModulo>;
   catalogos?: string[]; // IDs de catálogos habilitados
   farmaciaId?: string;
   authUid?: string;
@@ -609,6 +612,31 @@ export function isModuleAuthorized(user: Usuario | null | undefined, moduleId: s
   if (moduleId === "dashboard") return true;
   const enabled = getEnabledModules(user);
   return enabled.includes(moduleId);
+}
+
+export function getModulePermission(
+  user: Usuario | null | undefined,
+  moduleId: string
+): NivelPermisoModulo {
+  if (!user) return "visualizar";
+  if (moduleId === "dashboard") return "editar";
+  const explicit = user.permisosModulos?.[moduleId];
+  if (explicit === "visualizar" || explicit === "editar") {
+    return explicit;
+  }
+  return "editar";
+}
+
+export function canUserEditModule(user: Usuario | null | undefined, moduleId: string): boolean {
+  if (!user) return false;
+  if (!isModuleAuthorized(user, moduleId)) return false;
+  return getModulePermission(user, moduleId) === "editar";
+}
+
+export function isModuleViewOnly(user: Usuario | null | undefined, moduleId: string): boolean {
+  if (!user) return true;
+  if (!isModuleAuthorized(user, moduleId)) return true;
+  return getModulePermission(user, moduleId) === "visualizar";
 }
 
 export function resolveModuleFromSlug(rawSlug: string | null | undefined): string | null {

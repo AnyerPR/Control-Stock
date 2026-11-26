@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from "react";
-import { Usuario, Departamento, Catalogo } from "../types";
+import { Usuario, Departamento, Catalogo, NivelPermisoModulo, getModulePermission } from "../types";
 import { getActiveFarmaciaId, DEFAULT_FARMACIA_ID } from "../firebase";
-import { UserPlus, User, Users, Trash2, Key, Pen, ShieldAlert, X, CheckCircle } from "lucide-react";
+import { UserPlus, User, Users, Trash2, Key, Pen, ShieldAlert, X, CheckCircle, Eye } from "lucide-react";
 
 export const MODULOS_DISPONIBLES = [
   { id: "inventory", nombre: "Suministros (Inventario)" },
@@ -29,6 +29,7 @@ interface UserPanelProps {
     estado: "Activo" | "Inactivo";
     departamento: string;
     modulos?: string[];
+    permisosModulos?: Record<string, NivelPermisoModulo>;
     catalogos?: string[];
   }) => Promise<void>;
   onUpdateUser: (id: string, data: Partial<Usuario>) => Promise<void>;
@@ -57,6 +58,7 @@ export default function UserPanel({
   const [newState, setNewState] = useState<"Activo" | "Inactivo">("Activo");
   const [newDepartment, setNewDepartment] = useState("");
   const [newModulos, setNewModulos] = useState<string[]>(["solicitudes", "consumos", "historial"]);
+  const [newPermisosModulos, setNewPermisosModulos] = useState<Record<string, NivelPermisoModulo>>({});
   const [newCatalogos, setNewCatalogos] = useState<string[]>([]);
 
   const [editName, setEditName] = useState("");
@@ -64,6 +66,7 @@ export default function UserPanel({
   const [editState, setEditState] = useState<"Activo" | "Inactivo">("Activo");
   const [editDepartment, setEditDepartment] = useState("");
   const [editModulos, setEditModulos] = useState<string[]>([]);
+  const [editPermisosModulos, setEditPermisosModulos] = useState<Record<string, NivelPermisoModulo>>({});
   const [editCatalogos, setEditCatalogos] = useState<string[]>([]);
 
   const [newPasswordText, setNewPasswordText] = useState("");
@@ -93,13 +96,21 @@ export default function UserPanel({
     setEditDepartment(user.departamento || "Almacén y Suministro");
     
     // Set modules or default them
+    let initialMods: string[];
     if (user.modulos && Array.isArray(user.modulos)) {
-      setEditModulos(user.modulos);
+      initialMods = user.modulos;
     } else if (user.rol === "Administrador") {
-      setEditModulos(["inventory", "validacion", "dgii", "carga_masiva", "solicitudes", "consumos", "historial", "usuarios", "configuracion"]);
+      initialMods = ["inventory", "validacion", "dgii", "carga_masiva", "solicitudes", "consumos", "historial", "usuarios", "configuracion"];
     } else {
-      setEditModulos(["validacion", "solicitudes", "consumos", "historial"]);
+      initialMods = ["validacion", "solicitudes", "consumos", "historial"];
     }
+    setEditModulos(initialMods);
+
+    const initialPermisos: Record<string, NivelPermisoModulo> = {};
+    MODULOS_DISPONIBLES.forEach((m) => {
+      initialPermisos[m.id] = user.permisosModulos?.[m.id] || "editar";
+    });
+    setEditPermisosModulos(initialPermisos);
 
     // Set catalogos (normalizados por ID para que coincidan siempre con las casillas)
     if (user.catalogos && Array.isArray(user.catalogos) && user.catalogos.length > 0) {
@@ -134,10 +145,15 @@ export default function UserPanel({
     }
     // Default modules
     if (newRole === "Administrador") {
-      setNewModulos(["inventory", "validacion", "dgii", "carga_masiva", "solicitudes", "historial", "usuarios", "configuracion"]);
+      setNewModulos(["inventory", "validacion", "dgii", "carga_masiva", "solicitudes", "consumos", "historial", "usuarios", "configuracion"]);
     } else {
-      setNewModulos(["validacion", "solicitudes", "historial"]);
+      setNewModulos(["validacion", "solicitudes", "consumos", "historial"]);
     }
+    const defaultPerms: Record<string, NivelPermisoModulo> = {};
+    MODULOS_DISPONIBLES.forEach((m) => {
+      defaultPerms[m.id] = "editar";
+    });
+    setNewPermisosModulos(defaultPerms);
   };
 
   const handleAddUserSubmit = async (e: React.FormEvent) => {
@@ -164,6 +180,11 @@ export default function UserPanel({
       return;
     }
 
+    const cleanNewPermisos: Record<string, NivelPermisoModulo> = {};
+    newModulos.forEach((modId) => {
+      cleanNewPermisos[modId] = newPermisosModulos[modId] || "editar";
+    });
+
     await onAddUser({
       nombre: uName,
       usuario: uUser,
@@ -172,6 +193,7 @@ export default function UserPanel({
       estado: newState,
       departamento: uDept,
       modulos: newModulos,
+      permisosModulos: cleanNewPermisos,
       catalogos: newCatalogos
     });
 
@@ -182,6 +204,7 @@ export default function UserPanel({
     setNewState("Activo");
     setNewDepartment("");
     setNewModulos(["solicitudes", "historial"]);
+    setNewPermisosModulos({});
     setNewCatalogos([]);
     setShowAddModal(false);
   };
@@ -196,12 +219,18 @@ export default function UserPanel({
       return;
     }
 
+    const cleanEditPermisos: Record<string, NivelPermisoModulo> = {};
+    editModulos.forEach((modId) => {
+      cleanEditPermisos[modId] = editPermisosModulos[modId] || "editar";
+    });
+
     await onUpdateUser(editingUser.id, {
       nombre: editName.trim(),
       rol: editRole,
       estado: editState,
       departamento: uDept,
       modulos: editModulos,
+      permisosModulos: cleanEditPermisos,
       catalogos: editCatalogos
     });
 
@@ -342,18 +371,34 @@ export default function UserPanel({
                             usuarios: "Personal",
                             configuracion: "Configurar"
                           };
-                          return mods.map((m) => (
-                            <span
-                              key={m}
-                              className={`text-[10px] border px-2 py-0.5 rounded-full font-extrabold whitespace-nowrap ${
-                                m === "venta"
-                                  ? "bg-emerald-50 border-emerald-200 text-emerald-800"
-                                  : "bg-teal-50 border-teal-100 text-teal-800"
-                              }`}
-                            >
-                              {mapModNames[m] || m}
-                            </span>
-                          ));
+                          return mods.map((m) => {
+                            const perm = getModulePermission(u, m);
+                            const isViewOnly = perm === "visualizar";
+                            return (
+                              <span
+                                key={m}
+                                title={`${mapModNames[m] || m}: ${isViewOnly ? "Solo visualizar" : "Puede editar"}`}
+                                className={`inline-flex items-center gap-1 text-[10px] border px-2 py-0.5 rounded-full font-extrabold whitespace-nowrap ${
+                                  isViewOnly
+                                    ? "bg-amber-50 border-amber-200 text-amber-800"
+                                    : m === "venta"
+                                    ? "bg-emerald-50 border-emerald-200 text-emerald-800"
+                                    : "bg-teal-50 border-teal-100 text-teal-800"
+                                }`}
+                              >
+                                <span>{mapModNames[m] || m}</span>
+                                <span
+                                  className={`text-[8px] uppercase px-1.5 py-0.2 rounded-full font-black ${
+                                    isViewOnly
+                                      ? "bg-amber-200/70 text-amber-900"
+                                      : "bg-teal-200/60 text-teal-900"
+                                  }`}
+                                >
+                                  {isViewOnly ? "Solo ver" : "Editar"}
+                                </span>
+                              </span>
+                            );
+                          });
                         })()}
                       </div>
                       {u.catalogos && u.catalogos.length > 0 && (
@@ -556,28 +601,90 @@ export default function UserPanel({
                 </div>
               </div>
               <div>
-                <label className="block text-xs font-black uppercase text-slate-500 tracking-wider mb-2">
-                  Módulos Habilitados *
-                </label>
-                <div className="grid grid-cols-2 gap-2 bg-slate-50 p-3 rounded-2xl border border-slate-100">
+                <div className="flex items-center justify-between mb-2">
+                  <label className="block text-xs font-black uppercase text-slate-500 tracking-wider">
+                    Módulos Habilitados *
+                  </label>
+                  <span className="text-[10px] font-bold text-slate-400">
+                    Selecciona acceso: Editar o Solo visualizar
+                  </span>
+                </div>
+                <div className="space-y-2 bg-slate-50 p-3 rounded-2xl border border-slate-100">
                   {MODULOS_DISPONIBLES.map((mod) => {
                     const isChecked = newModulos.includes(mod.id);
+                    const currentPerm: NivelPermisoModulo = newPermisosModulos[mod.id] || "editar";
                     return (
-                      <label key={mod.id} className="flex items-center gap-2 text-xs font-bold text-slate-700 cursor-pointer select-none">
-                        <input
-                          type="checkbox"
-                          checked={isChecked}
-                          onChange={() => {
-                            if (isChecked) {
-                              setNewModulos(newModulos.filter((id) => id !== mod.id));
-                            } else {
-                              setNewModulos([...newModulos, mod.id]);
-                            }
-                          }}
-                          className="rounded text-teal-600 focus:ring-teal-400 border-slate-300 w-4 h-4 cursor-pointer"
-                        />
-                        <span>{mod.id === "solicitudes" && newRole === "Administrador" ? "Órdenes" : mod.nombre}</span>
-                      </label>
+                      <div
+                        key={mod.id}
+                        className={`p-2.5 rounded-xl border transition ${
+                          isChecked
+                            ? "bg-white border-teal-200 shadow-2xs"
+                            : "bg-slate-50/60 border-slate-200/70 opacity-75"
+                        }`}
+                      >
+                        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                          <label className="flex items-center gap-2.5 text-xs font-bold text-slate-800 cursor-pointer select-none">
+                            <input
+                              type="checkbox"
+                              checked={isChecked}
+                              onChange={() => {
+                                if (isChecked) {
+                                  setNewModulos(newModulos.filter((id) => id !== mod.id));
+                                } else {
+                                  setNewModulos([...newModulos, mod.id]);
+                                  setNewPermisosModulos((prev) => ({
+                                    ...prev,
+                                    [mod.id]: prev[mod.id] || "editar"
+                                  }));
+                                }
+                              }}
+                              className="rounded text-teal-600 focus:ring-teal-400 border-slate-300 w-4 h-4 cursor-pointer shrink-0"
+                            />
+                            <span className="leading-snug">
+                              {mod.id === "solicitudes" && newRole === "Administrador" ? "Órdenes" : mod.nombre}
+                            </span>
+                          </label>
+
+                          {isChecked && (
+                            <div className="inline-flex items-center rounded-lg bg-slate-100 p-0.5 border border-slate-200 shrink-0 self-start sm:self-center">
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  setNewPermisosModulos((prev) => ({
+                                    ...prev,
+                                    [mod.id]: "editar"
+                                  }))
+                                }
+                                className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-[10px] font-extrabold transition cursor-pointer ${
+                                  currentPerm === "editar"
+                                    ? "bg-teal-600 text-white shadow-2xs"
+                                    : "text-slate-600 hover:text-slate-900"
+                                }`}
+                              >
+                                <Pen className="w-3 h-3" />
+                                <span>Editar</span>
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  setNewPermisosModulos((prev) => ({
+                                    ...prev,
+                                    [mod.id]: "visualizar"
+                                  }))
+                                }
+                                className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-[10px] font-extrabold transition cursor-pointer ${
+                                  currentPerm === "visualizar"
+                                    ? "bg-amber-600 text-white shadow-2xs"
+                                    : "text-slate-600 hover:text-slate-900"
+                                }`}
+                              >
+                                <Eye className="w-3 h-3" />
+                                <span>Solo visualizar</span>
+                              </button>
+                            </div>
+                          )}
+                        </div>
+                      </div>
                     );
                   })}
                 </div>
@@ -710,28 +817,90 @@ export default function UserPanel({
                 </div>
               </div>
               <div>
-                <label className="block text-xs font-black uppercase text-slate-500 tracking-wider mb-2">
-                  Módulos Habilitados *
-                </label>
-                <div className="grid grid-cols-2 gap-2 bg-slate-50 p-3 rounded-2xl border border-slate-100">
+                <div className="flex items-center justify-between mb-2">
+                  <label className="block text-xs font-black uppercase text-slate-500 tracking-wider">
+                    Módulos Habilitados *
+                  </label>
+                  <span className="text-[10px] font-bold text-slate-400">
+                    Selecciona acceso: Editar o Solo visualizar
+                  </span>
+                </div>
+                <div className="space-y-2 bg-slate-50 p-3 rounded-2xl border border-slate-100">
                   {MODULOS_DISPONIBLES.map((mod) => {
                     const isChecked = editModulos.includes(mod.id);
+                    const currentPerm: NivelPermisoModulo = editPermisosModulos[mod.id] || "editar";
                     return (
-                      <label key={mod.id} className="flex items-center gap-2 text-xs font-bold text-slate-700 cursor-pointer select-none">
-                        <input
-                          type="checkbox"
-                          checked={isChecked}
-                          onChange={() => {
-                            if (isChecked) {
-                              setEditModulos(editModulos.filter((id) => id !== mod.id));
-                            } else {
-                              setEditModulos([...editModulos, mod.id]);
-                            }
-                          }}
-                          className="rounded text-teal-600 focus:ring-teal-400 border-slate-300 w-4 h-4 cursor-pointer"
-                        />
-                        <span>{mod.id === "solicitudes" && editRole === "Administrador" ? "Órdenes" : mod.nombre}</span>
-                      </label>
+                      <div
+                        key={mod.id}
+                        className={`p-2.5 rounded-xl border transition ${
+                          isChecked
+                            ? "bg-white border-teal-200 shadow-2xs"
+                            : "bg-slate-50/60 border-slate-200/70 opacity-75"
+                        }`}
+                      >
+                        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                          <label className="flex items-center gap-2.5 text-xs font-bold text-slate-800 cursor-pointer select-none">
+                            <input
+                              type="checkbox"
+                              checked={isChecked}
+                              onChange={() => {
+                                if (isChecked) {
+                                  setEditModulos(editModulos.filter((id) => id !== mod.id));
+                                } else {
+                                  setEditModulos([...editModulos, mod.id]);
+                                  setEditPermisosModulos((prev) => ({
+                                    ...prev,
+                                    [mod.id]: prev[mod.id] || "editar"
+                                  }));
+                                }
+                              }}
+                              className="rounded text-teal-600 focus:ring-teal-400 border-slate-300 w-4 h-4 cursor-pointer shrink-0"
+                            />
+                            <span className="leading-snug">
+                              {mod.id === "solicitudes" && editRole === "Administrador" ? "Órdenes" : mod.nombre}
+                            </span>
+                          </label>
+
+                          {isChecked && (
+                            <div className="inline-flex items-center rounded-lg bg-slate-100 p-0.5 border border-slate-200 shrink-0 self-start sm:self-center">
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  setEditPermisosModulos((prev) => ({
+                                    ...prev,
+                                    [mod.id]: "editar"
+                                  }))
+                                }
+                                className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-[10px] font-extrabold transition cursor-pointer ${
+                                  currentPerm === "editar"
+                                    ? "bg-teal-600 text-white shadow-2xs"
+                                    : "text-slate-600 hover:text-slate-900"
+                                }`}
+                              >
+                                <Pen className="w-3 h-3" />
+                                <span>Editar</span>
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  setEditPermisosModulos((prev) => ({
+                                    ...prev,
+                                    [mod.id]: "visualizar"
+                                  }))
+                                }
+                                className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-[10px] font-extrabold transition cursor-pointer ${
+                                  currentPerm === "visualizar"
+                                    ? "bg-amber-600 text-white shadow-2xs"
+                                    : "text-slate-600 hover:text-slate-900"
+                                }`}
+                              >
+                                <Eye className="w-3 h-3" />
+                                <span>Solo visualizar</span>
+                              </button>
+                            </div>
+                          )}
+                        </div>
+                      </div>
                     );
                   })}
                 </div>

@@ -565,8 +565,10 @@ export default function ConsumosPanel({
       setCatalogSearchQuery("");
       playSound("positive");
       showToast(
-        options.createDeptAndSelect
-          ? `Catálogo y Departamento "${name}" creado y seleccionado en Consumos.`
+        options.createDeptAndSelect && options.addCatalogToSearch === false
+          ? `Departamento "${name}" creado y seleccionado en Consumos.`
+          : options.createDeptAndSelect
+          ? `Departamento "${name}" creado y seleccionado en Consumos.`
           : `Catálogo "${name}" creado y añadido al buscador de Consumos.`
       );
     } finally {
@@ -1714,13 +1716,13 @@ export default function ConsumosPanel({
 
                       {filteredDepartamentosForDropdown.length === 0 && (
                         <div className="px-3.5 py-3 text-xs text-slate-500 font-semibold text-center">
-                          No existe ningún departamento o catálogo con el nombre{" "}
+                          No existe ningún departamento con el nombre{" "}
                           <strong className="text-slate-800">«{deptSearchQuery.trim()}»</strong>.
                         </div>
                       )}
                     </div>
 
-                    {/* Botón "Crear Catálogo" cuando el nombre escrito no existe */}
+                    {/* Botón "Crear Departamento" cuando el nombre escrito no existe */}
                     {deptSearchQuery.trim().length > 0 && !exactDeptMatchExists && (
                       <div className="p-2.5 bg-teal-50/80 border-t border-teal-200 space-y-1.5">
                         <button
@@ -1729,7 +1731,7 @@ export default function ConsumosPanel({
                           onClick={() =>
                             handleCreateCatalogOrDeptInPlace(deptSearchQuery.trim(), {
                               createDeptAndSelect: true,
-                              addCatalogToSearch: true
+                              addCatalogToSearch: false
                             })
                           }
                           className="w-full py-2 px-3 rounded-xl bg-teal-700 hover:bg-teal-800 disabled:bg-slate-300 text-white text-xs font-extrabold flex items-center justify-center gap-1.5 transition cursor-pointer shadow-xs"
@@ -1738,11 +1740,11 @@ export default function ConsumosPanel({
                           <span>
                             {creatingCatalogInPlace
                               ? "Creando..."
-                              : `Crear Catálogo "${deptSearchQuery.trim()}"`}
+                              : `Crear Departamento "${deptSearchQuery.trim()}"`}
                           </span>
                         </button>
                         <p className="text-[10px] text-teal-800 font-semibold text-center">
-                          Se creará el catálogo y departamento <strong>«{deptSearchQuery.trim()}»</strong> sin salir del módulo.
+                          Se creará el departamento <strong>«{deptSearchQuery.trim()}»</strong> sin salir del módulo.
                         </p>
                       </div>
                     )}

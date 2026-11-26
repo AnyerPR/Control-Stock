@@ -23,6 +23,9 @@ import {
   getEnabledModules,
   getUserAvailableCatalogos,
   isModuleAuthorized,
+  NivelPermisoModulo,
+  canUserEditModule,
+  isModuleViewOnly,
   resolveModuleFromSlug,
   matchesCatalog,
   APP_VERSION
@@ -111,7 +114,8 @@ import {
   AlertCircle,
   Receipt,
   Menu,
-  ShieldCheck
+  ShieldCheck,
+  Eye
 } from "lucide-react";
 
 // Filtros del catálogo
@@ -632,13 +636,18 @@ export default function App() {
         const currentCatalogos = currentUser.catalogos || [];
         const catalogosChanged = JSON.stringify(dbCatalogos) !== JSON.stringify(currentCatalogos);
 
+        const dbPermisos = dbUser.permisosModulos || {};
+        const currentPermisos = currentUser.permisosModulos || {};
+        const permisosChanged = JSON.stringify(dbPermisos) !== JSON.stringify(currentPermisos);
+
         if (
           dbUser.nombre !== currentUser.nombre ||
           dbUser.rol !== currentUser.rol ||
           dbUser.estado !== currentUser.estado ||
           dbUser.departamento !== currentUser.departamento ||
           modulosChanged ||
-          catalogosChanged
+          catalogosChanged ||
+          permisosChanged
         ) {
           setCurrentUser(dbUser);
           localStorage.setItem("current_user", JSON.stringify(dbUser));
@@ -1633,6 +1642,11 @@ export default function App() {
   // Product verifications
   const handleToggleVerification = async (e: React.MouseEvent, productCode: string) => {
     e.stopPropagation();
+    if (isModuleViewOnly(currentUser, "inventory")) {
+      showToast("Modo Solo Visualización: No tienes permisos para editar en Suministros.");
+      playSound("negative");
+      return;
+    }
     const prod = products.find((p) => p.codigo === productCode);
     if (!prod) return;
 
@@ -1802,15 +1816,21 @@ export default function App() {
     estado: "Activo" | "Inactivo";
     departamento: string;
     modulos?: string[];
+    permisosModulos?: Record<string, NivelPermisoModulo>;
     catalogos?: string[];
   }) => {
-    if (!isModuleAuthorized(currentUser, "usuarios")) {
-      showToast("No tienes permisos para administrar usuarios.");
+    if (!canUserEditModule(currentUser, "usuarios")) {
+      showToast("No tienes permisos de edición para administrar usuarios.");
       return;
     }
     const isLocalFileMode = typeof window !== "undefined" && window.location.protocol === "file:";
     try {
       const hash = await hashPassword(data.passwordText);
+      const assignedModulos =
+        data.modulos ||
+        (data.rol === "Administrador"
+          ? ["inventory", "carga_masiva", "solicitudes", "historial", "usuarios", "configuracion"]
+          : ["solicitudes", "historial"]);
       const newUser: Usuario = {
         id: `user-${data.usuario.toLowerCase()}`,
         nombre: data.nombre,
@@ -1821,7 +1841,8 @@ export default function App() {
         updatedAt: Date.now(),
         departamento: data.departamento,
         farmaciaId: activeFarmaciaId,
-        modulos: data.modulos || (data.rol === "Administrador" ? ["inventory", "carga_masiva", "solicitudes", "historial", "usuarios", "configuracion"] : ["solicitudes", "historial"]),
+        modulos: assignedModulos,
+        permisosModulos: data.permisosModulos || {},
         catalogos: data.catalogos || []
       };
       if (isLocalFileMode) {
@@ -1839,8 +1860,8 @@ export default function App() {
   };
 
   const handleUpdateUser = async (id: string, data: Partial<Usuario>) => {
-    if (!isModuleAuthorized(currentUser, "usuarios")) {
-      showToast("No tienes permisos para modificar usuarios.");
+    if (!canUserEditModule(currentUser, "usuarios")) {
+      showToast("No tienes permisos de edición para modificar usuarios.");
       return;
     }
     const isLocalFileMode = typeof window !== "undefined" && window.location.protocol === "file:";
@@ -1859,8 +1880,8 @@ export default function App() {
   };
 
   const handleChangeUserPassword = async (id: string, passwordText: string) => {
-    if (!isModuleAuthorized(currentUser, "usuarios")) {
-      showToast("No tienes permisos para cambiar contraseñas.");
+    if (!canUserEditModule(currentUser, "usuarios")) {
+      showToast("No tienes permisos de edición para cambiar contraseñas.");
       return;
     }
     const isLocalFileMode = typeof window !== "undefined" && window.location.protocol === "file:";
@@ -1884,8 +1905,8 @@ export default function App() {
   };
 
   const handleDeleteUser = async (id: string) => {
-    if (!isModuleAuthorized(currentUser, "usuarios")) {
-      showToast("No tienes permisos para eliminar usuarios.");
+    if (!canUserEditModule(currentUser, "usuarios")) {
+      showToast("No tienes permisos de edición para eliminar usuarios.");
       return;
     }
     const isLocalFileMode = typeof window !== "undefined" && window.location.protocol === "file:";
@@ -1927,6 +1948,11 @@ export default function App() {
   // Delete product entirely
   const handleDeleteProduct = async () => {
     if (!selectedProductCode) return;
+    if (isModuleViewOnly(currentUser, "inventory")) {
+      showToast("Modo Solo Visualización: No tienes permisos para eliminar suministros.");
+      playSound("negative");
+      return;
+    }
     const prod = products.find((p) => p.codigo === selectedProductCode);
     if (!prod) return;
 
@@ -2018,8 +2044,8 @@ export default function App() {
   };
 
   const handleToggleAdjusted = async (lotId: string, checked: boolean) => {
-    if (!selectedProductCode || !currentUser || !getEnabledModules(currentUser).includes("inventory")) {
-      showToast("No tienes permisos para ajustar este inventario.");
+    if (!selectedProductCode || !currentUser || !canUserEditModule(currentUser, "inventory")) {
+      showToast("Modo Solo Visualización: No tienes permisos para ajustar este inventario.");
       playSound("negative");
       return;
     }
@@ -2203,6 +2229,11 @@ export default function App() {
 
   // Delete Lot inside Detail Modal
   const handleDeleteLot = (lotId: string) => {
+    if (isModuleViewOnly(currentUser, "inventory")) {
+      showToast("Modo Solo Visualización: No tienes permisos para eliminar lotes.");
+      playSound("negative");
+      return;
+    }
     if (confirm("¿Deseas eliminar este lote? Esta acción no se puede deshacer.")) {
       setEditLotes((prev) => prev.filter((l) => l.id !== lotId));
       playSound("negative");
@@ -2212,6 +2243,11 @@ export default function App() {
   // Add Lot inside Detail Modal
   const handleAddLot = async () => {
     if (!selectedProductCode) return;
+    if (isModuleViewOnly(currentUser, "inventory")) {
+      showToast("Modo Solo Visualización: No tienes permisos para agregar lotes.");
+      playSound("negative");
+      return;
+    }
     const lotNum = newLotNum.trim();
     const qty = Number(newLotQty);
     const qtyF = newLotQtyF.trim() !== "" ? Number(newLotQtyF) : qty;
@@ -2268,6 +2304,11 @@ export default function App() {
   // Save details and lot changes
   const handleSaveDetails = async () => {
     if (!selectedProductCode) return;
+    if (isModuleViewOnly(currentUser, "inventory")) {
+      showToast("Modo Solo Visualización: No tienes permisos para guardar cambios en Suministros.");
+      playSound("negative");
+      return;
+    }
     const prod = products.find((p) => p.codigo === selectedProductCode);
     if (!prod) return;
 
@@ -2547,6 +2588,11 @@ export default function App() {
   // Confirm entire invoice entry (Section 3 Footer of Image 3)
   const handleAddProductSubmit = async () => {
     if (confirmingEntry) return;
+    if (isModuleViewOnly(currentUser, "inventory")) {
+      showToast("Modo Solo Visualización: No tienes permisos para registrar entradas en Suministros.");
+      playSound("negative");
+      return;
+    }
 
     const cleanInvoiceNum = invoiceNum.trim().toUpperCase();
     const cleanInvoiceDate = invoiceDate || new Date().toISOString().slice(0, 10);
@@ -3604,7 +3650,59 @@ export default function App() {
             </div>
           )}
 
-          <main className="w-full min-w-0 max-w-6xl mx-auto px-3 sm:px-6 py-4 sm:py-6">
+          <main
+            className="w-full min-w-0 max-w-6xl mx-auto px-3 sm:px-6 py-4 sm:py-6"
+            onSubmitCapture={(e) => {
+              if (isModuleViewOnly(currentUser, activeTab)) {
+                e.preventDefault();
+                e.stopPropagation();
+                playSound("negative");
+                showToast("Modo Solo Visualización: No tienes permisos de edición en este módulo.");
+              }
+            }}
+            onClickCapture={(e) => {
+              if (!isModuleViewOnly(currentUser, activeTab)) return;
+              const target = e.target as HTMLElement | null;
+              const btn = target?.closest("button") as HTMLButtonElement | null;
+              if (!btn) return;
+              if (btn.type === "submit") {
+                e.preventDefault();
+                e.stopPropagation();
+                playSound("negative");
+                showToast("Modo Solo Visualización: No tienes permisos de edición en este módulo.");
+                return;
+              }
+              const text = (btn.innerText || btn.getAttribute("title") || btn.getAttribute("aria-label") || "")
+                .trim()
+                .toLowerCase();
+              const isSafeReadAction =
+                /^(ver|detalles|cerrar|cancelar|limpiar|exportar|pdf|excel|word|imprimir|descargar|filtrar|buscar|cargar más|ver todos|anterior|siguiente|volver)\b/i.test(
+                  text
+                ) ||
+                /\b(exportar|descargar|pdf|excel|word|imprimir|vista previa)\b/i.test(text);
+              if (isSafeReadAction) return;
+              const isWriteAction =
+                /\b(guardar|registrar|crear|eliminar|borrar|editar|modificar|actualizar|confirmar|aprobar|rechazar|autorizar|aplicar|añadir|agregar|importar|procesar|emitir|anular|despachar|entregar|nuevo|nueva|subir|escanear|analizar)\b/i.test(
+                  text
+                );
+              if (isWriteAction) {
+                e.preventDefault();
+                e.stopPropagation();
+                playSound("negative");
+                showToast("Modo Solo Visualización: No tienes permisos de edición en este módulo.");
+              }
+            }}
+          >
+            {isModuleViewOnly(currentUser, activeTab) && (
+              <div className="mb-4 rounded-2xl bg-amber-50 border border-amber-300 px-4 py-3 flex items-center gap-3 text-amber-900 shadow-2xs">
+                <Eye className="w-5 h-5 text-amber-600 shrink-0" />
+                <div className="text-xs sm:text-sm font-bold leading-snug">
+                  <span className="font-black uppercase tracking-wider">Modo Solo Visualización:</span>{" "}
+                  Tienes este módulo habilitado únicamente para consulta. Las funciones de edición, creación y eliminación están desactivadas para tu usuario.
+                </div>
+              </div>
+            )}
+
             {/* Contenido Principal */}
             {activeTab === "dashboard" && (
               <DashboardPanel
@@ -4136,7 +4234,11 @@ export default function App() {
           </main>
 
           {/* Floating Register Button */}
-          {activeTab === "inventory" && !selectedBlock && !showOrder && enabledModules.includes("inventory") && (
+          {activeTab === "inventory" &&
+            !selectedBlock &&
+            !showOrder &&
+            enabledModules.includes("inventory") &&
+            canUserEditModule(currentUser, "inventory") && (
             <button
               onClick={() => {
                 setShowProductAdd(true);
@@ -4196,13 +4298,15 @@ export default function App() {
                       <ShieldCheck className="w-3.5 h-3.5" />
                       <span>Validar</span>
                     </button>
-                    <button
-                      onClick={handleDeleteProduct}
-                      className="p-2 text-rose-500 hover:text-rose-700 hover:bg-rose-50 rounded-xl active:scale-90 transition cursor-pointer"
-                      title="Eliminar suministro"
-                    >
-                      <Trash2 className="w-5 h-5" />
-                    </button>
+                    {canUserEditModule(currentUser, "inventory") && (
+                      <button
+                        onClick={handleDeleteProduct}
+                        className="p-2 text-rose-500 hover:text-rose-700 hover:bg-rose-50 rounded-xl active:scale-90 transition cursor-pointer"
+                        title="Eliminar suministro"
+                      >
+                        <Trash2 className="w-5 h-5" />
+                      </button>
+                    )}
                   </div>
                 </div>
 
@@ -4240,16 +4344,18 @@ export default function App() {
                       <h3 className="text-sm font-extrabold text-slate-800 uppercase tracking-wider">
                         Lotes Registrados ({editLotes.length})
                       </h3>
-                      <button
-                        onClick={() => {
-                          setShowLotAdd(true);
-                          playSound("open");
-                        }}
-                        className="flex items-center gap-1.5 text-xs font-extrabold text-teal-800 bg-teal-50 hover:bg-teal-100 px-3.5 py-2 rounded-xl active:scale-95 transition border border-teal-200 cursor-pointer"
-                      >
-                        <Plus className="w-4 h-4" />
-                        <span>Agregar Lote</span>
-                      </button>
+                      {canUserEditModule(currentUser, "inventory") && (
+                        <button
+                          onClick={() => {
+                            setShowLotAdd(true);
+                            playSound("open");
+                          }}
+                          className="flex items-center gap-1.5 text-xs font-extrabold text-teal-800 bg-teal-50 hover:bg-teal-100 px-3.5 py-2 rounded-xl active:scale-95 transition border border-teal-200 cursor-pointer"
+                        >
+                          <Plus className="w-4 h-4" />
+                          <span>Agregar Lote</span>
+                        </button>
+                      )}
                     </div>
 
                     <div className="space-y-4">
@@ -4438,12 +4544,19 @@ export default function App() {
                 </div>
 
                 <div className="px-6 py-4 border-t border-slate-200 bg-white shrink-0">
-                  <button
-                    onClick={handleSaveDetails}
-                    className="w-full bg-teal-700 hover:bg-teal-600 active:scale-95 transition text-white font-extrabold text-sm rounded-xl py-3.5 uppercase tracking-wider flex items-center justify-center gap-2 shadow-sm cursor-pointer"
-                  >
-                    Guardar Cambios
-                  </button>
+                  {canUserEditModule(currentUser, "inventory") ? (
+                    <button
+                      onClick={handleSaveDetails}
+                      className="w-full bg-teal-700 hover:bg-teal-600 active:scale-95 transition text-white font-extrabold text-sm rounded-xl py-3.5 uppercase tracking-wider flex items-center justify-center gap-2 shadow-sm cursor-pointer"
+                    >
+                      Guardar Cambios
+                    </button>
+                  ) : (
+                    <div className="w-full bg-amber-50 border border-amber-200 text-amber-800 font-bold text-xs rounded-xl py-3 px-4 text-center flex items-center justify-center gap-2">
+                      <Eye className="w-4 h-4 text-amber-600 shrink-0" />
+                      <span>Modo Solo Visualización: No puedes modificar este suministro</span>
+                    </div>
+                  )}
                 </div>
               </div>
             </div>
