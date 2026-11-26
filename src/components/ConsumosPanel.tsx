@@ -13,7 +13,7 @@ import {
   matchesCatalog
 } from "../types";
 import { DEFAULT_FARMACIA_ID, getActiveFarmaciaId, tenantCollection, tenantDoc } from "../firebase";
-import { onSnapshot } from "firebase/firestore";
+import { doc, onSnapshot, setDoc } from "firebase/firestore";
 import {
   agregarNotaCorreccionConsumo,
   calcularResumenPorDepartamento,
@@ -104,17 +104,56 @@ export default function ConsumosPanel({
   // Sub-pestañas principales del módulo Consumos
   const [activeSubTab, setActiveSubTab] = useState<"registro" | "historial" | "resumen">("registro");
 
+  // Departamentos y catálogos creados desde el mismo módulo de Consumos (hidratados al instante)
+  const [localCreatedDepts, setLocalCreatedDepts] = useState<Departamento[]>(() => {
+    if (typeof window === "undefined" || !window.localStorage) return [];
+    try {
+      const raw = localStorage.getItem("offline_departamentos");
+      return raw ? JSON.parse(raw) : [];
+    } catch {
+      return [];
+    }
+  });
+
+  const [localCreatedCatalogos, setLocalCreatedCatalogos] = useState<Catalogo[]>(() => {
+    if (typeof window === "undefined" || !window.localStorage) return [];
+    try {
+      const raw = localStorage.getItem("offline_catalogos");
+      return raw ? JSON.parse(raw) : [];
+    } catch {
+      return [];
+    }
+  });
+
   // Departamentos combinados sin duplicar
   const departamentosDisponibles = useMemo(() => {
-    const merged = mergeDepartamentosSinDuplicados(departamentos);
+    const merged = mergeDepartamentosSinDuplicados([...(departamentos || []), ...localCreatedDepts]);
     return merged.filter((d) => d.activo !== false);
-  }, [departamentos]);
+  }, [departamentos, localCreatedDepts]);
 
-  // Catálogos permitidos para el usuario actual
-  const availableCatalogos = useMemo(
-    () => getUserAvailableCatalogos(currentUser, catalogos),
-    [currentUser, catalogos]
-  );
+  // Catálogos combinados (props + creados in-situ)
+  const allCatalogosCombined = useMemo(() => {
+    const map = new Map<string, Catalogo>();
+    [...(catalogos || []), ...localCreatedCatalogos].forEach((c) => {
+      if (c && c.id && c.nombre) {
+        map.set(c.id, c);
+      }
+    });
+    return Array.from(map.values());
+  }, [catalogos, localCreatedCatalogos]);
+
+  // Catálogos permitidos para el usuario actual (incluyendo cualquier catálogo recién creado desde Consumos)
+  const availableCatalogos = useMemo(() => {
+    const base = getUserAvailableCatalogos(currentUser, allCatalogosCombined);
+    const map = new Map<string, Catalogo>();
+    base.forEach((c) => map.set(c.id, c));
+    localCreatedCatalogos.forEach((c) => {
+      if (c && c.id && c.activo !== false && !map.has(c.id)) {
+        map.set(c.id, c);
+      }
+    });
+    return Array.from(map.values());
+  }, [currentUser, allCatalogosCombined, localCreatedCatalogos]);
 
   // Estado sincronizado de Responsables, Tipos de Consumo y Registros de Consumo
   const [responsables, setResponsables] = useState<ResponsableDepartamento[]>(() =>
@@ -268,16 +307,233 @@ export default function ConsumosPanel({
     new Date().toLocaleDateString("en-CA")
   );
   const [observaciones, setObservaciones] = useState<string>("");
-  const [selectedCatalogId, setSelectedCatalogId] = useState<string>(
-    activeCatalogId || availableCatalogos[0]?.id || "default-cat"
-  );
-
-  // Sincronizar catálogo activo cuando cambia externamente
-  useEffect(() => {
-    if (activeCatalogId && availableCatalogos.some((c) => c.id === activeCatalogId)) {
-      setSelectedCatalogId(activeCatalogId);
+  // ============================================================================
+  // MULTI-CATÁLOGO EN BUSCADOR DE PRODUCTOS Y BUSCADOR DINÁMICO DE DEPARTAMENTO / CATÁLOGO
+  // ============================================================================
+  const [selectedCatalogIds, setSelectedCatalogIds] = useState<string[]>(() => {
+    if (typeof window !== "undefined" && window.localStorage) {
+      try {
+        const raw = localStorage.getItem(`consumos_selected_cats_${activeSedeId}`);
+        if (raw) {
+          const parsed = JSON.parse(raw);
+          if (Array.isArray(parsed) && parsed.length > 0) {
+            return parsed;
+          }
+        }
+      } catch {}
     }
-  }, [activeCatalogId, availableCatalogos]);
+    return [activeCatalogId || availableCatalogos[0]?.id || "default-cat"];
+  });
+
+  const [showCatalogSelectorPanel, setShowCatalogSelectorPanel] = useState<boolean>(false);
+  const [catalogSearchQuery, setCatalogSearchQuery] = useState<string>("");
+  const [creatingCatalogInPlace, setCreatingCatalogInPlace] = useState<boolean>(false);
+
+  // Buscador dinámico en "Departamento Destinatario *"
+  const [deptSearchQuery, setDeptSearchQuery] = useState<string>("");
+  const [isDeptDropdownOpen, setIsDeptDropdownOpen] = useState<boolean>(false);
+  const deptDropdownRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    const handleClickOutside = (ev: MouseEvent) => {
+      if (deptDropdownRef.current && !deptDropdownRef.current.contains(ev.target as Node)) {
+        setIsDeptDropdownOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", handleClickOutside);
+    return () => document.removeEventListener("mousedown", handleClickOutside);
+  }, []);
+
+  // Asegurar que siempre haya al menos un catálogo válido seleccionado
+  const effectiveSelectedCatalogIds = useMemo(() => {
+    const valid = selectedCatalogIds.filter((id) =>
+      availableCatalogos.some((c) => c.id === id)
+    );
+    if (valid.length > 0) return valid;
+    const fallback = activeCatalogId || availableCatalogos[0]?.id || "default-cat";
+    return [fallback];
+  }, [selectedCatalogIds, availableCatalogos, activeCatalogId]);
+
+  const primarySelectedCatalogId = effectiveSelectedCatalogIds[0] || activeCatalogId || "default-cat";
+
+  useEffect(() => {
+    if (typeof window !== "undefined" && window.localStorage && effectiveSelectedCatalogIds.length > 0) {
+      try {
+        localStorage.setItem(
+          `consumos_selected_cats_${activeSedeId}`,
+          JSON.stringify(effectiveSelectedCatalogIds)
+        );
+      } catch {}
+    }
+  }, [effectiveSelectedCatalogIds, activeSedeId]);
+
+  const handleToggleCatalogInSearch = (catId: string) => {
+    setSelectedCatalogIds((prev) => {
+      const currentValid = prev.filter((id) => availableCatalogos.some((c) => c.id === id));
+      const base = currentValid.length > 0 ? currentValid : [primarySelectedCatalogId];
+      const exists = base.includes(catId);
+      if (exists) {
+        if (base.length <= 1) {
+          showToast("Debe mantener al menos un catálogo activo en el buscador.");
+          return base;
+        }
+        return base.filter((id) => id !== catId);
+      } else {
+        return [...base, catId];
+      }
+    });
+    playSound("click");
+  };
+
+  const handleSelectAllCatalogosInSearch = () => {
+    const allIds = availableCatalogos.map((c) => c.id);
+    if (allIds.length === 0) return;
+    setSelectedCatalogIds(allIds);
+    playSound("click");
+  };
+
+  const filteredDepartamentosForDropdown = useMemo(() => {
+    const q = normalizeTextToken(deptSearchQuery);
+    if (!q) return departamentosDisponibles;
+    return departamentosDisponibles.filter((d) =>
+      normalizeTextToken(d.nombre).includes(q)
+    );
+  }, [departamentosDisponibles, deptSearchQuery]);
+
+  const exactDeptMatchExists = useMemo(() => {
+    const q = normalizeTextToken(deptSearchQuery);
+    if (!q) return true;
+    return departamentosDisponibles.some((d) => normalizeTextToken(d.nombre) === q);
+  }, [departamentosDisponibles, deptSearchQuery]);
+
+  const filteredCatalogosForDropdown = useMemo(() => {
+    const q = normalizeTextToken(catalogSearchQuery);
+    if (!q) return availableCatalogos;
+    return availableCatalogos.filter(
+      (c) =>
+        normalizeTextToken(c.nombre).includes(q) ||
+        normalizeTextToken(c.descripcion || "").includes(q)
+    );
+  }, [availableCatalogos, catalogSearchQuery]);
+
+  const exactCatalogMatchExists = useMemo(() => {
+    const q = normalizeTextToken(catalogSearchQuery);
+    if (!q) return true;
+    return allCatalogosCombined.some((c) => normalizeTextToken(c.nombre) === q);
+  }, [allCatalogosCombined, catalogSearchQuery]);
+
+  // Crear catálogo (y opcionalmente departamento destinatario) sin salir del módulo de Consumos
+  const handleCreateCatalogOrDeptInPlace = async (
+    rawName: string,
+    options: { createDeptAndSelect?: boolean; addCatalogToSearch?: boolean }
+  ) => {
+    const name = rawName.trim();
+    if (!name || creatingCatalogInPlace) return;
+
+    setCreatingCatalogInPlace(true);
+    try {
+      const isLocalFileMode = typeof window !== "undefined" && window.location.protocol === "file:";
+      const slug = name
+        .toLowerCase()
+        .normalize("NFD")
+        .replace(/[\u0300-\u036f]/g, "")
+        .replace(/[^a-z0-9]/g, "-")
+        .replace(/-+/g, "-")
+        .replace(/^-|-$/g, "");
+
+      // 1. Si se solicitó desde el buscador de Departamento Destinatario *, crear/seleccionar el Departamento
+      if (options.createDeptAndSelect) {
+        const existingDept = departamentosDisponibles.find(
+          (d) => normalizeTextToken(d.nombre) === normalizeTextToken(name)
+        );
+        if (existingDept) {
+          setSelectedDepartamento(existingDept.nombre);
+        } else {
+          const deptId = `dept-${slug || "nuevo"}-${Date.now().toString(36)}`;
+          const newDept: Departamento = {
+            id: deptId,
+            nombre: name,
+            activo: true,
+            createdAt: Date.now()
+          };
+
+          setLocalCreatedDepts((prev) => [...prev, newDept]);
+          setSelectedDepartamento(newDept.nombre);
+
+          if (typeof window !== "undefined" && window.localStorage) {
+            try {
+              const currentDepts = mergeDepartamentosSinDuplicados([
+                ...departamentosDisponibles,
+                newDept
+              ]);
+              localStorage.setItem("offline_departamentos", JSON.stringify(currentDepts));
+              window.dispatchEvent(new Event("offline_departamentos_update"));
+            } catch {}
+          }
+
+          if (!isLocalFileMode) {
+            try {
+              await setDoc(doc(tenantCollection("departamentos", activeSedeId), deptId), newDept);
+            } catch (err) {
+              console.warn("Aviso guardando nuevo departamento en Firestore:", err);
+            }
+          }
+        }
+      }
+
+      // 2. Crear o activar el Catálogo y añadirlo al buscador multi-catálogo
+      if (options.addCatalogToSearch !== false) {
+        const existingCat = allCatalogosCombined.find(
+          (c) => normalizeTextToken(c.nombre) === normalizeTextToken(name)
+        );
+        if (existingCat) {
+          setSelectedCatalogIds((prev) =>
+            prev.includes(existingCat.id) ? prev : [...prev, existingCat.id]
+          );
+        } else {
+          const catId = `cat-${slug || "nuevo"}-${Date.now().toString(36)}`;
+          const newCat: Catalogo = {
+            id: catId,
+            nombre: name,
+            descripcion: "Catálogo creado desde el módulo de Consumos",
+            activo: true,
+            createdAt: Date.now()
+          };
+
+          setLocalCreatedCatalogos((prev) => [...prev, newCat]);
+          setSelectedCatalogIds((prev) => (prev.includes(catId) ? prev : [...prev, catId]));
+
+          if (typeof window !== "undefined" && window.localStorage) {
+            try {
+              const currentCats = [...allCatalogosCombined, newCat];
+              localStorage.setItem("offline_catalogos", JSON.stringify(currentCats));
+              window.dispatchEvent(new Event("offline_catalogos_update"));
+            } catch {}
+          }
+
+          if (!isLocalFileMode) {
+            try {
+              await setDoc(doc(tenantCollection("catalogos", activeSedeId), catId), newCat);
+            } catch (err) {
+              console.warn("Aviso guardando nuevo catálogo en Firestore:", err);
+            }
+          }
+        }
+      }
+
+      setDeptSearchQuery("");
+      setIsDeptDropdownOpen(false);
+      setCatalogSearchQuery("");
+      playSound("positive");
+      showToast(
+        options.createDeptAndSelect
+          ? `Catálogo y Departamento "${name}" creado y seleccionado en Consumos.`
+          : `Catálogo "${name}" creado y añadido al buscador de Consumos.`
+      );
+    } finally {
+      setCreatingCatalogInPlace(false);
+    }
+  };
 
   // Modal / Panel rápido para botón "Nuevo" debajo de Responsable del departamento
   const [showNuevoResponsableModal, setShowNuevoResponsableModal] = useState<boolean>(false);
@@ -377,30 +633,49 @@ export default function ConsumosPanel({
     selectedTipoConsumoObj?.categoria === "Externo" ||
     Boolean(selectedTipoConsumoObj?.requiereDestinoExterno);
 
-  // Filtrar productos por catálogo seleccionado y búsqueda
+  const getProductCatalogInfo = (prod: Producto): { id: string; nombre: string } => {
+    const rawCatId = prod.catalogId || "default-cat";
+    const matchedCat =
+      allCatalogosCombined.find((c) => matchesCatalog(rawCatId, c.id, allCatalogosCombined)) ||
+      allCatalogosCombined.find((c) => c.id === rawCatId) ||
+      availableCatalogos[0];
+    return {
+      id: matchedCat?.id || rawCatId,
+      nombre: matchedCat?.nombre || "Medicamentos e Insumos"
+    };
+  };
+
+  // Filtrar productos por TODOS los catálogos seleccionados simultáneamente en el buscador
   const catalogProducts = useMemo(() => {
     return (products || []).filter((p) =>
-      matchesCatalog(p.catalogId || "default-cat", selectedCatalogId, catalogos)
+      effectiveSelectedCatalogIds.some((catId) =>
+        matchesCatalog(p.catalogId || "default-cat", catId, allCatalogosCombined)
+      )
     );
-  }, [products, selectedCatalogId, catalogos]);
+  }, [products, effectiveSelectedCatalogIds, allCatalogosCombined]);
 
   const filteredProductsSearch = useMemo(() => {
     const q = normalizeTextToken(productSearch);
     return catalogProducts
       .filter((p) => {
         if (!q) return true;
+        const catInfo = getProductCatalogInfo(p);
         return (
           normalizeTextToken(p.nombre).includes(q) ||
           normalizeTextToken(p.codigo).includes(q) ||
-          normalizeTextToken(p.descripcion).includes(q)
+          normalizeTextToken(p.descripcion).includes(q) ||
+          normalizeTextToken(catInfo.nombre).includes(q)
         );
       })
-      .slice(0, 40);
-  }, [catalogProducts, productSearch]);
+      .slice(0, 50);
+  }, [catalogProducts, productSearch, allCatalogosCombined]);
 
   const selectedProductObj = useMemo(
-    () => catalogProducts.find((p) => p.codigo === selectedProductCode) || null,
-    [catalogProducts, selectedProductCode]
+    () =>
+      catalogProducts.find((p) => p.codigo === selectedProductCode) ||
+      (products || []).find((p) => p.codigo === selectedProductCode) ||
+      null,
+    [catalogProducts, products, selectedProductCode]
   );
 
   // Calcular cuánto stock ya está reservado en draftItems para cada producto+lote
@@ -462,7 +737,7 @@ export default function ConsumosPanel({
       return;
     }
 
-    const catObj = catalogos.find((c) => c.id === selectedCatalogId);
+    const prodCatInfo = getProductCatalogInfo(selectedProductObj);
     const existingIndex = draftItems.findIndex(
       (it) => it.productoCodigo === selectedProductObj.codigo && it.loteId === selectedLotObj.id
     );
@@ -484,8 +759,8 @@ export default function ConsumosPanel({
         productoCodigo: selectedProductObj.codigo,
         productoNombre: selectedProductObj.nombre,
         descripcion: selectedProductObj.descripcion,
-        catalogId: selectedCatalogId,
-        catalogNombre: catObj?.nombre || "Medicamentos e Insumos",
+        catalogId: prodCatInfo.id,
+        catalogNombre: prodCatInfo.nombre,
         loteId: selectedLotObj.id,
         numeroLote: selectedLotObj.numeroLote,
         loteFisico: selectedLotObj.loteFisico,
@@ -499,7 +774,7 @@ export default function ConsumosPanel({
 
     setCantidadInput(1);
     playSound("action");
-    showToast(`"${selectedProductObj.nombre}" agregado a la lista de consumo.`);
+    showToast(`"${selectedProductObj.nombre}" (${prodCatInfo.nombre}) agregado a la lista de consumo.`);
   };
 
   const handleUpdateDraftItemQuantity = (itemId: string, newQty: number) => {
@@ -650,7 +925,20 @@ export default function ConsumosPanel({
     playSound("action");
 
     try {
-      const catObj = catalogos.find((c) => c.id === selectedCatalogId);
+      const uniqueItemCatIds = Array.from(
+        new Set(draftItems.map((it) => it.catalogId).filter(Boolean) as string[])
+      );
+      const uniqueItemCatNames = Array.from(
+        new Set(draftItems.map((it) => it.catalogNombre).filter(Boolean) as string[])
+      );
+      const resolvedCatalogId =
+        uniqueItemCatIds[0] || primarySelectedCatalogId || "default-cat";
+      const catObj = allCatalogosCombined.find((c) => c.id === resolvedCatalogId);
+      const resolvedCatalogNombre =
+        uniqueItemCatNames.length > 1
+          ? `Multi-Catálogo (${uniqueItemCatNames.join(", ")})`
+          : uniqueItemCatNames[0] || catObj?.nombre || "Medicamentos e Insumos";
+
       const deptObj = departamentosDisponibles.find(
         (d) => normalizeTextToken(d.nombre) === normalizeTextToken(selectedDepartamento)
       );
@@ -667,8 +955,8 @@ export default function ConsumosPanel({
         tipoConsumo: selectedTipoConsumoObj,
         destinoExternoInstitucion: isConsumoExterno ? destinoExternoInstitucion : undefined,
         destinoExternoPersona: isConsumoExterno ? destinoExternoPersona : undefined,
-        catalogId: selectedCatalogId,
-        catalogNombre: catObj?.nombre || "Medicamentos e Insumos",
+        catalogId: resolvedCatalogId,
+        catalogNombre: resolvedCatalogNombre,
         items: draftItems,
         observaciones,
         usuarioRegistro: `${currentUser.nombre} (${currentUser.usuario})`,
@@ -850,7 +1138,13 @@ export default function ConsumosPanel({
           }
         }
 
-        if (filterCatalogId !== "TODOS" && !matchesCatalog(c.catalogId, filterCatalogId, catalogos)) {
+        if (
+          filterCatalogId !== "TODOS" &&
+          !matchesCatalog(c.catalogId, filterCatalogId, allCatalogosCombined) &&
+          !(c.items || []).some((it) =>
+            matchesCatalog(it.catalogId || c.catalogId, filterCatalogId, allCatalogosCombined)
+          )
+        ) {
           return false;
         }
 
@@ -1217,26 +1511,129 @@ export default function ConsumosPanel({
                 </div>
               </div>
 
-              {/* Departamento Destinatario */}
-              <div>
-                <label className="block text-[10px] font-black uppercase text-slate-500 tracking-wider mb-1">
-                  Departamento Destinatario *
-                </label>
-                <select
-                  value={selectedDepartamento}
-                  disabled={!canChooseAnyDepartment}
-                  onChange={(e) => {
-                    setSelectedDepartamento(e.target.value);
-                    playSound("click");
-                  }}
-                  className="w-full bg-slate-50 disabled:bg-slate-100 rounded-xl border border-slate-200 px-3.5 py-2.5 text-xs font-extrabold text-slate-800 outline-none focus:bg-white focus:ring-2 focus:ring-teal-400 cursor-pointer"
-                >
-                  {departamentosDisponibles.map((dept) => (
-                    <option key={dept.id} value={dept.nombre}>
-                      {dept.nombre}
-                    </option>
-                  ))}
-                </select>
+              {/* Departamento Destinatario * con Buscador Dinámico y creación in-situ */}
+              <div ref={deptDropdownRef} className="relative space-y-1.5">
+                <div className="flex items-center justify-between gap-2">
+                  <label className="block text-[10px] font-black uppercase text-slate-500 tracking-wider">
+                    Departamento Destinatario *
+                  </label>
+                  <span className="text-[10px] font-extrabold text-teal-700 bg-teal-50 border border-teal-200 px-2 py-0.5 rounded-full truncate max-w-[190px]">
+                    Actual: {selectedDepartamento}
+                  </span>
+                </div>
+
+                <div className="relative">
+                  <Search className="w-4 h-4 text-teal-600 absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none" />
+                  <input
+                    type="text"
+                    disabled={!canChooseAnyDepartment}
+                    value={isDeptDropdownOpen ? deptSearchQuery : selectedDepartamento}
+                    onFocus={() => {
+                      if (!canChooseAnyDepartment) return;
+                      setDeptSearchQuery("");
+                      setIsDeptDropdownOpen(true);
+                    }}
+                    onChange={(e) => {
+                      setDeptSearchQuery(e.target.value);
+                      if (!isDeptDropdownOpen) setIsDeptDropdownOpen(true);
+                    }}
+                    placeholder="Buscar departamento o escribir nombre para crear..."
+                    className="w-full bg-slate-50 disabled:bg-slate-100 rounded-xl border border-slate-200 pl-10 pr-9 py-2.5 text-xs font-extrabold text-slate-800 outline-none focus:bg-white focus:ring-2 focus:ring-teal-400"
+                  />
+                  {canChooseAnyDepartment && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (isDeptDropdownOpen) {
+                          setIsDeptDropdownOpen(false);
+                          setDeptSearchQuery("");
+                        } else {
+                          setDeptSearchQuery("");
+                          setIsDeptDropdownOpen(true);
+                        }
+                      }}
+                      className="absolute right-2.5 top-1/2 -translate-y-1/2 p-1 text-slate-400 hover:text-slate-700 rounded-lg cursor-pointer"
+                      title="Desplegar buscador de departamentos"
+                    >
+                      <ChevronDown
+                        className={`w-4 h-4 transition-transform ${
+                          isDeptDropdownOpen ? "rotate-180 text-teal-600" : ""
+                        }`}
+                      />
+                    </button>
+                  )}
+                </div>
+
+                {/* Lista desplegable del buscador dinámico de Departamento Destinatario * */}
+                {isDeptDropdownOpen && canChooseAnyDepartment && (
+                  <div className="z-30 w-full bg-white border border-teal-200 rounded-2xl shadow-lg overflow-hidden divide-y divide-slate-100">
+                    <div className="max-h-52 overflow-y-auto divide-y divide-slate-100">
+                      {filteredDepartamentosForDropdown.map((dept) => {
+                        const isSelected =
+                          normalizeTextToken(dept.nombre) ===
+                          normalizeTextToken(selectedDepartamento);
+                        return (
+                          <button
+                            key={dept.id}
+                            type="button"
+                            onClick={() => {
+                              setSelectedDepartamento(dept.nombre);
+                              setDeptSearchQuery("");
+                              setIsDeptDropdownOpen(false);
+                              playSound("click");
+                            }}
+                            className={`w-full px-3.5 py-2.5 text-left text-xs font-bold flex items-center justify-between gap-2 transition cursor-pointer ${
+                              isSelected
+                                ? "bg-teal-600 text-white"
+                                : "hover:bg-teal-50/70 text-slate-800"
+                            }`}
+                          >
+                            <span className="truncate">{dept.nombre}</span>
+                            {isSelected && (
+                              <span className="text-[10px] font-black uppercase px-2 py-0.5 rounded-full bg-white/20 text-white shrink-0">
+                                Seleccionado
+                              </span>
+                            )}
+                          </button>
+                        );
+                      })}
+
+                      {filteredDepartamentosForDropdown.length === 0 && (
+                        <div className="px-3.5 py-3 text-xs text-slate-500 font-semibold text-center">
+                          No existe ningún departamento o catálogo con el nombre{" "}
+                          <strong className="text-slate-800">«{deptSearchQuery.trim()}»</strong>.
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Botón "Crear Catálogo" cuando el nombre escrito no existe */}
+                    {deptSearchQuery.trim().length > 0 && !exactDeptMatchExists && (
+                      <div className="p-2.5 bg-teal-50/80 border-t border-teal-200 space-y-1.5">
+                        <button
+                          type="button"
+                          disabled={creatingCatalogInPlace}
+                          onClick={() =>
+                            handleCreateCatalogOrDeptInPlace(deptSearchQuery.trim(), {
+                              createDeptAndSelect: true,
+                              addCatalogToSearch: true
+                            })
+                          }
+                          className="w-full py-2 px-3 rounded-xl bg-teal-700 hover:bg-teal-800 disabled:bg-slate-300 text-white text-xs font-extrabold flex items-center justify-center gap-1.5 transition cursor-pointer shadow-xs"
+                        >
+                          <Plus className="w-4 h-4 shrink-0" />
+                          <span>
+                            {creatingCatalogInPlace
+                              ? "Creando..."
+                              : `Crear Catálogo "${deptSearchQuery.trim()}"`}
+                          </span>
+                        </button>
+                        <p className="text-[10px] text-teal-800 font-semibold text-center">
+                          Se creará el catálogo y departamento <strong>«{deptSearchQuery.trim()}»</strong> sin salir del módulo.
+                        </p>
+                      </div>
+                    )}
+                  </div>
+                )}
               </div>
 
               {/* Responsable del Departamento + Botón "Nuevo" debajo */}
@@ -1563,42 +1960,175 @@ export default function ConsumosPanel({
           {/* Columna Derecha (7 cols): Selección de Materiales e Insumos + Resumen y Confirmación */}
           <div className="lg:col-span-7 space-y-5">
             <div className="bg-white rounded-3xl p-4 sm:p-6 border border-slate-200 shadow-sm space-y-5">
-              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-100 pb-3">
-                <div>
-                  <h3 className="text-base font-extrabold text-slate-900 flex items-center gap-2">
-                    <Package className="w-5 h-5 text-teal-600" />
-                    <span>2. Selección de Materiales, Suministros e Insumos</span>
-                  </h3>
-                  <p className="text-[11px] text-slate-500 mt-0.5">
-                    Consulte la existencia disponible por lote y agregue los productos a entregar.
-                  </p>
+              <div className="space-y-3 border-b border-slate-100 pb-3">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                  <div>
+                    <h3 className="text-base font-extrabold text-slate-900 flex items-center gap-2">
+                      <Package className="w-5 h-5 text-teal-600" />
+                      <span>2. Selección de Materiales, Suministros e Insumos</span>
+                    </h3>
+                    <p className="text-[11px] text-slate-500 mt-0.5">
+                      Añada uno o varios catálogos al buscador para entregar productos de distintos catálogos en un mismo consumo.
+                    </p>
+                  </div>
+
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    {availableCatalogos.length > 1 && (
+                      <button
+                        type="button"
+                        onClick={handleSelectAllCatalogosInSearch}
+                        className={`px-2.5 py-1.5 rounded-xl text-[11px] font-extrabold border transition cursor-pointer flex items-center gap-1 ${
+                          effectiveSelectedCatalogIds.length === availableCatalogos.length
+                            ? "bg-teal-700 text-white border-teal-700"
+                            : "bg-slate-50 text-slate-700 border-slate-200 hover:bg-teal-50 hover:border-teal-200"
+                        }`}
+                      >
+                        <Layers className="w-3.5 h-3.5" />
+                        <span>Todos los catálogos ({availableCatalogos.length})</span>
+                      </button>
+                    )}
+
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setShowCatalogSelectorPanel((prev) => !prev);
+                        playSound("click");
+                      }}
+                      className="px-2.5 py-1.5 rounded-xl text-[11px] font-extrabold bg-teal-50 hover:bg-teal-100 text-teal-800 border border-teal-200 transition cursor-pointer flex items-center gap-1"
+                    >
+                      <Plus className="w-3.5 h-3.5 text-teal-600" />
+                      <span>Añadir / Buscar Catálogo</span>
+                    </button>
+                  </div>
                 </div>
 
-                {/* Selector de Catálogo */}
-                <div className="flex items-center gap-2">
-                  <Layers className="w-4 h-4 text-teal-600 shrink-0" />
-                  <select
-                    value={selectedCatalogId}
-                    onChange={(e) => {
-                      const nextCat = e.target.value;
-                      setSelectedCatalogId(nextCat);
-                      setSelectedProductCode("");
-                      setSelectedLotId("");
-                      if (onSelectCatalog) onSelectCatalog(nextCat);
-                      playSound("click");
-                    }}
-                    className="bg-teal-50 border border-teal-200 text-teal-900 rounded-xl px-3 py-2 text-xs font-extrabold outline-none focus:ring-2 focus:ring-teal-400 cursor-pointer"
-                  >
-                    {availableCatalogos.map((cat) => (
-                      <option key={cat.id} value={cat.id}>
-                        Catálogo: {cat.nombre}
-                      </option>
-                    ))}
-                  </select>
+                {/* Chips interactivos de catálogos para activar varios al mismo tiempo */}
+                <div className="flex flex-wrap items-center gap-1.5">
+                  <span className="text-[10px] font-black uppercase text-slate-400 tracking-wider mr-1 flex items-center gap-1">
+                    <Layers className="w-3.5 h-3.5 text-teal-600" />
+                    Catálogos activos ({effectiveSelectedCatalogIds.length}):
+                  </span>
+                  {availableCatalogos.map((cat) => {
+                    const isCatActive = effectiveSelectedCatalogIds.includes(cat.id);
+                    return (
+                      <button
+                        key={cat.id}
+                        type="button"
+                        onClick={() => handleToggleCatalogInSearch(cat.id)}
+                        className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-extrabold border transition cursor-pointer ${
+                          isCatActive
+                            ? "bg-teal-600 text-white border-teal-600 shadow-2xs"
+                            : "bg-slate-50 text-slate-600 border-slate-200 hover:bg-slate-100"
+                        }`}
+                        title={
+                          isCatActive
+                            ? `Quitar catálogo "${cat.nombre}" del buscador`
+                            : `Añadir catálogo "${cat.nombre}" al buscador`
+                        }
+                      >
+                        <span>{cat.nombre}</span>
+                        {isCatActive ? (
+                          <CheckCircle2 className="w-3 h-3 text-teal-100 shrink-0" />
+                        ) : (
+                          <Plus className="w-3 h-3 text-slate-400 shrink-0" />
+                        )}
+                      </button>
+                    );
+                  })}
                 </div>
+
+                {/* Buscador dinámico de catálogos + botón "Crear Catálogo" si no existe */}
+                {showCatalogSelectorPanel && (
+                  <div className="bg-teal-50/60 border border-teal-200 rounded-2xl p-3 space-y-2.5">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-[10px] font-black uppercase tracking-wider text-teal-900 flex items-center gap-1.5">
+                        <Layers className="w-3.5 h-3.5 text-teal-700" />
+                        Buscador Dinámico de Catálogos (Marque varios o cree uno nuevo)
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => setShowCatalogSelectorPanel(false)}
+                        className="text-slate-400 hover:text-slate-700 p-1 cursor-pointer"
+                      >
+                        <X className="w-4 h-4" />
+                      </button>
+                    </div>
+
+                    <div className="relative">
+                      <Search className="w-3.5 h-3.5 text-teal-600 absolute left-3 top-1/2 -translate-y-1/2" />
+                      <input
+                        type="text"
+                        value={catalogSearchQuery}
+                        onChange={(e) => setCatalogSearchQuery(e.target.value)}
+                        placeholder="Buscar catálogo para añadir o escribir nombre de nuevo catálogo..."
+                        className="w-full bg-white rounded-xl border border-teal-200 pl-9 pr-3 py-2 text-xs font-bold text-slate-800 outline-none focus:ring-2 focus:ring-teal-400"
+                      />
+                    </div>
+
+                    <div className="max-h-36 overflow-y-auto divide-y divide-teal-100/80 bg-white rounded-xl border border-teal-100">
+                      {filteredCatalogosForDropdown.map((cat) => {
+                        const isCatActive = effectiveSelectedCatalogIds.includes(cat.id);
+                        return (
+                          <button
+                            key={cat.id}
+                            type="button"
+                            onClick={() => handleToggleCatalogInSearch(cat.id)}
+                            className="w-full px-3 py-2 text-left text-xs font-bold flex items-center justify-between gap-2 hover:bg-teal-50/70 transition cursor-pointer"
+                          >
+                            <div className="flex items-center gap-2 min-w-0">
+                              <input
+                                type="checkbox"
+                                readOnly
+                                checked={isCatActive}
+                                className="w-3.5 h-3.5 rounded border-slate-300 text-teal-700 pointer-events-none"
+                              />
+                              <span className="truncate text-slate-800">{cat.nombre}</span>
+                            </div>
+                            <span
+                              className={`text-[10px] font-black uppercase px-2 py-0.5 rounded-full ${
+                                isCatActive
+                                  ? "bg-teal-100 text-teal-800"
+                                  : "bg-slate-100 text-slate-500"
+                              }`}
+                            >
+                              {isCatActive ? "En buscador" : "Añadir"}
+                            </span>
+                          </button>
+                        );
+                      })}
+                      {filteredCatalogosForDropdown.length === 0 && (
+                        <div className="px-3 py-2.5 text-xs text-slate-500 font-semibold text-center">
+                          No existe ningún catálogo llamado{" "}
+                          <strong className="text-slate-800">«{catalogSearchQuery.trim()}»</strong>.
+                        </div>
+                      )}
+                    </div>
+
+                    {catalogSearchQuery.trim().length > 0 && !exactCatalogMatchExists && (
+                      <button
+                        type="button"
+                        disabled={creatingCatalogInPlace}
+                        onClick={() =>
+                          handleCreateCatalogOrDeptInPlace(catalogSearchQuery.trim(), {
+                            createDeptAndSelect: false,
+                            addCatalogToSearch: true
+                          })
+                        }
+                        className="w-full py-2 px-3 rounded-xl bg-teal-700 hover:bg-teal-800 disabled:bg-slate-300 text-white text-xs font-extrabold flex items-center justify-center gap-1.5 transition cursor-pointer shadow-xs"
+                      >
+                        <Plus className="w-4 h-4 shrink-0" />
+                        <span>
+                          {creatingCatalogInPlace
+                            ? "Creando..."
+                            : `Crear Catálogo "${catalogSearchQuery.trim()}"`}
+                        </span>
+                      </button>
+                    )}
+                  </div>
+                )}
               </div>
 
-              {/* Buscador de Productos */}
+              {/* Buscador de Productos (busca en todos los catálogos activos simultáneamente) */}
               <div className="space-y-3">
                 <div className="relative">
                   <Search className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
@@ -1606,12 +2136,12 @@ export default function ConsumosPanel({
                     type="text"
                     value={productSearch}
                     onChange={(e) => setProductSearch(e.target.value)}
-                    placeholder="Buscar producto por nombre, código o descripción..."
+                    placeholder={`Buscar producto por nombre, código o descripción en ${effectiveSelectedCatalogIds.length} catálogo(s)...`}
                     className="w-full bg-slate-50 rounded-xl border border-slate-200 pl-10 pr-4 py-2.5 text-xs font-bold text-slate-800 outline-none focus:bg-white focus:ring-2 focus:ring-teal-400"
                   />
                 </div>
 
-                {/* Lista rápida de productos del catálogo */}
+                {/* Lista rápida de productos de los catálogos seleccionados */}
                 <div className="max-h-52 overflow-y-auto border border-slate-200 rounded-2xl divide-y divide-slate-100 bg-slate-50/50">
                   {filteredProductsSearch.map((prod) => {
                     const totalAvail = (prod.lotes || []).reduce(
@@ -1619,6 +2149,7 @@ export default function ConsumosPanel({
                       0
                     );
                     const isSelected = selectedProductCode === prod.codigo;
+                    const prodCat = getProductCatalogInfo(prod);
 
                     return (
                       <button
@@ -1632,7 +2163,7 @@ export default function ConsumosPanel({
                         }`}
                       >
                         <div className="min-w-0 flex-1">
-                          <div className="flex items-center gap-2">
+                          <div className="flex flex-wrap items-center gap-1.5">
                             <span
                               className={`text-[10px] font-mono font-black px-2 py-0.5 rounded-md ${
                                 isSelected
@@ -1644,6 +2175,15 @@ export default function ConsumosPanel({
                             </span>
                             <span className="text-xs font-extrabold truncate">
                               {prod.nombre}
+                            </span>
+                            <span
+                              className={`text-[9px] font-black uppercase px-2 py-0.5 rounded-full ${
+                                isSelected
+                                  ? "bg-teal-800/70 text-teal-100"
+                                  : "bg-slate-200/80 text-slate-700"
+                              }`}
+                            >
+                              {prodCat.nombre}
                             </span>
                           </div>
                           {prod.descripcion && (
@@ -1674,7 +2214,7 @@ export default function ConsumosPanel({
                   })}
                   {filteredProductsSearch.length === 0 && (
                     <div className="p-6 text-center text-xs text-slate-400 font-semibold">
-                      No se encontraron productos en este catálogo con el criterio buscado.
+                      No se encontraron productos en los catálogos seleccionados con el criterio buscado.
                     </div>
                   )}
                 </div>
@@ -1686,7 +2226,7 @@ export default function ConsumosPanel({
                   <div className="flex flex-wrap items-center justify-between gap-2">
                     <div>
                       <span className="text-[10px] font-black uppercase text-teal-800 tracking-wider">
-                        Producto Seleccionado
+                        Producto Seleccionado • {getProductCatalogInfo(selectedProductObj).nombre}
                       </span>
                       <h4 className="text-sm font-black text-slate-900">
                         {selectedProductObj.nombre}{" "}
@@ -1790,9 +2330,16 @@ export default function ConsumosPanel({
                       {draftItems.map((it) => (
                         <tr key={it.id} className="hover:bg-slate-50/80 group">
                           <td className="sticky left-0 z-10 bg-white group-hover:bg-slate-50 px-3.5 py-2.5 max-w-[190px] sm:max-w-[260px] shadow-[2px_0_5px_-2px_rgba(0,0,0,0.08)]">
-                            <span className="font-mono font-black text-teal-700 text-[11px] block">
-                              {it.productoCodigo}
-                            </span>
+                            <div className="flex items-center gap-1.5">
+                              <span className="font-mono font-black text-teal-700 text-[11px]">
+                                {it.productoCodigo}
+                              </span>
+                              {it.catalogNombre && (
+                                <span className="text-[9px] font-black uppercase px-1.5 py-0.5 rounded bg-slate-100 text-slate-600 truncate max-w-[120px]">
+                                  {it.catalogNombre}
+                                </span>
+                              )}
+                            </div>
                             <span className="font-bold text-slate-800 block truncate">
                               {it.productoNombre}
                             </span>
